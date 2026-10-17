@@ -10,24 +10,46 @@ import {
   Horizon,
 } from '@stellar/stellar-sdk';
 import { stroopsToXlm } from '@/lib/stroops';
-import { clientEnv as env } from '@/lib/clientEnv';
+import { getStellarDeploymentConfig, type StellarDeploymentConfig } from '@/lib/clientEnv';
 
 export { stroopsToXlm as stroopsToDisplay } from '@/lib/stroops';
 
-const RPC_URL =
-  env.NEXT_PUBLIC_STELLAR_RPC_URL || 'https://soroban-testnet.stellar.org';
-export const CONTRACT_ID =
-  env.NEXT_PUBLIC_FIAT_BRIDGE_CONTRACT ||
-  'CAWYXBN4PSVXD7NIYEWVFFIIIEUCC6PUN3IMG3J2WHKDB4NVIISMXBPR';
-// XLM SAC address — the token used by the bridge (stored on-chain after init)
-export const XLM_SAC_ID =
-  env.NEXT_PUBLIC_XLM_SAC_CONTRACT ||
-  'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
-
-// Stellar Testnet passphrase — switch to Networks.PUBLIC for mainnet
-const NETWORK_PASSPHRASE = Networks.TESTNET;
+const deploymentConfig = getStellarDeploymentConfig();
+const RPC_URL = deploymentConfig.rpcUrl;
+export const CONTRACT_ID = deploymentConfig.contractId;
+export const XLM_SAC_ID = deploymentConfig.xlmSacId;
+export const NETWORK_PASSPHRASE = deploymentConfig.networkPassphrase;
 
 export const BRIDGE_LIMIT_WARNING_PERCENT = 80;
+
+export interface VerificationResult {
+  isValid: boolean;
+  reason?:
+    | 'MISSING_CONFIG'
+    | 'NETWORK_MISMATCH'
+    | 'UNKNOWN_NETWORK'
+    | 'RPC_MISMATCH'
+    | 'CONTRACT_INVALID'
+    | 'CONTRACT_NOT_FOUND'
+    | 'RPC_UNAVAILABLE';
+  message?: string;
+  recoveryGuidance?: string;
+  details?: {
+    configuredNetwork: string;
+    configuredPassphrase: string;
+    walletPassphrase?: string;
+    rpcPassphrase?: string;
+    contractId: string;
+  };
+}
+
+export interface TxStatusResult {
+  status: 'confirmed' | 'failed' | 'not_found' | 'unknown';
+  hash: string;
+  error?: string;
+  ledger?: number;
+}
+
 
 // Dummy source account used for simulating read-only contract calls.
 // This is a well-known Stellar Foundation testnet account and does not
@@ -165,6 +187,186 @@ async function buildAndSimulate(
   };
 }
 
+export async function checkTransactionStatus(
+  hash: string,
+): Promise<TxStatusResult> {
+  try {
+    const res = await server.getTransaction(hash);
+    if (res.status === rpc.Api.GetTransactionStatus.SUCCESS) {
+      return {
+        status: 'confirmed',
+        hash,
+        ledger: (res as unknown as { latestLedger?: number; ledger?: number }).latestLedger ||
+          (res as unknown as { latestLedger?: number; ledger?: number }).ledger,
+      };
+    }
+    if (res.status === rpc.Api.GetTransactionStatus.FAILED) {
+      return {
+        status: 'failed',
+        hash,
+        error: 'Transaction failed on-chain',
+      };
+    }
+    if (res.status === rpc.Api.GetTransactionStatus.NOT_FOUND) {
+      return {
+        status: 'not_found',
+        hash,
+      };
+    }
+    return {
+      status: 'unknown',
+      hash,
+    };
+  } catch (err) {
+    return {
+      status: 'unknown',
+      hash,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+export async function verifyNetworkAndContractIdentity(
+  walletPassphrase?: string,
+): Promise<VerificationResult> {
+  const config = getStellarDeploymentConfig();
+
+  // 1. Validate configuration source
+  if (!config.contractId || !config.networkPassphrase || !config.rpcUrl) {
+    return {
+      isValid: false,
+      reason: 'MISSING_CONFIG',
+      message: 'Missing required contract or network configuration.',
+      recoveryGuidance:
+        'Verify your environment variables (NEXT_PUBLIC_FIAT_BRIDGE_CONTRACT and NEXT_PUBLIC_STELLAR_NETWORK_PASSPHRASE).',
+      details: {
+        configuredNetwork: config.network,
+        configuredPassphrase: config.networkPassphrase,
+        walletPassphrase,
+        contractId: config.contractId,
+      },
+    };
+  }
+
+  // Validate contract ID format (Stellar contract address format: starts with C, 56 characters)
+  if (!/^C[A-Z0-9]{55}$/.test(config.contractId)) {
+    return {
+      isValid: false,
+      reason: 'CONTRACT_INVALID',
+      message: `Configured contract ID "${config.contractId}" is not a valid Stellar contract address.`,
+      recoveryGuidance:
+        'Please verify that NEXT_PUBLIC_FIAT_BRIDGE_CONTRACT is set to a valid Soroban contract ID starting with "C".',
+      details: {
+        configuredNetwork: config.network,
+        configuredPassphrase: config.networkPassphrase,
+        walletPassphrase,
+        contractId: config.contractId,
+      },
+    };
+  }
+
+  // 2. Validate wallet chain identity if provided
+  if (walletPassphrase) {
+    if (walletPassphrase !== config.networkPassphrase) {
+      const isKnownNetwork =
+        walletPassphrase === Networks.TESTNET ||
+        walletPassphrase === Networks.PUBLIC ||
+        walletPassphrase === 'Standalone Network ; February 2017';
+      const reason = isKnownNetwork ? 'NETWORK_MISMATCH' : 'UNKNOWN_NETWORK';
+      return {
+        isValid: false,
+        reason,
+        message: `Wallet network mismatch: connected to "${walletPassphrase}", but application expects "${config.networkPassphrase}".`,
+        recoveryGuidance: `Switch your Freighter wallet network to ${config.network} (${config.networkPassphrase}).`,
+        details: {
+          configuredNetwork: config.network,
+          configuredPassphrase: config.networkPassphrase,
+          walletPassphrase,
+          contractId: config.contractId,
+        },
+      };
+    }
+  }
+
+  // 3. Verify RPC chain identity
+  try {
+    const rpcNetwork = await server.getNetwork();
+    if (rpcNetwork.passphrase !== config.networkPassphrase) {
+      return {
+        isValid: false,
+        reason: 'RPC_MISMATCH',
+        message: `RPC node network passphrase "${rpcNetwork.passphrase}" does not match configured passphrase "${config.networkPassphrase}".`,
+        recoveryGuidance:
+          'Ensure NEXT_PUBLIC_STELLAR_RPC_URL points to an RPC node on the configured network.',
+        details: {
+          configuredNetwork: config.network,
+          configuredPassphrase: config.networkPassphrase,
+          walletPassphrase,
+          rpcPassphrase: rpcNetwork.passphrase,
+          contractId: config.contractId,
+        },
+      };
+    }
+  } catch (err) {
+    return {
+      isValid: false,
+      reason: 'RPC_UNAVAILABLE',
+      message: `Failed to contact Stellar RPC node at ${config.rpcUrl}: ${err instanceof Error ? err.message : String(err)}`,
+      recoveryGuidance:
+        'Check network connectivity and verify the Soroban RPC URL.',
+      details: {
+        configuredNetwork: config.network,
+        configuredPassphrase: config.networkPassphrase,
+        walletPassphrase,
+        contractId: config.contractId,
+      },
+    };
+  }
+
+  // 4. Verify contract metadata and existence on chain
+  try {
+    const wasm = await server.getContractWasmByContractId(config.contractId);
+    if (!wasm) {
+      return {
+        isValid: false,
+        reason: 'CONTRACT_NOT_FOUND',
+        message: `Contract "${config.contractId}" was not found on ${config.network}.`,
+        recoveryGuidance: `Deploy the contract to ${config.network} or update the contract ID configuration.`,
+        details: {
+          configuredNetwork: config.network,
+          configuredPassphrase: config.networkPassphrase,
+          walletPassphrase,
+          contractId: config.contractId,
+        },
+      };
+    }
+  } catch (err) {
+    return {
+      isValid: false,
+      reason: 'CONTRACT_NOT_FOUND',
+      message: `Failed to verify contract "${config.contractId}" on-chain: ${err instanceof Error ? err.message : String(err)}`,
+      recoveryGuidance:
+        'Verify that the contract is deployed and initialized on the configured network.',
+      details: {
+        configuredNetwork: config.network,
+        configuredPassphrase: config.networkPassphrase,
+        walletPassphrase,
+        contractId: config.contractId,
+      },
+    };
+  }
+
+  return {
+    isValid: true,
+    details: {
+      configuredNetwork: config.network,
+      configuredPassphrase: config.networkPassphrase,
+      walletPassphrase,
+      contractId: config.contractId,
+    },
+  };
+}
+
 export async function pollTransaction(
   hash: string,
   maxRetries: number = 20,
@@ -186,6 +388,7 @@ export async function pollTransaction(
   }
   return hash;
 }
+
 
 /** Submit a signed XDR and wait for confirmation. */
 async function submitAndWait(
@@ -275,6 +478,12 @@ export async function depositToContract(
   signTx: (xdr: string) => Promise<string>,
   onHashKnown?: (hash: string) => void,
 ): Promise<string> {
+  const verification = await verifyNetworkAndContractIdentity();
+  if (!verification.isValid) {
+    throw new Error(
+      `Cannot execute write action: ${verification.message} Recovery: ${verification.recoveryGuidance}`,
+    );
+  }
   await validateBridgeAmountLimit(amount);
   const contract = new Contract(CONTRACT_ID);
   const op = contract.call(
@@ -300,6 +509,12 @@ export async function withdrawFromContract(
   signTx: (xdr: string) => Promise<string>,
   onHashKnown?: (hash: string) => void,
 ): Promise<string> {
+  const verification = await verifyNetworkAndContractIdentity();
+  if (!verification.isValid) {
+    throw new Error(
+      `Cannot execute write action: ${verification.message} Recovery: ${verification.recoveryGuidance}`,
+    );
+  }
   const contract = new Contract(CONTRACT_ID);
   const op = contract.call(
     'withdraw',

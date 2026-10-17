@@ -25,12 +25,15 @@ export const useChatHistory = () => {
     sessionsRef.current = historyState.sessions;
   }, [historyState.sessions]);
 
-  // Load history from localStorage on mount
+  // Load history from localStorage when mounted or when account/network changes
   useEffect(() => {
-    const loaded = ChatHistoryManager.loadFromLocalStorage();
+    const loaded = ChatHistoryManager.loadFromLocalStorage(
+      connection.address,
+      connection.network,
+    );
     setHistoryState(loaded);
     setIsLoaded(true);
-  }, []);
+  }, [connection.address, connection.network]);
 
   // Debounced save to localStorage
   // Persists an empty list too: skipping it left the last deleted session in
@@ -38,11 +41,15 @@ export const useChatHistory = () => {
   useEffect(() => {
     if (!isLoaded) return;
     const timeoutId = setTimeout(() => {
-      ChatHistoryManager.saveToLocalStorage(historyState);
+      ChatHistoryManager.saveToLocalStorage(
+        historyState,
+        connection.address,
+        connection.network,
+      );
     }, 500); // Debounce by 500ms
 
     return () => clearTimeout(timeoutId);
-  }, [historyState, isLoaded]);
+  }, [historyState, isLoaded, connection.address, connection.network]);
 
   // Debounced search - avoids triggering a lookup on every keystroke
   useEffect(() => {

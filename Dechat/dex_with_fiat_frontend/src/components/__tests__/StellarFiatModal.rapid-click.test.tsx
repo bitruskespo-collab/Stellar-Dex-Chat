@@ -25,6 +25,12 @@ vi.mock('@/lib/stellarContract', () => ({
   clearCache: vi.fn(),
   simulateDeposit: vi.fn().mockResolvedValue(null),
   simulateWithdraw: vi.fn().mockResolvedValue(null),
+  verifyNetworkAndContractIdentity: vi
+    .fn()
+    .mockResolvedValue({ isValid: true }),
+  checkTransactionStatus: vi
+    .fn()
+    .mockResolvedValue({ status: 'confirmed' }),
 }));
 
 const TEST_KEY = 'GABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUV';
