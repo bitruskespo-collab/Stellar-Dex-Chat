@@ -40,6 +40,8 @@ Generated from the `Error` enum in `Dechat/stellar-contracts/src/lib.rs`.
 | 319 | `LimitCapCannotBeLowered` | Constraints | Cannot lower an existing limit cap |
 | 401 | `InsufficientFunds` | Funds & Balances | Contract balance insufficient for withdrawal |
 | 402 | `NoFeesToWithdraw` | Funds & Balances | No accumulated fees to withdraw |
+| 403 | `TransferFailed` | Funds & Balances | Token transfer failed or returned unexpected balance delta |
+| 404 | `ShortTransfer` | Funds & Balances | Token transferred less than requested amount |
 | 501 | `RequestNotFound` | Withdrawal Queue | Withdrawal request does not exist |
 | 502 | `WithdrawalLocked` | Withdrawal Queue | Withdrawal request not yet unlocked |
 | 503 | `OperatorDailyLimitExceeded` | Withdrawal Queue | Operator's daily withdrawal limit exceeded |

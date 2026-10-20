@@ -24,10 +24,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable
         with:
           toolchain: stable
           targets: wasm32v1-none
@@ -36,7 +36,7 @@ jobs:
         run: cargo install --locked stellar-cli --version 28.0.0
 
       - name: Cache Cargo registry
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -48,6 +48,16 @@ jobs:
 
       - name: Build contract
         run: stellar contract build
+
+      - name: Generate Rust SBOM (CycloneDX)
+        run: |
+          cargo install --locked cargo-cyclonedx --version 0.5.5
+          cargo cyclonedx --format json --output-cdx --override-filename sbom-rust.cdx.json
+
+      - name: Generate Node SBOM (CycloneDX)
+        working-directory: Dechat/dex_with_fiat_frontend
+        run: |
+          npx --yes @cyclonedx/cyclonedx-npm@^1.19.0 --output-file sbom-node.cdx.json --output-format json
 
       - name: Deploy to Futurenet
         id: deploy
@@ -64,17 +74,55 @@ jobs:
           CONTRACT_ID=$(cat "$OUTPUT_FILE")
           echo "contract_id=$CONTRACT_ID" >> $GITHUB_OUTPUT
 
+      - name: Compute artifact digests and provenance
+        id: provenance
+        run: |
+          WASM_PATH=$(find target -name '*.wasm' -path '*release*' | head -n 1)
+          if [ -z "$WASM_PATH" ]; then
+            echo "::error::No release WASM artifact found for provenance"
+            exit 1
+          fi
+          WASM_DIGEST=$(sha256sum "$WASM_PATH" | awk '{print $1}')
+          echo "wasm_path=$WASM_PATH" >> $GITHUB_OUTPUT
+          echo "wasm_digest=$WASM_DIGEST" >> $GITHUB_OUTPUT
+
+          cat > provenance.json <<EOF
+          {
+            "source_revision": "${{ github.sha }}",
+            "workflow_ref": "${{ github.workflow_ref }}",
+            "workflow_sha": "${{ github.workflow_sha }}",
+            "run_id": "${{ github.run_id }}",
+            "run_attempt": "${{ github.run_attempt }}",
+            "repository": "${{ github.repository }}",
+            "ref": "${{ github.ref }}",
+            "wasm_artifact": "$WASM_PATH",
+            "wasm_sha256": "$WASM_DIGEST",
+            "contract_id": "${{ steps.deploy.outputs.contract_id }}"
+          }
+          EOF
+
       - name: Upload contract ID artifact
         if: success()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: contract-deployment-${{ github.sha }}
           path: Dechat/stellar-contracts/contract_id_futurenet.txt
           retention-days: 90
 
+      - name: Upload SBOM and provenance artifacts
+        if: success()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-sbom-${{ github.sha }}
+          path: |
+            Dechat/stellar-contracts/sbom-rust.cdx.json
+            Dechat/dex_with_fiat_frontend/sbom-node.cdx.json
+            Dechat/stellar-contracts/provenance.json
+          retention-days: 90
+
       - name: Create deployment status
         if: always()
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const status = '${{ job.status }}' === 'success' ? 'success' : 'failure';
@@ -100,6 +148,8 @@ jobs:
           echo "**Contract ID:** ${{ steps.deploy.outputs.contract_id }}" >> $GITHUB_STEP_SUMMARY
           echo "**Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
           echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "**WASM SHA256:** ${{ steps.provenance.outputs.wasm_digest }}" >> $GITHUB_STEP_SUMMARY
+          echo "**SBOM:** release-sbom-${{ github.sha }} (CycloneDX: Rust + Node)" >> $GITHUB_STEP_SUMMARY
 
       - name: Notify on failure
         if: failure()
@@ -109,3 +159,48 @@ jobs:
           echo "Environment: Futurenet" >> $GITHUB_STEP_SUMMARY
           echo "Branch: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
           echo "Check the logs for details." >> $GITHUB_STEP_SUMMARY
+
+  release-validation:
+    name: Verify release SBOM and provenance
+    needs: deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download SBOM and provenance artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v4
+        with:
+          name: release-sbom-${{ github.sha }}
+          path: release-sbom
+
+      - name: Verify SBOM inventories and provenance
+        run: |
+          set -euo pipefail
+
+          for f in release-sbom/sbom-rust.cdx.json release-sbom/sbom-node.cdx.json; do
+            if [ ! -s "$f" ]; then
+              echo "::error::Missing or empty SBOM: $f"
+              exit 1
+            fi
+            jq -e '.bomFormat == "CycloneDX" and (.components | length > 0)' "$f" > /dev/null
+            echo "✅ Verified SBOM: $f"
+          done
+
+          PROV=release-sbom/provenance.json
+          if [ ! -s "$PROV" ]; then
+            echo "::error::Missing provenance file"
+            exit 1
+          fi
+
+          jq -e --arg sha "${{ github.sha }}" '.source_revision == $sha' "$PROV" > /dev/null
+          jq -e '.workflow_ref != "" and .workflow_sha != ""' "$PROV" > /dev/null
+          jq -e '.wasm_sha256 | test("^[0-9a-f]{64}$")' "$PROV" > /dev/null
+
+          echo "✅ Provenance verified for revision ${{ github.sha }}"
+
+      - name: Post validation summary
+        run: |
+          echo "## 🔐 Release Validation" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ✅ SBOM and provenance verified" >> $GITHUB_STEP_SUMMARY
+          echo "**Revision:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Workflow:** ${{ github.workflow_ref }}" >> $GITHUB_STEP_SUMMARY

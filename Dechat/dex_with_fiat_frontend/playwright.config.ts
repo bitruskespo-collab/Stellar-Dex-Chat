@@ -26,6 +26,18 @@ export default defineConfig({
       name: 'webkit',
       use: { ...devices['Desktop Safari'] },
     },
+    {
+      name: 'amount-property',
+      testDir: './tests/property',
+      testMatch: /amount.*\.(spec|test)\.ts$/,
+      use: { ...devices['Desktop Chrome'] },
+    },
+    {
+      name: 'accessibility',
+      testDir: './tests/a11y',
+      testMatch: /.*\.(spec|test)\.ts$/,
+      use: { ...devices['Desktop Chrome'] },
+    },
   ],
   webServer: {
     command: process.env.CI ? 'npx next start' : 'npx next dev --turbopack',

@@ -42,6 +42,42 @@ This security policy applies to:
 - **Triaging**: Within 7 days of receiving a report
 - **Fix timeline**: Depending on severity, typically within 30 days
 
+## Dependency Vulnerability Scanning
+
+Dependencies are scanned for known advisories using ecosystem advisory data:
+
+- **Cargo** (Rust) via `cargo-audit` against the RustSec Advisory Database.
+- **pnpm** (Node) via `pnpm audit` against the GitHub Advisory Database.
+
+Scans run on every pull request and on a recurring schedule (weekly), so new advisories are caught even without code changes.
+
+### Severity Thresholds
+
+| Severity | Policy |
+| --- | --- |
+| Critical | Block merge; remediate immediately |
+| High | Block merge; remediate within 7 days |
+| Moderate | Remediate within 30 days |
+| Low | Track; remediate at next dependency refresh |
+
+### Time-Bounded Exceptions
+
+A finding may be temporarily accepted only through a documented exception that records:
+
+- **Owner**: the individual accountable for remediation
+- **Expiry**: a fixed date by which the exception must be resolved or renewed
+- **Justification**: why the finding cannot be fixed now
+
+Exceptions are reviewed at expiry; expired exceptions fail the scan and block merge.
+
+### Reporting Findings
+
+Each finding must report the full transitive dependency path (the chain of packages that pulls in the vulnerable crate/package) and the patched version that resolves the advisory, so reviewers can assess impact and upgrade targets.
+
+### Remediation Policy
+
+Security upgrades follow the normal review and test gates. Dependency bumps are **not** auto-merged; they go through the same pull request review and CI checks as any other change.
+
 ### Security Best Practices
 
 - Never include private keys or sensitive data in code

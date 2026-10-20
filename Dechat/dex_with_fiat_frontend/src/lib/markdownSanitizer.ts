@@ -140,3 +140,24 @@ export function sanitizeText(text: string | undefined | null): string {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#x27;');
 }
+
+/**
+ * Returns safe link attributes for external navigation (Issue #94).
+ * Enforces rel="noopener noreferrer nofollow" and target="_blank" on external URLs.
+ */
+export function getSafeExternalLinkProps(href: string | undefined | null): {
+  href: string;
+  rel: string;
+  target?: string;
+  isExternal: boolean;
+} {
+  const safeHref = sanitizeUrl(href);
+  const isExternal = safeHref.startsWith('http://') || safeHref.startsWith('https://');
+
+  return {
+    href: safeHref,
+    rel: isExternal ? 'noopener noreferrer nofollow' : '',
+    target: isExternal ? '_blank' : undefined,
+    isExternal,
+  };
+}

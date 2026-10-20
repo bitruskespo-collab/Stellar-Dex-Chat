@@ -203,10 +203,12 @@ export default function ChatMessages({
   }, [allMessages.length, isLoading, isLoadingMore, shouldPreserveScroll, scrollToBottom]);
 
   // Handle scroll preservation when loading more
+  const prevScrollTopRef = useRef<number>(0);
   useEffect(() => {
     if (isLoadingMore) {
       if (containerRef.current) {
         setPrevScrollHeight(containerRef.current.scrollHeight);
+        prevScrollTopRef.current = containerRef.current.scrollTop;
         setShouldPreserveScroll(true);
       }
     }
@@ -217,7 +219,7 @@ export default function ChatMessages({
       const newHeight = containerRef.current.scrollHeight;
       const heightDiff = newHeight - prevScrollHeight;
       if (heightDiff > 0) {
-        containerRef.current.scrollTop = heightDiff;
+        containerRef.current.scrollTop = prevScrollTopRef.current + heightDiff;
       }
       setShouldPreserveScroll(false);
     }

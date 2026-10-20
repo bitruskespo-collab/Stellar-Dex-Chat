@@ -1,0 +1,30 @@
+{
+  "budgets": [
+    {
+      "route": "/",
+      "maxInitialJsKb": 250,
+      "maxVendorChunkKb": 180,
+      "maxFcpMs": 1500,
+      "maxInpMs": 200
+    },
+    {
+      "route": "/chat",
+      "maxInitialJsKb": 320,
+      "maxVendorChunkKb": 200,
+      "maxFcpMs": 1800,
+      "maxInpMs": 150
+    },
+    {
+      "route": "/admin",
+      "maxInitialJsKb": 400,
+      "maxVendorChunkKb": 220,
+      "maxFcpMs": 2000,
+      "maxInpMs": 200
+    }
+  ],
+  "mobileProfile": {
+    "device": "Moto G4 emulation",
+    "cpuThrottling": "4x slowdown",
+    "network": "Fast 3G (1.6 Mbps down, 750 Kbps up, 150ms RTT)"
+  }
+}

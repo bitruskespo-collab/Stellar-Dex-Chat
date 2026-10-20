@@ -12,6 +12,7 @@ updates:
     labels:
       - "dependencies"
       - "area: contracts"
+      - "security"
     groups:
       cargo-minor-patch:
         # Minor and patch bumps are batched; majors open individually so they
@@ -37,6 +38,7 @@ updates:
     labels:
       - "dependencies"
       - "area: frontend"
+      - "security"
     groups:
       frontend-minor-patch:
         # Batch all non-major updates together except the packages listed in
@@ -78,6 +80,7 @@ updates:
     labels:
       - "dependencies"
       - "area: tooling"
+      - "security"
     groups:
       root-minor-patch:
         update-types:
@@ -99,6 +102,7 @@ updates:
     labels:
       - "dependencies"
       - "area: ci"
+      - "security"
     groups:
       actions:
         # Batch all action version bumps into one PR.

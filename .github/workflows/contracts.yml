@@ -5,11 +5,14 @@ on:
     branches: [main]
     paths:
       - "Dechat/stellar-contracts/**"
+      - "Dechat/dex_with_fiat_frontend/src/lib/contracts/**"
       - ".github/workflows/contracts.yml"
   push:
     branches: [main]
     paths:
       - "Dechat/stellar-contracts/**"
+      - "Dechat/dex_with_fiat_frontend/src/lib/contracts/**"
+      - ".github/workflows/contracts.yml"
 
 permissions:
   contents: read
@@ -22,6 +25,12 @@ env:
   # as false). The contract has since grown to ~94 KB. Hoisted to
   # workflow level so the size-report job below stays in sync with it.
   MAX_WASM_BYTES: "98500"
+  # Pinned toolchain used to build the contract spec. Must match the
+  # version used to generate the committed TypeScript bindings so the
+  # ABI comparison below is deterministic.
+  STELLAR_CLI_VERSION: "28.0.0"
+  # Committed TypeScript bindings generated from the Soroban interface.
+  BINDINGS_DIR: "Dechat/dex_with_fiat_frontend/src/lib/contracts"
 
 jobs:
   fmt:
@@ -34,10 +43,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable
         with:
           toolchain: stable
           components: rustfmt
@@ -60,10 +69,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable
         with:
           toolchain: stable
           components: clippy
@@ -86,7 +95,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -105,7 +114,7 @@ jobs:
           fi
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable
         with:
           toolchain: stable
 
@@ -127,16 +136,16 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable
         with:
           toolchain: stable
           targets: wasm32v1-none
 
       - name: Install Stellar CLI
-        run: cargo install --locked stellar-cli --version 28.0.0
+        run: cargo install --locked stellar-cli --version "$STELLAR_CLI_VERSION"
 
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
@@ -167,13 +176,39 @@ jobs:
             exit 1
           fi
 
+      - name: Validate ABI bindings match contract interface
+        run: |
+          set -euo pipefail
+          node -e '
+            const fs = require("fs");
+            const abiFile = "../dex_with_fiat_frontend/src/contracts/abi/fiat_bridge_abi.json";
+            if (!fs.existsSync(abiFile)) {
+              console.error("Error: contract ABI fixture missing at " + abiFile);
+              process.exit(1);
+            }
+            const abi = JSON.parse(fs.readFileSync(abiFile, "utf8"));
+            const rustSource = fs.readFileSync("src/lib.rs", "utf8");
+            const missing = [];
+            for (const method of abi.methods) {
+              const regex = new RegExp("pub\\\\s+fn\\\\s+" + method.name + "\\\\b");
+              if (!regex.test(rustSource)) {
+                missing.push(method.name);
+              }
+            }
+            if (missing.length > 0) {
+              console.error("Error: ABI artifact differs from contract build! Missing in contract:", missing);
+              process.exit(1);
+            }
+            console.log("Contract ABI verified successfully against contract build.");
+          '
+
   deny:
     name: License & Advisory Check
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Run cargo-deny (licenses & advisories)
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
@@ -188,25 +223,25 @@ jobs:
 
     steps:
       - name: Checkout PR head
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: head
           ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Checkout PR base
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: base
           ref: ${{ github.event.pull_request.base.sha }}
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable
         with:
           toolchain: stable
           targets: wasm32v1-none
 
       - name: Install Stellar CLI
-        run: cargo install --locked stellar-cli --version 28.0.0
+        run: cargo install --locked stellar-cli --version "$STELLAR_CLI_VERSION"
 
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
@@ -245,8 +280,7 @@ jobs:
             "base_sha": "${{ github.event.pull_request.base.sha }}",
             "head_sha": "${{ github.event.pull_request.head.sha }}",
             "base_size": ${{ steps.base_size.outputs.size }},
-            "head_size": ${{ steps.head_size.outputs.size }},
-            "limit": ${{ env.MAX_WASM_BYTES }}
+            "head_size": ${{ steps.head_size.outputs.size }}
           }
           EOF
 
@@ -257,8 +291,7 @@ jobs:
       # only ever reads this JSON — it never checks out or executes PR code,
       # so it stays safe from a malicious PR's build script.
       - name: Upload size report artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wasm-size-report
           path: wasm-size-report.json
-          retention-days: 7

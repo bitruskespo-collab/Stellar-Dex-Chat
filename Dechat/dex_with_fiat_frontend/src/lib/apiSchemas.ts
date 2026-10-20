@@ -1,54 +1,69 @@
 import { z } from 'zod';
+import {
+  countrySchema,
+  bankCodeSchema,
+  paystackBankCodeSchema,
+  accountNumberSchema,
+  nubanAccountNumberSchema,
+  beneficiaryNameSchema,
+  beneficiaryTypeSchema,
+  beneficiaryCurrencySchema,
+  strictCreateRecipientSchema,
+  strictVerifyAccountSchema,
+} from './bankAccountSchemas';
+
+export {
+  countrySchema,
+  bankCodeSchema,
+  paystackBankCodeSchema,
+  accountNumberSchema,
+  nubanAccountNumberSchema,
+  beneficiaryNameSchema,
+  beneficiaryTypeSchema,
+  beneficiaryCurrencySchema,
+  strictCreateRecipientSchema,
+  strictVerifyAccountSchema,
+};
 
 // Nigerian NUBAN account numbers are always exactly 10 digits; Paystack bank
 // codes are 3-6 digits. Anchoring both to a strict digit pattern (rather than
 // just `min(1)`) also rules out injecting extra query parameters through
 // these fields into the Paystack request URL.
-const nubanAccountNumber = z
-  .string()
-  .regex(/^\d{10}$/, 'Account number must be exactly 10 digits');
-const paystackBankCode = z
-  .string()
-  .regex(/^\d{3,6}$/, 'Bank code must be 3-6 digits');
+const nubanAccountNumber = nubanAccountNumberSchema;
+const paystackBankCode = paystackBankCodeSchema;
 
-// Schema for create-recipient endpoint
-export const createRecipientSchema = z.object({
-  type: z.string().min(1, 'Type is required').max(50, 'Type is too long'),
-  name: z.string().min(1, 'Name is required').max(100, 'Name is too long'),
-  account_number: nubanAccountNumber,
-  bank_code: paystackBankCode,
-  currency: z.enum(['NGN']),
-});
+// Schema for create-recipient endpoint (strict validation, unknown keys rejected)
+export const createRecipientSchema = strictCreateRecipientSchema;
 
 export type CreateRecipientInput = z.infer<typeof createRecipientSchema>;
 
 // Schema for initiate-transfer endpoint
 export const MAX_TRANSFER_AMOUNT_NGN = 10_000_000;
 
-export const initiateTransferSchema = z.object({
-  source: z.string().min(1, 'Source is required'),
-  reason: z.string().optional(),
-  amount: z
-    .number()
-    .positive('Amount must be positive')
-    .max(MAX_TRANSFER_AMOUNT_NGN, 'Amount exceeds the transfer limit')
-    .refine(
-      (amount) =>
-        Math.abs(amount * 100 - Math.round(amount * 100)) <=
-        Number.EPSILON * Math.max(1, Math.abs(amount * 100)) * 4,
-      'Amount must have at most 2 decimal places',
-    ),
-  recipient: z.string().min(1, 'Recipient is required'),
-  reference: z.string().optional(),
-});
+export const initiateTransferSchema = z
+  .object({
+    source: z.string().min(1, 'Source is required'),
+    reason: z.string().optional(),
+    amount: z
+      .number()
+      .positive('Amount must be positive')
+      .max(MAX_TRANSFER_AMOUNT_NGN, 'Amount exceeds the transfer limit')
+      .refine(
+        (amount) =>
+          Math.abs(amount * 100 - Math.round(amount * 100)) <=
+          Number.EPSILON * Math.max(1, Math.abs(amount * 100)) * 4,
+        'Amount must have at most 2 decimal places',
+      ),
+    recipient: z.string().min(1, 'Recipient is required'),
+    reference: z.string().optional(),
+    clientSessionId: z.string().max(200).optional(),
+  })
+  .strict();
 
 export type InitiateTransferInput = z.infer<typeof initiateTransferSchema>;
 
-// Schema for verify-account endpoint
-export const verifyAccountSchema = z.object({
-  accountNumber: nubanAccountNumber,
-  bankCode: paystackBankCode,
-});
+// Schema for verify-account endpoint (strict validation, unknown keys rejected)
+export const verifyAccountSchema = strictVerifyAccountSchema;
 
 export type VerifyAccountInput = z.infer<typeof verifyAccountSchema>;
 

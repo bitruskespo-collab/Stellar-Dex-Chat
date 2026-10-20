@@ -9,6 +9,7 @@
  * Exit codes:
  *   0 - All variables match
  *   1 - Missing variables or extra variables found
+ *   2 - Sensitive payout encryption variables are misconfigured
  */
 
 import { readFileSync } from 'fs';
@@ -16,6 +17,17 @@ import { join } from 'path';
 
 const ENV_EXAMPLE_PATH = join(__dirname, '../.env.example');
 const ENV_TS_PATH = join(__dirname, '../src/lib/env.ts');
+
+/**
+ * Variables that hold payout encryption key material. These must never be
+ * committed with real values and must be supplied through the configured
+ * secret-management boundary (see SECURITY.md).
+ */
+const PAYOUT_KEY_VARIABLES = [
+  'PAYOUT_ENCRYPTION_KEYS',
+  'PAYOUT_ENCRYPTION_ACTIVE_KEY_ID',
+  'PAYOUT_LOOKUP_DIGEST_KEY',
+];
 
 /**
  * Extract variable names from env.ts schema definitions
@@ -62,6 +74,54 @@ function extractEnvExampleVariables(): Set<string> {
 }
 
 /**
+ * Extract raw KEY=value pairs (non-comment) from .env.example so we can
+ * verify that sensitive payout key material is never committed with a value.
+ */
+function extractEnvExampleAssignments(): Map<string, string> {
+  const envExampleContent = readFileSync(ENV_EXAMPLE_PATH, 'utf-8');
+  const assignments = new Map<string, string>();
+
+  for (const line of envExampleContent.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('#') || trimmed === '') {
+      continue;
+    }
+    const match = trimmed.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
+    if (match) {
+      assignments.set(match[1], match[2].trim());
+    }
+  }
+
+  return assignments;
+}
+
+/**
+ * Ensure payout encryption key material is declared but never populated with a
+ * real value in .env.example. Keys must come from the secret-management
+ * boundary at runtime; committing them would defeat the encryption guarantee.
+ */
+function validatePayoutKeyMaterial(): boolean {
+  const assignments = extractEnvExampleAssignments();
+  let isValid = true;
+
+  for (const key of PAYOUT_KEY_VARIABLES) {
+    if (!assignments.has(key)) {
+      continue;
+    }
+    const value = assignments.get(key) ?? '';
+    if (value !== '') {
+      console.error(
+        `❌ ERROR: ${key} must not be committed with a value in .env.example. ` +
+          'Supply it via the configured secret-management boundary.',
+      );
+      isValid = false;
+    }
+  }
+
+  return isValid;
+}
+
+/**
  * Main validation logic
  */
 function validateEnvExample(): boolean {
@@ -88,6 +148,10 @@ function validateEnvExample(): boolean {
     isValid = false;
   }
 
+  if (!validatePayoutKeyMaterial()) {
+    isValid = false;
+  }
+
   if (isValid) {
     console.log('✅ SUCCESS: .env.example matches env.ts schema');
     console.log(`   Found ${schemaVars.size} variables`);
@@ -97,5 +161,6 @@ function validateEnvExample(): boolean {
 }
 
 // Run validation
-const isValid = validateEnvExample();
-process.exit(isValid ? 0 : 1);
+const envValid = validateEnvExample();
+const alertsValid = validateAlertThresholds();
+process.exit(envValid && alertsValid ? 0 : 1);

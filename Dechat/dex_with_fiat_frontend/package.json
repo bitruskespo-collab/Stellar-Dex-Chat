@@ -11,7 +11,6 @@
     "format": "prettier --write \"src\" \"tests/e2e\" \"*.{ts,mjs,json}\"",
     "check": "prettier --check \"src\" \"tests/e2e\" \"*.{ts,mjs,json}\"",
     "test:unit": "vitest run",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
     "typecheck": "pnpm typecheck:src && pnpm typecheck:tests",
     "typecheck:src": "tsc --noEmit",
     "typecheck:tests": "tsc --noEmit -p tsconfig.test.json",
@@ -19,9 +18,13 @@
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:debug": "playwright test --debug",
     "test:e2e:install": "playwright install",
+    "test:a11y": "playwright test --project=a11y",
     "test:unit:watch": "vitest",
     "test:coverage": "vitest run --coverage --maxWorkers=1 --pool=forks --no-file-parallelism",
-    "test:coverage:merge": "vitest run --mergeReports --coverage --reporter=default"
+    "test:coverage:merge": "vitest run --mergeReports --coverage --reporter=default",
+    "sbom:node": "cyclonedx-npm --output-format json --output-file sbom-node.cdx.json",
+    "sbom:rust": "cargo cyclonedx --format json --output-pattern package --output-cdx --manifest-path ../dex_with_fiat_backend/Cargo.toml",
+    "sbom": "pnpm sbom:node && pnpm sbom:rust"
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
@@ -49,6 +52,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@cyclonedx/cyclonedx-npm": "^1.19.3",
     "@eslint/eslintrc": "^3.3.5",
     "@playwright/test": "^1.58.2",
     "@tailwindcss/postcss": "^4",

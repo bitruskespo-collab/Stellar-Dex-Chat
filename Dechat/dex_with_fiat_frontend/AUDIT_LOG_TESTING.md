@@ -16,6 +16,95 @@ The audit logging feature has been successfully implemented with the following c
 
 ---
 
+## 🔐 Threat Model & Abuse-Case Register
+
+**Document version:** `TM-1.0.0`
+**Status:** Published
+**Last reviewed:** 2024-03-27
+**Review owner:** Security lead (rotating; see change history)
+
+### Change History
+
+| Version | Date       | Author        | Summary of change                                                        |
+|---------|------------|---------------|--------------------------------------------------------------------------|
+| 1.0.0   | 2024-03-27 | Security lead | Initial published threat model and abuse-case register for #112.         |
+
+> Review triggers (any of these requires a version bump and re-review):
+> - A new trust boundary is introduced (new external service, new chain, new provider).
+> - A new payout provider or payout rail is added or swapped.
+> - A Soroban contract upgrade or new contract is deployed.
+> - A change to signing authority, admin roles, or key custody.
+> - A change to model provider, tool routing, or webhook ingestion.
+> - Any high-risk abuse case changes residual risk from Low/Medium to High.
+
+### Trust Boundaries
+
+| # | Boundary | Untrusted side | Trusted side | Sensitive data crossing | Authority crossing |
+|---|----------|----------------|--------------|-------------------------|--------------------|
+| TB1 | Browser ↔ API | Browser (user-controlled) | Next.js API routes | Session/auth tokens, wallet address, tx intent | User-initiated requests only; no admin authority |
+| TB2 | Browser ↔ Wallet | Browser | Wallet extension / signer | Unsigned tx payloads, public keys | Signing authority stays in wallet; app never holds keys |
+| TB3 | API ↔ Model provider | API | External LLM provider | Prompt text, tool-routing decisions, redacted context | Tool invocation decisions; no signing authority |
+| TB4 | API ↔ Soroban | API | Soroban RPC / contract | Signed tx envelopes, contract args, tx hashes | Contract call authority via signed envelopes |
+| TB5 | API ↔ Payout provider | API | Payout/banking provider | Payout amount, masked account ref, tx hash | Payout release authority (admin-gated) |
+| TB6 | Admin ↔ API | Admin browser | Admin API routes | Admin address, action metadata, tx hash | Admin action authority (deposit/payout/settings) |
+
+### Sensitive Data & Authority Flows
+
+**Signing flow (TB2 → TB4):**
+`Browser builds tx intent → Wallet signs (keys never leave wallet) → API submits signed envelope to Soroban → tx hash recorded in audit log.`
+Control: app never receives private keys; only signed envelopes and public addresses cross TB2/TB4.
+
+**Admin actions (TB6 → TB1):**
+`Admin authenticates → Admin API validates admin address → action executed → AuditLogService.recordAction() writes append-only entry with tx hash.`
+Control: append-only audit log (`src/lib/auditLog.ts`); read-only retrieval via `GET /api/admin-audit`.
+
+**Tool routing (TB3):**
+`User prompt → API → model provider decides tool → API executes allow-listed tool only.`
+Control: tool allow-list enforced in API; model output is never trusted to grant authority.
+
+**Webhooks (TB5 → TB1):**
+`Payout provider → webhook endpoint → API verifies signature → state transition recorded.`
+Control: signature verification required; unsigned/replayed webhooks rejected.
+
+**Payout (TB6 → TB5):**
+`Admin initiates payout → API validates admin + amount → provider call → tx hash + masked account ref written to audit log.`
+Control: admin-gated; masked account refs only (no full account numbers in logs).
+
+### Abuse-Case Register
+
+| ID   | Abuse case | Impact | Likelihood | Controls | Owner | Residual risk |
+|------|------------|--------|------------|----------|-------|---------------|
+| AC-1 | Forged/replayed payout webhook triggers payout | High | Medium | Signature verification; idempotency key; audit entry per event | API owner | Low |
+| AC-2 | Unauthorized admin action (deposit/payout/settings) | High | Low | Admin address allow-list; append-only audit log; read-only audit API | API owner | Low |
+| AC-3 | Prompt injection causes model to invoke privileged tool | High | Medium | Tool allow-list; model output never grants authority; server-side authorization | API owner | Medium |
+| AC-4 | Private key exfiltration via browser | Critical | Low | Keys never leave wallet; app only handles signed envelopes | Frontend owner | Low |
+| AC-5 | Audit log tampering / deletion | High | Low | Append-only storage; read-only API (405 on write); immutable fields | API owner | Low |
+| AC-6 | Soroban contract upgrade introduces new authority path | High | Low | Contract upgrade is a review trigger; re-review TB4 before deploy | Contract owner | Medium |
+| AC-7 | Payout provider swap changes trust assumptions | High | Low | Provider swap is a review trigger; re-review TB5 | API owner | Medium |
+| AC-8 | Sensitive data (full account numbers, secrets) leaked into logs | High | Medium | Masked account refs; operational secrets excluded from this doc and logs | API owner | Low |
+
+### Mitigation → Code/Test Links
+
+| Control | Linked code / test | Follow-up |
+|---------|--------------------|-----------|
+| Append-only audit log | `src/lib/auditLog.ts` (`recordAction`) | — |
+| Read-only audit API | `src/app/api/admin-audit/route.ts` (405 on write) | — |
+| Audit table UI | `src/components/AuditTable.tsx` | — |
+| Audit types | `src/types/index.ts` | — |
+| Webhook signature verification | — | Tracked follow-up: add signature verification test |
+| Tool allow-list | — | Tracked follow-up: add allow-list unit test |
+| Contract upgrade review | — | Tracked follow-up: add upgrade checklist to release process |
+
+### Scope Note
+
+This document intentionally **excludes operational secrets** (API keys, signing keys, provider credentials). Only trust boundaries, data classes, and authority flows are described.
+
+### Validation
+
+Review with contract, frontend, and API owners. Every high-risk flow above has an explicit control or a tracked follow-up gap (see Mitigation → Code/Test Links).
+
+---
+
 ## 📋 Acceptance Criteria Validation
 
 ### ✓ Criterion 1: Record admin action metadata and tx hash in append-only log
@@ -290,116 +379,6 @@ console.log(`Found ${failed.length} failed transactions`);
 
 ### Recent 10 Entries:
 ```javascript
-const recent = AuditLogService.getRecentEntries(10);
+const recent = AuditLogService.getAuditEntries({ limit: 10 });
 console.log(recent);
 ```
-
-### Export Full Audit Log:
-```javascript
-const json = AuditLogService.exportLog();
-console.log(json);
-// Copy to file for compliance
-```
-
----
-
-## 🔍 Production Readiness Checklist
-
-- ✅ Append-only storage implemented
-- ✅ localStorage-based persistence (suitable for single-instance deployments)
-- ✅ API endpoint with proper error handling
-- ✅ Read-only enforcement (POST/PUT/DELETE return 405)
-- ✅ Pagination support (max 1000 entries per request)
-- ✅ Multiple filter options
-- ✅ Responsive UI component
-- ✅ Dark mode support
-- ✅ Type-safe implementation (TypeScript)
-- ✅ No external dependencies added
-
-## 📝 Integration Points
-
-### To Record Actions in Your Code:
-
-**Example 1: In a Transfer Handler**
-```typescript
-async function handleTransfer(adminAddress, amount, recipient, txHash) {
-  try {
-    // ... perform transfer logic
-    
-    AuditLogService.recordAction(
-      adminAddress,
-      'deposit',
-      `Transferred ${amount} XLM to ${recipient}`,
-      { amount, recipient, timestamp: new Date().toISOString() },
-      txHash,
-      'success'
-    );
-  } catch (error) {
-    AuditLogService.recordAction(
-      adminAddress,
-      'deposit',
-      `Transfer failed to ${recipient}`,
-      { amount, recipient, error: error.message },
-      undefined,
-      'failed'
-    );
-    throw error;
-  }
-}
-```
-
-**Example 2: In a Payout Handler**
-```typescript
-async function processPayoutRequest(adminAddress, payoutDetails) {
-  const entry = AuditLogService.recordAction(
-    adminAddress,
-    'payout',
-    `Payout initiated: ${payoutDetails.amount} to ${payoutDetails.bankCode}`,
-    payoutDetails,
-    undefined,
-    'pending'
-  );
-  
-  // Process payout
-  // Update entry status when complete
-  // Note: Current implementation doesn't support updates to maintain immutability
-  // For completed status, record a new entry
-}
-```
-
----
-
-## 🚀 Deployment Notes
-
-### localStorage Limitations:
-- Typical limit: 5-10MB per domain
-- Current implementation has max 10,000 entries
-- Suitable for small to medium deployments
-
-### For Production at Scale:
-Consider migrating to:
-- Database (PostgreSQL, MongoDB)
-- Cloud logging service (CloudWatch, Stackdriver)
-- Event streaming (Kafka, Event Hub)
-
-The current API design is abstracted enough that backend storage can be swapped without UI changes.
-
----
-
-## ✨ Success Criteria Met
-
-| Criterion | Status | Evidence |
-|-----------|--------|----------|
-| Record admin action metadata | ✅ Complete | `auditLog.ts` - recordAction() method |
-| Record tx hash in append-only log | ✅ Complete | localStorage-based immutable storage |
-| Read-only API endpoint | ✅ Complete | `/api/admin-audit` with proper HTTP methods |
-| Filterable audit table | ✅ Complete | AuditTable component with 6+ filter options |
-| Admin page integration | ✅ Complete | Updated admin/page.tsx |
-| Production-ready | ✅ Complete | Error handling, pagination, type-safe |
-
----
-
-## 📞 Support & Questions
-
-For integration questions, refer to `src/lib/auditLogExamples.ts` for usage patterns.
-

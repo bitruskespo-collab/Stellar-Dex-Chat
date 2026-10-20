@@ -8,6 +8,7 @@ dex_with_fiat_frontend/
 │   ├── lib/
 │   │   ├── auditLog.ts                    ✨ NEW - Core service (200+ lines)
 │   │   ├── auditLogExamples.ts           ✨ NEW - Integration examples (150+ lines)
+│   │   ├── journeySlo.ts                 ✨ NEW - User-journey SLO definitions & alert thresholds
 │   │   └── [other existing files...] 
 │   ├── app/
 │   │   ├── admin/
@@ -344,85 +345,6 @@ npm run test:e2e           # If playwright configured
 ## Code Quality
 
 - ✅ TypeScript strict mode compatible
-- ✅ No console warnings with dark mode enabled
-- ✅ Responsive across all breakpoints
-- ✅ Accessible form controls
-- ✅ Error boundaries in place
-- ✅ Loading states implemented
+- ✅ No console warnings with d
 
----
-
-## Maintenance & Updates
-
-### To Modify Storage Backend
-**File to Change:** `src/lib/auditLog.ts`
-
-Change from localStorage to database:
-1. Update `appendEntry()` method
-2. Update `getAllEntries()` method
-3. API endpoint remains the same
-
-### To Add Filters
-**Files to Update:**
-1. `src/types/index.ts` - Add filter field to `AuditLogFilter`
-2. `src/lib/auditLog.ts` - Add filter logic to `getAuditEntries()`
-3. `src/app/api/admin-audit/route.ts` - Add query parameter handling
-4. `src/components/AuditTable.tsx` - Add UI filter control
-
-### To Add New Action Types
-**Files to Update:**
-1. `src/types/index.ts` - Add type to `AuditEntry.actionType`
-2. `src/components/AuditTable.tsx` - Add option to filter dropdown
-3. `src/lib/auditLogExamples.ts` - Add helper function
-
----
-
-## Browser Support
-
-- ✅ Chrome 90+
-- ✅ Firefox 88+
-- ✅ Safari 14+
-- ✅ Edge 90+
-
-**Requires:** localStorage support (universal in modern browsers)
-
----
-
-## Troubleshooting
-
-### Audit entries not appearing
-1. Check browser console for errors
-2. Verify localStorage is enabled
-3. Check DevTools → Application → Local Storage → audit_log_entries
-4. Refresh page (F5)
-
-### API returning 404
-1. Verify file exists: `src/app/api/admin-audit/route.ts`
-2. Restart dev server: `npm run dev`
-3. Check URL: `http://localhost:3000/api/admin-audit`
-
-### Filters not working
-1. Check browser console for errors
-2. Verify entries exist in localStorage
-3. Try resetting filters with "Reset Filters" button
-4. Check query parameters in Network tab
-
-### localStorage quota exceeded
-1. Clear old entries: `AuditLogService.clearLog()`
-2. Temporary: Use private/incognito browser window
-3. Consider migrating to database for production
-
----
-
-## Document Versions
-
-| Document | Version | Date | Status |
-|----------|---------|------|--------|
-| IMPLEMENTATION_SUMMARY.md | 1.0 | 2024-03-27 | Complete |
-| AUDIT_LOG_TESTING.md | 1.0 | 2024-03-27 | Complete |
-| FILE_REFERENCE.md | 1.0 | 2024-03-27 | This document |
-
----
-
-**Last Updated:** March 27, 2026  
-**Status:** ✅ Production Ready
+/* … truncated 2192 chars — edit only what you need near the top … */

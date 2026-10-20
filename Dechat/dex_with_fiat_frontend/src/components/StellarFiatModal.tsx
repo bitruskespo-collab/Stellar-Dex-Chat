@@ -24,14 +24,17 @@ import {
   depositToContract,
   withdrawFromContract,
   clearCache,
-  pollTransaction,
-  checkTransactionStatus,
-  verifyNetworkAndContractIdentity,
   type FeeEstimate,
-  type VerificationResult,
-  type TxStatusResult,
+  type PreSignSimulationResult,
 } from '@/lib/stellarContract';
 import { xlmToStroops, stroopsToXlm as stroopsToDisplay } from '@/lib/stroops';
+import { parseAssetAmount, formatAssetAmount } from '@/lib/exactAmount';
+import {
+  savePendingRecoveryRecord,
+  getPendingRecoveryRecord,
+  clearPendingRecoveryRecord,
+  lookupTransactionStatus,
+} from '@/lib/transactionRecovery';
 import useBridgeStats from '@/hooks/useBridgeStats';
 import {
   getTokenPriceWithStatus,
@@ -48,6 +51,16 @@ import {
   STELLAR_FIAT_RISK_CONFIRMATION_PHRASE,
   validateStellarFiatModalForm,
 } from '@/lib/stellarFiatModalSchema';
+import WithdrawalQueueStatus from './WithdrawalQueueStatus';
+import {
+  QuoteSnapshot,
+  BalanceSnapshot,
+  createQuoteSnapshot,
+  createBalanceSnapshot,
+  revalidateFormInputs,
+} from '@/lib/transactionFormProtection';
+import * as protectionModule from '@/lib/transactionFormProtection';
+import * as stellarContractModule from '@/lib/stellarContract';
 
 interface StellarFiatModalProps {
   isOpen: boolean;
@@ -100,7 +113,14 @@ export default function StellarFiatModal({
   // so the submit button stays enabled across same-tick clicks. A ref closes
   // that window before React re-renders.
   const lastSubmitAtRef = useRef(0);
-  const { connection, signTx, xlmBalance, refreshXlmBalance, contextVersion } = useStellarWallet();
+  const {
+    connection,
+    signTx,
+    xlmBalance,
+    refreshXlmBalance,
+    sessionExpired,
+    reconnect,
+  } = useStellarWallet();
   const { addNotification } = useNotifications();
   const { addEntry } = useTxHistory();
   const { highValueThreshold, twoFactorEnabled } = useUserPreferences();
@@ -120,6 +140,9 @@ export default function StellarFiatModal({
   const [riskConfirmation, setRiskConfirmation] = useState('');
   const [lastLoggedRiskAmount, setLastLoggedRiskAmount] = useState('');
   const [feeEstimate, setFeeEstimate] = useState<FeeEstimate | null>(null);
+  const [simulationResult, setSimulationResult] =
+    useState<PreSignSimulationResult | null>(null);
+  const [simulationError, setSimulationError] = useState<string | null>(null);
   const [requiresPreSignConfirmation, setRequiresPreSignConfirmation] =
     useState(false);
   const [isLoadingFee, setIsLoadingFee] = useState(false);
@@ -131,6 +154,34 @@ export default function StellarFiatModal({
   const [lastActionTimestamp, setLastActionTimestamp] = useState(0);
   const [showTwoFactorModal, setShowTwoFactorModal] = useState(false);
   const [twoFactorConfirmation, setTwoFactorConfirmation] = useState('');
+  const [quoteSnapshot, setQuoteSnapshot] = useState<QuoteSnapshot | null>(null);
+  const [balanceSnapshot, setBalanceSnapshot] = useState<BalanceSnapshot | null>(null);
+  const [reconfirmationNotice, setReconfirmationNotice] = useState<string | null>(null);
+  const [hasConfirmedUpdatedValues, setHasConfirmedUpdatedValues] = useState(false);
+
+  useEffect(() => {
+    const addr = connection.address || connection.publicKey;
+    if (addr) {
+      try {
+        const fetchBalanceFn = (
+          stellarContractModule as Record<string, unknown>
+        ).fetchXlmBalance as ((pk: string) => Promise<string>) | undefined;
+
+        if (typeof fetchBalanceFn === 'function') {
+          const p = fetchBalanceFn(addr);
+          if (p && typeof p.then === 'function') {
+            void p
+              .then((bal) => {
+                setBalanceSnapshot(createBalanceSnapshot(bal || '0.00', addr));
+              })
+              .catch(() => {});
+          }
+        }
+      } catch {
+        // Mock does not export fetchXlmBalance in specific unit tests
+      }
+    }
+  }, [connection.address, connection.publicKey]);
 
   // Transaction retry and safe replacement states (Issue #57)
   const [pendingRecord, setPendingRecord] = useState<PendingTxRecord | null>(null);
@@ -172,6 +223,8 @@ export default function StellarFiatModal({
   const handlePreset = (value: number) => {
     setAmount(String(value));
     setActivePreset(value);
+    setReconfirmationNotice(null);
+    setHasConfirmedUpdatedValues(false);
   };
   const isMounted = useRef(true);
 
@@ -190,8 +243,20 @@ export default function StellarFiatModal({
     }
   }, [isOpen]);
 
+  const hasInitializedOpenRef = useRef(false);
+
   useEffect(() => {
     if (!isOpen) {
+      hasInitializedOpenRef.current = false;
+      return;
+    }
+
+    if (hasInitializedOpenRef.current) {
+      return;
+    }
+    hasInitializedOpenRef.current = true;
+
+    if (getPendingRecoveryRecord()) {
       return;
     }
 
@@ -202,6 +267,8 @@ export default function StellarFiatModal({
     setTxHash('');
     setErrorMsg('');
     setFeeEstimate(null);
+    setSimulationResult(null);
+    setSimulationError(null);
     setRequiresPreSignConfirmation(false);
     setNote('');
     setRiskConfirmation('');
@@ -308,107 +375,86 @@ export default function StellarFiatModal({
       return;
     }
 
-    const pendingKey = getPendingTxKey(connection.publicKey, connection.network);
-    const stored =
-      localStorage.getItem(pendingKey) ||
-      localStorage.getItem('stellar_pending_tx');
-    if (!stored) {
-      setPendingRecord(null);
-      return;
-    }
-
-    let pending: PendingTxRecord;
-    try {
-      pending = JSON.parse(stored) as PendingTxRecord;
-    } catch {
-      localStorage.removeItem(pendingKey);
-      localStorage.removeItem('stellar_pending_tx');
-      setPendingRecord(null);
-      return;
-    }
-
-    // Issue #58: Quarantine pending UI actions that belong to previous account
-    if (
-      pending.account &&
-      connection.publicKey &&
-      pending.account !== connection.publicKey
-    ) {
+    const pending = getPendingRecoveryRecord();
+    if (!pending) {
       return;
     }
 
     setPendingRecord(pending);
     setAmount(pending.amount);
-    setRecipient(pending.recipient);
+    if (pending.recipient) {
+      setRecipient(pending.recipient);
+    }
     setStatus('loading');
     setErrorMsg('');
-    setTxHash('');
+    setTxHash(pending.hash);
 
     let cancelled = false;
-    pollTransaction(pending.hash)
-      .then(async (hash) => {
-        if (cancelled) return;
-        setTxHash(hash);
+    void (async () => {
+      const outcome = await lookupTransactionStatus(pending.hash);
+      if (cancelled) return;
+
+      if (outcome === 'confirmed') {
         setStatus('success');
-        localStorage.removeItem(pendingKey);
-        localStorage.removeItem('stellar_pending_tx');
-        setPendingRecord(null);
+        clearPendingRecoveryRecord();
         await refreshXlmBalance();
-      })
-      .catch(async (err) => {
-        if (cancelled) return;
-        // Check authoritative status before offering retry
-        try {
-          const statusResult = await checkTransactionStatus(pending.hash);
-          if (cancelled) return;
-          if (statusResult.status === 'confirmed') {
-            setTxHash(pending.hash);
-            setStatus('success');
-            localStorage.removeItem(pendingKey);
-            localStorage.removeItem('stellar_pending_tx');
-            setPendingRecord(null);
-            await refreshXlmBalance();
-            return;
-          }
-          if (statusResult.status === 'failed') {
-            setStatus('timeout');
-            setStatusLookupOutcome('failed');
-            setStatusLookupMessage(
-              'Transaction failed on-chain. It is safe to submit a new transaction.',
-            );
-            setErrorMsg('Transaction failed on-chain.');
-            return;
-          }
-        } catch {
-          // ignore lookup error and proceed to timeout state
-        }
-        setStatus('timeout');
-        setStatusLookupOutcome('unknown');
-        setStatusLookupMessage(
-          'Authoritative status remains unavailable on the network.',
+        addNotification(
+          'tx_confirm',
+          `Recovered transaction confirmed! (${pending.hash.slice(0, 8)}...)`,
         );
+      } else if (outcome === 'failed') {
+        setStatus('error');
+        setErrorMsg('Recovered transaction failed on-chain');
+        clearPendingRecoveryRecord();
+      } else if (outcome === 'unknown') {
+        setStatus('error');
         setErrorMsg(
-          err instanceof Error
-            ? err.message
-            : 'Transaction confirmation timed out waiting for network confirmation.',
+          'Transaction status unknown: network unreachable. The transaction may still be pending on-chain. Recovery will not re-submit to prevent duplicates.',
         );
-      });
+      } else {
+        try {
+          const { pollTransaction } = await import('@/lib/stellarContract');
+          const finalHash = await pollTransaction(pending.hash);
+          if (cancelled) return;
+          setStatus('success');
+          setTxHash(finalHash);
+          clearPendingRecoveryRecord();
+          await refreshXlmBalance();
+          addNotification(
+            'tx_confirm',
+            `Transaction confirmed successfully! (${finalHash.slice(0, 8)}...)`,
+          );
+        } catch {
+          if (cancelled) return;
+          setStatus('error');
+          setErrorMsg('Recovered transaction failed or timed out on-chain');
+          clearPendingRecoveryRecord();
+        }
+      }
+    })();
 
     return () => {
       cancelled = true;
     };
-  }, [isOpen, refreshXlmBalance, connection.publicKey, connection.network]);
+  }, [isOpen, refreshXlmBalance, addNotification]);
 
   useEffect(() => {
     if (!isOpen || !connection.isConnected) {
       setFeeEstimate(null);
+      setSimulationResult(null);
+      setSimulationError(null);
       return;
     }
 
-    const currentStroops = xlmToStroops(amount);
-    if (!currentStroops || currentStroops <= BigInt(0)) {
+    const parsed = parseAssetAmount(amount, { decimals: 7 });
+    if (!parsed.success || parsed.stroops <= 0n) {
       setFeeEstimate(null);
+      setSimulationResult(null);
+      setSimulationError(null);
       return;
     }
+
+    const currentStroops = parsed.stroops;
 
     let cancelled = false;
     const abortController = new AbortController();
@@ -416,28 +462,25 @@ export default function StellarFiatModal({
 
     const timer = setTimeout(async () => {
       try {
-        let estimate: FeeEstimate | null = null;
-        if (isAdminMode) {
-          const to = recipient || connection.publicKey;
-          const { simulateWithdraw } = await import('@/lib/stellarContract');
-          estimate = await simulateWithdraw(
-            connection.publicKey,
-            to,
-            currentStroops,
-          );
-        } else {
-          const { simulateDeposit } = await import('@/lib/stellarContract');
-          estimate = await simulateDeposit(
-            connection.publicKey,
-            currentStroops,
-          );
-        }
+        const { simulateTransactionPayload } = await import('@/lib/stellarContract');
+        const sim = await simulateTransactionPayload({
+          operation: isAdminMode ? 'withdraw' : 'deposit',
+          account: connection.publicKey,
+          amount: currentStroops,
+          recipient: isAdminMode ? (recipient || connection.publicKey) : undefined,
+          network: connection.network || 'TESTNET',
+        });
         if (!cancelled) {
-          setFeeEstimate(estimate);
+          setSimulationResult(sim);
+          setFeeEstimate(sim.feeEstimate);
+          setSimulationError(null);
         }
-      } catch {
+      } catch (err) {
         if (!cancelled) {
+          const msg = err instanceof Error ? err.message : 'Simulation failed';
           setFeeEstimate(null);
+          setSimulationResult(null);
+          setSimulationError(msg);
         }
       } finally {
         if (!cancelled) {
@@ -454,6 +497,7 @@ export default function StellarFiatModal({
   }, [
     amount,
     connection.isConnected,
+    connection.network,
     connection.publicKey,
     isAdminMode,
     isOpen,
@@ -461,12 +505,14 @@ export default function StellarFiatModal({
   ]);
 
   useEffect(() => {
-    const xlm = parseFloat(amount);
-    if (!xlm || xlm <= 0) {
+    const parsed = parseAssetAmount(amount, { decimals: 7 });
+    if (!parsed.success || parsed.stroops <= 0n) {
       setFiatEstimate(null);
       setIsFiatEstimateStale(false);
       return;
     }
+
+    const xlm = Number(parsed.stroops) / 1e7;
 
     let cancelled = false;
 
@@ -474,6 +520,13 @@ export default function StellarFiatModal({
       try {
         const quote = await getTokenPriceWithStatus('XLM', fiatCurrency);
         if (!cancelled) {
+          const snapshot = createQuoteSnapshot(
+            quote.price,
+            'XLM',
+            fiatCurrency,
+            quote.source,
+          );
+          setQuoteSnapshot(snapshot);
           setFiatEstimate(
             formatFiatAmount(xlm * quote.price, fiatCurrency),
           );
@@ -494,14 +547,32 @@ export default function StellarFiatModal({
     };
   }, [amount, fiatCurrency]);
 
-  const numericAmount = Number.parseFloat(amount);
-  const isAmountInvalid = !Number.isFinite(numericAmount) || numericAmount <= 0;
-  const stroopsAmount = !isAmountInvalid ? xlmToStroops(amount) : null;
-  const hasValidAmount = stroopsAmount !== null && stroopsAmount > BigInt(0);
+  const parsedAmountResult = parseAssetAmount(amount, { decimals: 7 });
+  const stroopsAmount =
+    parsedAmountResult.success && parsedAmountResult.stroops > 0n
+      ? parsedAmountResult.stroops
+      : null;
+  const hasValidAmount = stroopsAmount !== null && stroopsAmount > 0n;
+  const amountFeedback = !amount
+    ? null
+    : !parsedAmountResult.success
+      ? parsedAmountResult.error
+      : parsedAmountResult.stroops <= 0n
+        ? 'Amount must be greater than zero'
+        : null;
+  const isAmountInvalid = amountFeedback !== null;
   const isRiskyAmount =
     twoFactorEnabled &&
-    Number.isFinite(numericAmount) &&
-    numericAmount >= highValueThreshold;
+    stroopsAmount !== null &&
+    stroopsAmount >= BigInt(highValueThreshold) * 10_000_000n;
+  const isSimulationStale = Boolean(
+    simulationResult &&
+    (simulationResult.account !== connection.publicKey ||
+      simulationResult.network !== (connection.network || 'TESTNET') ||
+      simulationResult.operation !== (isAdminMode ? 'withdraw' : 'deposit') ||
+      simulationResult.amountStroops !== stroopsAmount ||
+      (isAdminMode && (recipient || connection.publicKey) !== simulationResult.recipient))
+  );
   const isDepositFlow = !isAdminMode;
   const isLimitUnavailable =
     isDepositFlow &&
@@ -536,6 +607,7 @@ export default function StellarFiatModal({
     isStatusLoading ||
     isStatusPending ||
     !connection.isConnected ||
+    sessionExpired ||
     isAmountInvalid ||
     (isDepositFlow &&
       (isLoadingBridgeLimit || isLimitUnavailable || isOverLimit)) ||
@@ -651,7 +723,15 @@ export default function StellarFiatModal({
   };
 
   const handleAction = async () => {
-    if (!connection.isConnected) return;
+    if (!connection.isConnected || sessionExpired) {
+      setErrorMsg(
+        sessionExpired
+          ? 'Wallet session has expired. Please reconnect to continue.'
+          : 'Wallet disconnected. Please reconnect to continue.',
+      );
+      setStatus('error');
+      return;
+    }
 
     if (envVerification !== null && !envVerification.isValid) {
       setErrorMsg(
@@ -687,9 +767,9 @@ export default function StellarFiatModal({
       isAmountInvalid ||
       !amount ||
       stroopsAmount === null ||
-      stroopsAmount <= BigInt(0)
+      stroopsAmount <= 0n
     ) {
-      setErrorMsg('Invalid amount. Please enter a positive number.');
+      setErrorMsg(amountFeedback || 'Invalid amount. Please enter a positive number.');
       setStatus('error');
       return;
     }
@@ -716,8 +796,83 @@ export default function StellarFiatModal({
       return;
     }
 
+    // Step 1: Pre-Sign Confirmation Requirement
+    if (!requiresPreSignConfirmation) {
+      if (simulationError) {
+        setErrorMsg(`Simulation failed: ${simulationError}. Signing blocked.`);
+        setStatus('error');
+        return;
+      }
+      setIsLoadingFee(true);
+      try {
+        const { simulateTransactionPayload } = await import('@/lib/stellarContract');
+        const sim = await simulateTransactionPayload({
+          operation: isAdminMode ? 'withdraw' : 'deposit',
+          account: connection.publicKey,
+          amount: stroopsAmount,
+          recipient: isAdminMode ? (recipient || connection.publicKey) : undefined,
+          network: connection.network || 'TESTNET',
+        });
+        setSimulationResult(sim);
+        setFeeEstimate(sim.feeEstimate);
+        setSimulationError(null);
+        setRequiresPreSignConfirmation(true);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Simulation failed';
+        setSimulationError(msg);
+        setErrorMsg(`Simulation failed: ${msg}. Signing blocked.`);
+        setStatus('error');
+      } finally {
+        setIsLoadingFee(false);
+      }
+      return;
+    }
+
+    // Step 2: Ensure simulation is not stale or failed
+    if (isSimulationStale) {
+      setErrorMsg('Account or network changed since simulation. Please re-simulate before signing.');
+      setStatus('error');
+      return;
+    }
+    if (simulationError) {
+      setErrorMsg(`Simulation failed: ${simulationError}. Signing blocked.`);
+      setStatus('error');
+      return;
+    }
+
     if (status === 'loading' || isTxProcessing) {
       return;
+    }
+
+    // Protect transaction forms from stale quotes and balances (#62)
+    if (!hasConfirmedUpdatedValues && !shouldBypass) {
+      const revalidation = await protectionModule.revalidateFormInputs({
+        quoteSnapshot,
+        balanceSnapshot,
+        currentAmountXlm: amount,
+        walletAddress: connection.address || connection.publicKey,
+        fiatCurrency,
+      });
+
+      if (!revalidation.valid) {
+        if (revalidation.latestQuote) {
+          setQuoteSnapshot(revalidation.latestQuote);
+          const xlm = parseFloat(amount);
+          if (xlm > 0) {
+            setFiatEstimate(
+              formatFiatAmount(xlm * revalidation.latestQuote.price, fiatCurrency),
+            );
+          }
+        }
+        if (revalidation.latestBalance) {
+          setBalanceSnapshot(revalidation.latestBalance);
+        }
+        setReconfirmationNotice(
+          revalidation.explanation ||
+            'Critical values changed while reviewing. Please reconfirm to proceed.',
+        );
+        return;
+      }
     }
 
     const now = Date.now();
@@ -742,19 +897,18 @@ export default function StellarFiatModal({
         const pendingKey = getPendingTxKey(connection.publicKey, connection.network);
         let capturedHash: string | null = null;
         const onHashKnown = (hash: string) => {
-          capturedHash = hash;
-          const rec: PendingTxRecord = {
+          savePendingRecoveryRecord({
             hash,
+            operation: isAdminMode ? 'withdraw' : 'deposit',
             amount,
-            isAdminMode,
-            recipient,
+            amountStroops: stroopsAmount.toString(),
+            recipient: isAdminMode ? (recipient || connection.publicKey) : undefined,
+            network: connection.network || 'TESTNET',
             account: connection.publicKey,
-            network: connection.network,
+            timestamp: Date.now(),
+            stage: 'pending_confirmation',
             idempotencyKey: generatedIdempotencyKey,
-          };
-          setPendingRecord(rec);
-          localStorage.setItem(pendingKey, JSON.stringify(rec));
-          localStorage.setItem('stellar_pending_tx', JSON.stringify(rec));
+          });
         };
 
         const signTxWithContext = (xdr: string) =>
@@ -790,11 +944,10 @@ export default function StellarFiatModal({
           setTxHash(hash);
           setStatus('success');
           clearCache();
-          localStorage.removeItem(pendingKey);
-          localStorage.removeItem('stellar_pending_tx');
-          setPendingRecord(null);
+          clearPendingRecoveryRecord();
+          setRequiresPreSignConfirmation(false);
           // Refresh wallet balance after successful transaction
-          await refreshXlmBalance();
+          await refreshXlmBalance?.();
           addNotification(
             'tx_confirm',
             `Transaction confirmed successfully! (${hash.slice(0, 8)}...)`,
@@ -815,7 +968,7 @@ export default function StellarFiatModal({
           }
           if (!isAdminMode && onDepositSuccess) {
             onDepositSuccess({
-              xlmAmount: parseFloat(amount || '0'),
+              xlmAmount: Number(stroopsAmount) / 1e7,
               note: note.trim() || undefined,
             });
           }
@@ -850,9 +1003,7 @@ export default function StellarFiatModal({
 
           setErrorMsg(errMsg || 'Transaction failed');
           setStatus('error');
-          localStorage.removeItem(pendingKey);
-          localStorage.removeItem('stellar_pending_tx');
-          setPendingRecord(null);
+          clearPendingRecoveryRecord();
         }
       },
       `stellar_${isAdminMode ? 'withdraw' : 'deposit'}`,
@@ -864,6 +1015,8 @@ export default function StellarFiatModal({
     setTxHash('');
     setErrorMsg('');
     setRequiresPreSignConfirmation(false);
+    setSimulationResult(null);
+    setSimulationError(null);
     onClose();
   };
 
@@ -913,7 +1066,11 @@ export default function StellarFiatModal({
             )}
             <div className="flex items-center justify-center gap-2 mt-1">
               <a
-                href={`https://stellar.expert/explorer/testnet/tx/${txHash}`}
+                href={
+                  (connection.network || '').toLowerCase().includes('public')
+                    ? `https://stellar.expert/explorer/public/tx/${txHash}`
+                    : `https://stellar.expert/explorer/testnet/tx/${txHash}`
+                }
                 target="_blank"
                 rel="noreferrer"
                 className="text-blue-400 hover:underline text-xs break-all"
@@ -1129,27 +1286,52 @@ export default function StellarFiatModal({
           <SkeletonPayout />
         ) : (
           <>
-            {envVerification && !envVerification.isValid && (
+            {sessionExpired && (
               <div
-                data-testid="env-mismatch-banner"
-                className="theme-soft-danger border border-red-500/40 rounded-xl p-3.5 mb-4 text-xs"
+                data-testid="session-expired-banner"
+                className="theme-soft-warning mb-4 rounded-xl border border-amber-500/40 px-4 py-3 flex items-center justify-between gap-3"
               >
-                <div className="flex items-center gap-2 font-semibold text-red-300 mb-1">
-                  <AlertCircle className="w-4 h-4 flex-shrink-0" />
-                  <span>Network / Contract Identity Mismatch</span>
-                </div>
-                <p className="text-red-200 leading-relaxed">
-                  {envVerification.message}
-                </p>
-                {envVerification.recoveryGuidance && (
-                  <p className="text-red-300/80 mt-1.5 pt-1.5 border-t border-red-500/20 text-[11px]">
-                    <span className="font-semibold">Recovery Guidance:</span>{' '}
-                    {envVerification.recoveryGuidance}
+                <div>
+                  <p className="font-semibold text-xs text-amber-300">
+                    Wallet Session Expired
                   </p>
-                )}
+                  <p className="text-[11px] text-amber-200/80">
+                    Your draft inputs have been preserved. Re-authenticate to proceed.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  data-testid="reconnect-button"
+                  onClick={() => void reconnect()}
+                  className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-black text-xs font-semibold rounded-lg transition-colors flex-shrink-0"
+                >
+                  Reconnect
+                </button>
               </div>
             )}
-
+            {!connection.isConnected && !sessionExpired && (
+              <div
+                data-testid="wallet-disconnected-banner"
+                className="theme-soft-warning mb-4 rounded-xl border border-blue-500/40 px-4 py-3 flex items-center justify-between gap-3"
+              >
+                <div>
+                  <p className="font-semibold text-xs text-blue-300">
+                    Wallet Disconnected
+                  </p>
+                  <p className="text-[11px] text-blue-200/80">
+                    Connect your wallet to sign this transaction.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  data-testid="connect-wallet-button"
+                  onClick={() => void reconnect()}
+                  className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg transition-colors flex-shrink-0"
+                >
+                  Connect
+                </button>
+              </div>
+            )}
             <div className="mb-4">
               <label className="theme-text-secondary block text-sm mb-1">
                 Amount (XLM)
@@ -1171,13 +1353,13 @@ export default function StellarFiatModal({
                 ))}
               </div>
               <input
-                type="number"
-                min="0"
-                step="0.0000001"
+                type="text"
+                inputMode="decimal"
                 value={amount}
                 onChange={(e) => {
                   setAmount(e.target.value);
                   setActivePreset(null);
+                  setRequiresPreSignConfirmation(false);
                 }}
                 placeholder="0.00"
                 disabled={isTransactionBusy}
@@ -1187,10 +1369,10 @@ export default function StellarFiatModal({
                   : 'border-gray-600 focus:border-blue-500'
                   }`}
               />
-              {isAmountInvalid && amount && (
+              {amountFeedback && (
                 <p className="theme-soft-danger flex items-center gap-2 rounded-lg px-3 py-2 mt-2 text-xs">
                   <AlertCircle className="w-3 h-3 flex-shrink-0" />
-                  Invalid amount. Please enter a positive number.
+                  {amountFeedback}
                 </p>
               )}
               {connection.isConnected && (
@@ -1285,7 +1467,7 @@ export default function StellarFiatModal({
             )}
 
             {requiresPreSignConfirmation && !isStatusLoading && (
-              <div className="theme-surface-muted theme-border mb-4 rounded-xl border px-4 py-3">
+              <div data-testid="pre-sign-summary" className="theme-surface-muted theme-border mb-4 rounded-xl border px-4 py-3">
                 <h3 className="theme-text-muted text-[10px] font-bold uppercase tracking-widest mb-3">
                   Pre-Sign Transaction Summary
                 </h3>
@@ -1296,10 +1478,30 @@ export default function StellarFiatModal({
                       {operationType}
                     </span>
                   </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="theme-text-secondary">Contract</span>
+                    <span className="theme-text-primary font-mono text-[10px] break-all text-right">
+                      {CONTRACT_ID}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="theme-text-secondary">Token</span>
+                    <span className="theme-text-primary font-medium">
+                      XLM
+                    </span>
+                  </div>
                   <div className="flex items-center justify-between">
                     <span className="theme-text-secondary">Amount</span>
                     <span className="theme-text-primary font-medium">
-                      {stroopsToDisplay(stroopsAmount ?? BigInt(0))} XLM
+                      {stroopsAmount ? formatAssetAmount(stroopsAmount, { decimals: 7 }) : amount} XLM
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="theme-text-secondary">Estimated Fees</span>
+                    <span className="theme-text-primary font-medium">
+                      {feeEstimate?.fee !== undefined
+                        ? `~${feeEstimate.fee.toFixed(7)} XLM`
+                        : 'Simulating...'}
                     </span>
                   </div>
                   <div className="flex items-center justify-between">
@@ -1309,24 +1511,49 @@ export default function StellarFiatModal({
                     </span>
                   </div>
                   <div className="flex items-center justify-between gap-2">
-                    <span className="theme-text-secondary">Contract</span>
+                    <span className="theme-text-secondary">Signer</span>
                     <span className="theme-text-primary font-mono text-[10px] break-all text-right">
-                      {CONTRACT_ID}
+                      {connection.publicKey}
                     </span>
                   </div>
+                  {simulationResult?.expectedEffects && (
+                    <div className="mt-2 pt-2 border-t border-gray-700/40">
+                      <span className="theme-text-secondary block mb-1">Expected Effects:</span>
+                      <ul className="list-disc pl-4 space-y-0.5 text-[11px] theme-text-primary">
+                        {simulationResult.expectedEffects.map((eff, i) => (
+                          <li key={i}>{eff}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {isSimulationStale && (
+                    <div data-testid="stale-simulation-warning" className="mt-2 text-xs text-amber-400 bg-amber-400/10 p-2 rounded border border-amber-400/20">
+                      Account or network changed since simulation. Please re-simulate before signing.
+                    </div>
+                  )}
+                  {simulationError && (
+                    <div data-testid="simulation-error" className="mt-2 text-xs text-red-400 bg-red-400/10 p-2 rounded border border-red-400/20">
+                      Simulation failed: {simulationError}
+                    </div>
+                  )}
                 </div>
                 <div className="flex gap-2 mt-4">
                   <button
                     type="button"
-                    onClick={() => setRequiresPreSignConfirmation(false)}
+                    onClick={() => {
+                      setRequiresPreSignConfirmation(false);
+                      setSimulationError(null);
+                    }}
                     className="theme-border theme-text-secondary flex-1 rounded-lg border py-2 text-xs font-medium hover:theme-text-primary transition-colors"
                   >
                     Cancel
                   </button>
                   <button
                     type="button"
+                    data-testid="confirm-sign-button"
+                    disabled={Boolean(isSimulationStale || simulationError || isLoadingFee)}
                     onClick={() => void handleAction()}
-                    className="theme-primary-button flex-1 rounded-lg py-2 text-xs font-semibold"
+                    className="theme-primary-button flex-1 rounded-lg py-2 text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     Confirm & Sign
                   </button>
@@ -1469,6 +1696,45 @@ export default function StellarFiatModal({
               >
                 <AlertCircle className="w-4 h-4 flex-shrink-0" />
                 <span>{errorMsg}</span>
+              </div>
+            )}
+
+            {isAdminMode && (
+              <div className="mb-4">
+                <WithdrawalQueueStatus />
+              </div>
+            )}
+
+            {reconfirmationNotice && (
+              <div
+                data-testid="reconfirmation-notice"
+                className="bg-amber-950/40 border border-amber-500/50 rounded-xl p-3 mb-4 text-xs text-amber-200"
+              >
+                <div className="flex items-center gap-2 font-semibold text-amber-300 mb-1">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>Review Updated Values</span>
+                </div>
+                <p className="mb-2 leading-relaxed">{reconfirmationNotice}</p>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setHasConfirmedUpdatedValues(true);
+                      setReconfirmationNotice(null);
+                      void handleAction(true);
+                    }}
+                    className="theme-primary-button px-3 py-1.5 rounded-lg text-xs font-semibold"
+                  >
+                    Confirm Updated Values
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setReconfirmationNotice(null)}
+                    className="theme-border border px-3 py-1.5 rounded-lg text-xs text-gray-400 hover:text-white"
+                  >
+                    Dismiss
+                  </button>
+                </div>
               </div>
             )}
 

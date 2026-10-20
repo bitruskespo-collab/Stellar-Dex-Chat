@@ -1,33 +1,31 @@
 {
-  "name": "Stellar Dex Chat",
-  "image": "mcr.microsoft.com/devcontainers/rust:1-bullseye",
+  "name": "DEX with Fiat Dev Environment",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
   "features": {
+    "ghcr.io/devcontainers/features/rust:1": {
+      "version": "1.79.0",
+      "targets": "wasm32-unknown-unknown"
+    },
     "ghcr.io/devcontainers/features/node:1": {
       "version": "20"
-    }
+    },
+    "ghcr.io/devcontainers/features/github-cli:1": {}
   },
   "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "remoteUser": "vscode",
+  "hostRequirements": {
+    "cpus": 4,
+    "memory": "8gb",
+    "storage": "32gb"
+  },
   "customizations": {
     "vscode": {
       "extensions": [
         "rust-lang.rust-analyzer",
-        "tamasfe.even-better-toml",
-        "esbenp.prettier-vscode",
         "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
         "ms-playwright.playwright"
-      ],
-      "settings": {
-        "rust-analyzer.cargo.target": "wasm32-unknown-unknown",
-        "editor.formatOnSave": true,
-        "editor.defaultFormatter": "esbenp.prettier-vscode",
-        "[rust]": {
-          "editor.defaultFormatter": "rust-lang.rust-analyzer"
-        }
-      }
+      ]
     }
-  },
-  "remoteEnv": {
-    "SOROBAN_NETWORK": "testnet",
-    "SOROBAN_RPC_URL": "https://soroban-testnet.stellar.org"
   }
 }

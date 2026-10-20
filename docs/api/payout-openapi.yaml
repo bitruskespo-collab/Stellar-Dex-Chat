@@ -1,0 +1,110 @@
+openapi: 3.1.0
+info:
+  title: FiatBridge Payout API
+  version: 1.0.0
+  description: Versioned OpenAPI specification for FiatBridge payout routing, status tracking, and provider reconciliation.
+servers:
+  - url: https://api.stellar-dex-chat.org/v1
+    description: Production Gateway
+  - url: https://staging-api.stellar-dex-chat.org/v1
+    description: Testnet Staging Gateway
+paths:
+  /payouts/initiate:
+    post:
+      summary: Initiate a fiat payout from verified contract deposit
+      operationId: initiatePayout
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Unique client-generated key preventing duplicate payouts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InitiatePayoutRequest'
+      responses:
+        '200':
+          description: Payout initiated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayoutResponse'
+        '400':
+          description: Validation error or invalid recipient details
+        '409':
+          description: Idempotency conflict or duplicate payout reference
+        '429':
+          description: Rate limit exceeded
+
+  /payouts/{reference}/status:
+    get:
+      summary: Get real-time status of payout operation
+      operationId: getPayoutStatus
+      parameters:
+        - name: reference
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Authoritative payout status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayoutResponse'
+
+components:
+  schemas:
+    InitiatePayoutRequest:
+      type: object
+      required:
+        - txHash
+        - contractId
+        - amount
+        - currency
+        - recipientAccount
+        - bankCode
+      properties:
+        txHash:
+          type: string
+        contractId:
+          type: string
+        amount:
+          type: string
+        currency:
+          type: string
+          enum: [NGN, USD, EUR]
+        recipientAccount:
+          type: string
+        bankCode:
+          type: string
+
+    PayoutResponse:
+      type: object
+      required:
+        - reference
+        - status
+        - amount
+        - currency
+        - updatedAt
+      properties:
+        reference:
+          type: string
+        status:
+          type: string
+          enum: [PENDING, PROCESSING, SUCCESS, FAILED, DISPUTED]
+        amount:
+          type: string
+        currency:
+          type: string
+        providerReference:
+          type: string
+        updatedAt:
+          type: string
+          format: date-time

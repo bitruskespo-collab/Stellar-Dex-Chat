@@ -59,3 +59,8 @@ See [Dechat/README.md](Dechat/README.md#contributing) for repository conventions
 ## License
 
 MIT
+
+## Handsoff notes
+
+<!-- handsoff-issue-120 -->
+- #120: feat(observability): add PII-redacted structured payout lifecycle logs

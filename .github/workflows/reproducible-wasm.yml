@@ -1,0 +1,26 @@
+name: Reproducible Soroban WASM Build & Provenance
+
+on:
+  push:
+    paths:
+      - 'Dechat/stellar-contracts/**'
+  pull_request:
+    paths:
+      - 'Dechat/stellar-contracts/**'
+
+jobs:
+  verify-reproducibility:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Generate provenance metadata
+        run: |
+          cd Dechat/stellar-contracts
+          bash scripts/generate_build_provenance.sh

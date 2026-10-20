@@ -1,6 +1,65 @@
 import type { NextConfig } from 'next';
 import { withSentryConfig } from '@sentry/nextjs';
 
+// ---------------------------------------------------------------------------
+// Content Security Policy (#113)
+//
+// Origin inventory per environment. Any new third-party origin MUST be added
+// here and reviewed before merge (see CSP_ORIGIN_REVIEW.md).
+//
+//   script-src : self, Sentry (error reporting), Next.js inline bootstrap
+//   connect-src: self, Sentry, Stellar Horizon (mainnet + testnet), Freighter
+//                wallet bridge, configured RPC/API endpoints
+//   img-src    : self, data:, blob:, https: (token/asset icons)
+//   frame-src  : self, Freighter wallet bridge
+//   form-action: self only
+//
+// Rollout: start in report-only mode (CSP_REPORT_ONLY=true) with a report
+// endpoint, triage violations, then enforce. Nonces are not used because the
+// App Router emits inline bootstrap scripts; 'unsafe-inline' is retained for
+// script-src until a nonce pipeline is wired through middleware.
+// ---------------------------------------------------------------------------
+
+const isDev = process.env.NODE_ENV !== 'production';
+const reportOnly = process.env.CSP_REPORT_ONLY === 'true';
+const reportUri = process.env.CSP_REPORT_URI ?? '/api/csp-report';
+
+const scriptSrc = [
+  "'self'",
+  "'unsafe-inline'",
+  ...(isDev ? ["'unsafe-eval'"] : []),
+  'https://*.sentry.io',
+];
+
+const connectSrc = [
+  "'self'",
+  'https://*.sentry.io',
+  'https://horizon.stellar.org',
+  'https://horizon-testnet.stellar.org',
+  'wss://*.freighter.app',
+  ...(process.env.NEXT_PUBLIC_RPC_URL ? [process.env.NEXT_PUBLIC_RPC_URL] : []),
+  ...(process.env.NEXT_PUBLIC_API_URL ? [process.env.NEXT_PUBLIC_API_URL] : []),
+];
+
+const cspDirectives = [
+  "default-src 'self'",
+  `script-src ${scriptSrc.join(' ')}`,
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: https: blob:",
+  "font-src 'self' data:",
+  `connect-src ${connectSrc.join(' ')}`,
+  "frame-src 'self' https://*.freighter.app",
+  "frame-ancestors 'self'",
+  "form-action 'self'",
+  "base-uri 'self'",
+  "object-src 'none'",
+  "worker-src 'self' blob:",
+  "manifest-src 'self'",
+  `report-uri ${reportUri}`,
+];
+
+const cspValue = cspDirectives.join('; ');
+
 const nextConfig: NextConfig = {
   poweredByHeader: false,
   async headers() {
@@ -30,20 +89,14 @@ const nextConfig: NextConfig = {
           },
           {
             key: 'Permissions-Policy',
-            value: 'camera=(), microphone=(), geolocation=()',
+            value:
+              'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
           },
           {
-            key: 'Content-Security-Policy',
-            value: [
-              "default-src 'self'",
-              "script-src 'self' 'unsafe-eval' 'unsafe-inline' https://*.sentry.io",
-              "style-src 'self' 'unsafe-inline'",
-              "img-src 'self' data: https: blob:",
-              "font-src 'self' data:",
-              "connect-src 'self' https://*.sentry.io https://horizon.stellar.org https://horizon-testnet.stellar.org wss://*.freighter.app",
-              "frame-src 'self' https://*.freighter.app",
-              "worker-src 'self' blob:",
-            ].join('; '),
+            key: reportOnly
+              ? 'Content-Security-Policy-Report-Only'
+              : 'Content-Security-Policy',
+            value: cspValue,
           },
         ],
       },

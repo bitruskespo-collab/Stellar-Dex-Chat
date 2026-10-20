@@ -214,4 +214,106 @@ export const clearExpiredDrafts = (ttlSeconds: number = DEFAULT_TTL): void => {
   }
 
   keysToRemove.forEach((key) => localStorage.removeItem(key));
+};
+
+/**
+ * Transaction Draft Interface (Issue #70)
+ * Scoped by wallet and network with strict privacy controls.
+ * Sensitive fields (bank account numbers, secret keys, signed XDR payloads) are excluded.
+ */
+export const TRANSACTION_DRAFT_SCHEMA_VERSION = 1;
+const TX_DRAFT_PREFIX = 'tx_draft_';
+
+export interface TransactionDraft {
+  version: number;
+  walletAddress: string;
+  network: string;
+  asset: string;
+  amount: string;
+  destination: string;
+  memo?: string;
+  timestamp: number;
 }
+
+export const getTransactionDraftKey = (walletAddress: string, network: string): string => {
+  return `${TX_DRAFT_PREFIX}${network.toLowerCase()}_${walletAddress.toLowerCase()}`;
+};
+
+/**
+ * Persists a transaction draft with privacy sanitization.
+ */
+export const saveTransactionDraft = (
+  walletAddress: string,
+  network: string,
+  draft: Omit<TransactionDraft, 'version' | 'walletAddress' | 'network' | 'timestamp'>
+): boolean => {
+  if (typeof window === 'undefined' || !walletAddress || !network) return false;
+
+  // Sanitize: never store signed XDR or sensitive secrets
+  const sanitizedDraft: TransactionDraft = {
+    version: TRANSACTION_DRAFT_SCHEMA_VERSION,
+    walletAddress,
+    network,
+    asset: draft.asset || 'XLM',
+    amount: draft.amount || '',
+    destination: draft.destination || '',
+    memo: draft.memo ? draft.memo.slice(0, 28) : undefined, // Stellar text memo max length
+    timestamp: Date.now(),
+  };
+
+  try {
+    const key = getTransactionDraftKey(walletAddress, network);
+    localStorage.setItem(key, JSON.stringify(sanitizedDraft));
+    return true;
+  } catch (error) {
+    console.warn('Storage quota exceeded or storage unavailable for transaction draft', error);
+    return false;
+  }
+};
+
+/**
+ * Retrieves and migrates/validates a transaction draft.
+ */
+export const getTransactionDraft = (
+  walletAddress: string,
+  network: string,
+  ttlSeconds: number = DEFAULT_TTL
+): TransactionDraft | null => {
+  if (typeof window === 'undefined' || !walletAddress || !network) return null;
+
+  const key = getTransactionDraftKey(walletAddress, network);
+  try {
+    const item = localStorage.getItem(key);
+    if (!item) return null;
+
+    const parsed = JSON.parse(item);
+
+    // Schema version check and migration handling
+    if (!parsed || typeof parsed !== 'object' || parsed.version !== TRANSACTION_DRAFT_SCHEMA_VERSION) {
+      console.warn('Corrupt or outdated draft schema encountered. Resetting draft.');
+      localStorage.removeItem(key);
+      return null;
+    }
+
+    // Expiry check
+    if (Date.now() - parsed.timestamp > ttlSeconds * 1000) {
+      localStorage.removeItem(key);
+      return null;
+    }
+
+    return parsed as TransactionDraft;
+  } catch (e) {
+    console.warn('Corrupt storage payload for transaction draft. Purging.', e);
+    localStorage.removeItem(key);
+    return null;
+  }
+};
+
+/**
+ * Clear and reset transaction draft.
+ */
+export const clearTransactionDraft = (walletAddress: string, network: string): void => {
+  if (typeof window === 'undefined' || !walletAddress || !network) return;
+  const key = getTransactionDraftKey(walletAddress, network);
+  localStorage.removeItem(key);
+};
