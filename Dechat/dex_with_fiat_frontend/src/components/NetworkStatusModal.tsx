@@ -17,24 +17,28 @@ export default function NetworkStatusModal({ isOpen, onClose }: NetworkStatusMod
 
   if (!isOpen) return null;
 
+  const hasMismatch = isNetworkMismatch || (verification && !verification.isValid);
+
   const status = !connection.isConnected
     ? 'disconnected'
-    : isNetworkMismatch
+    : hasMismatch
       ? 'mismatch'
       : 'connected';
 
   const statusConfig = {
     connected: {
       dot: 'bg-green-400',
-      label: 'Connected',
-      description: `Wallet is connected to the Stellar ${connection.network} network.`,
+      label: 'Connected & Verified',
+      description: `Wallet is connected to Stellar ${connection.network} and contract identity is verified.`,
       Icon: Wifi,
       iconClass: isDarkMode ? 'text-green-400' : 'text-green-600',
     },
     mismatch: {
       dot: 'bg-amber-400',
-      label: 'Network Mismatch',
-      description: `Wallet is connected to ${connection.network} but the app expects ${EXPECTED_NETWORK}. Transactions are disabled.`,
+      label: 'Environment Mismatch',
+      description:
+        verification?.message ||
+        `Wallet is connected to ${connection.network} but the app expects ${EXPECTED_NETWORK}. Transactions are disabled.`,
       Icon: AlertTriangle,
       iconClass: isDarkMode ? 'text-amber-400' : 'text-amber-600',
     },
@@ -159,3 +163,4 @@ export default function NetworkStatusModal({ isOpen, onClose }: NetworkStatusMod
     </>
   );
 }
+

@@ -276,6 +276,144 @@ describe('StellarWalletContext', () => {
         'User rejected',
       );
     });
+
+    it('rejects when account switches prior to signing (Issue #54)', async () => {
+      const { result } = renderHook(() => useStellarWallet(), { wrapper });
+
+      await act(async () => {
+        await result.current.connect();
+      });
+
+      // Wallet switches account behind the scenes
+      freighter.getAddress.mockResolvedValue({ address: SECOND_ADDRESS });
+
+      await expect(
+        result.current.signTx('UNSIGNED_XDR', {
+          address: ADDRESS,
+          networkPassphrase: Networks.TESTNET,
+        }),
+      ).rejects.toThrow('WALLET_CONTEXT_CHANGED');
+    });
+
+    it('rejects when network switches prior to signing (Issue #54)', async () => {
+      const { result } = renderHook(() => useStellarWallet(), { wrapper });
+
+      await act(async () => {
+        await result.current.connect();
+      });
+
+      // Wallet switches network behind the scenes
+      freighter.getNetwork.mockResolvedValue({
+        network: 'PUBLIC',
+        networkPassphrase: Networks.PUBLIC,
+      });
+
+      await expect(
+        result.current.signTx('UNSIGNED_XDR', {
+          address: ADDRESS,
+          networkPassphrase: Networks.TESTNET,
+        }),
+      ).rejects.toThrow('WALLET_CONTEXT_CHANGED');
+    });
+
+    it('rejects when wallet disconnects prior to signing (Issue #54)', async () => {
+      const { result } = renderHook(() => useStellarWallet(), { wrapper });
+
+      await act(async () => {
+        await result.current.connect();
+      });
+
+      // Disconnect
+      act(() => {
+        result.current.disconnect();
+      });
+
+      await expect(
+        result.current.signTx('UNSIGNED_XDR', {
+          address: ADDRESS,
+          networkPassphrase: Networks.TESTNET,
+        }),
+      ).rejects.toThrow('Wallet is not connected');
+    });
+  });
+
+  describe('multi-account isolation & confirmation (Issue #58)', () => {
+    it('requestAccountSwitch stages pendingAccountSwitch without immediately switching', async () => {
+      window.freighter = {
+        getAccounts: vi
+          .fn()
+          .mockResolvedValue({ accounts: [ADDRESS, SECOND_ADDRESS] }),
+      };
+      const { result } = renderHook(() => useStellarWallet(), { wrapper });
+
+      await act(async () => {
+        await result.current.connect();
+      });
+
+      act(() => {
+        result.current.requestAccountSwitch(1);
+      });
+
+      expect(result.current.pendingAccountSwitch).toEqual({
+        targetIndex: 1,
+        targetAddress: SECOND_ADDRESS,
+      });
+      // Active address remains unchanged until confirmation
+      expect(result.current.connection.address).toBe(ADDRESS);
+    });
+
+    it('cancelAccountSwitch clears pendingAccountSwitch', async () => {
+      window.freighter = {
+        getAccounts: vi
+          .fn()
+          .mockResolvedValue({ accounts: [ADDRESS, SECOND_ADDRESS] }),
+      };
+      const { result } = renderHook(() => useStellarWallet(), { wrapper });
+
+      await act(async () => {
+        await result.current.connect();
+      });
+
+      act(() => {
+        result.current.requestAccountSwitch(1);
+      });
+      expect(result.current.pendingAccountSwitch).not.toBeNull();
+
+      act(() => {
+        result.current.cancelAccountSwitch();
+      });
+      expect(result.current.pendingAccountSwitch).toBeNull();
+      expect(result.current.connection.address).toBe(ADDRESS);
+    });
+
+    it('confirmAccountSwitch completes switch and increments contextVersion', async () => {
+      window.freighter = {
+        getAccounts: vi
+          .fn()
+          .mockResolvedValue({ accounts: [ADDRESS, SECOND_ADDRESS] }),
+      };
+      const { result } = renderHook(() => useStellarWallet(), { wrapper });
+
+      await act(async () => {
+        await result.current.connect();
+      });
+
+      const initialVersion = result.current.contextVersion;
+
+      act(() => {
+        result.current.requestAccountSwitch(1);
+      });
+
+      await act(async () => {
+        await result.current.confirmAccountSwitch();
+      });
+
+      expect(result.current.pendingAccountSwitch).toBeNull();
+      expect(result.current.connection.address).toBe(SECOND_ADDRESS);
+      expect(result.current.selectedAccountIndex).toBe(1);
+      expect(result.current.contextVersion).toBeGreaterThan(initialVersion);
+      expect(localStorage.getItem('stellar_address')).toBe(SECOND_ADDRESS);
+    });
   });
 
   it('mockConnect sets a TESTNET connection directly', () => {

@@ -2,19 +2,26 @@
 
 import { useSyncExternalStore } from 'react';
 import { TransactionHistoryEntry } from '@/types';
+import { useStellarWallet } from '@/contexts/StellarWalletContext';
 
-const TX_HISTORY_KEY = 'stellar_tx_history';
+const BASE_TX_HISTORY_KEY = 'stellar_tx_history';
 
 class TxHistoryStore {
   private entries: TransactionHistoryEntry[] = [];
   private listeners = new Set<() => void>();
+  private storageKey: string;
 
-  constructor() {
+  constructor(scope: string) {
+    this.storageKey = `${BASE_TX_HISTORY_KEY}_${scope}`;
     if (typeof window === 'undefined') {
       return;
     }
 
-    const stored = localStorage.getItem(TX_HISTORY_KEY);
+    let stored = localStorage.getItem(this.storageKey);
+    // Backward compatibility for unscoped storage if scope is anonymous
+    if (!stored && scope.endsWith('_anonymous')) {
+      stored = localStorage.getItem(BASE_TX_HISTORY_KEY);
+    }
     if (!stored) {
       return;
     }
@@ -36,7 +43,7 @@ class TxHistoryStore {
     this.listeners.forEach((listener) => listener());
 
     if (typeof window !== 'undefined') {
-      localStorage.setItem(TX_HISTORY_KEY, this.exportEntries());
+      localStorage.setItem(this.storageKey, this.exportEntries());
     }
   }
 
@@ -85,22 +92,47 @@ class TxHistoryStore {
   }
 }
 
-const txHistoryStore = new TxHistoryStore();
+const storeMap = new Map<string, TxHistoryStore>();
+
+export function getTxHistoryStore(account?: string, network?: string): TxHistoryStore {
+  const scope = `${network || 'TESTNET'}_${account || 'anonymous'}`;
+  let store = storeMap.get(scope);
+  if (!store) {
+    store = new TxHistoryStore(scope);
+    storeMap.set(scope, store);
+  }
+  return store;
+}
 
 const EMPTY_TX_HISTORY: TransactionHistoryEntry[] = [];
 
-export function useTxHistory() {
+export function useTxHistory(accountParam?: string, networkParam?: string) {
+  let walletAddress = accountParam;
+  let walletNetwork = networkParam;
+
+  try {
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    const wallet = useStellarWallet();
+    if (!walletAddress) walletAddress = wallet.connection.address;
+    if (!walletNetwork) walletNetwork = wallet.connection.network;
+  } catch {
+    // Outside StellarWalletProvider
+  }
+
+  const store = getTxHistoryStore(walletAddress, walletNetwork);
+
   const entries = useSyncExternalStore(
-    (listener) => txHistoryStore.subscribe(listener),
-    () => txHistoryStore.getSnapshot(),
+    (listener) => store.subscribe(listener),
+    () => store.getSnapshot(),
     () => EMPTY_TX_HISTORY,
   );
 
   return {
     entries,
-    addEntry: txHistoryStore.addEntry.bind(txHistoryStore),
-    updateEntry: txHistoryStore.updateEntry.bind(txHistoryStore),
-    clearEntries: txHistoryStore.clearEntries.bind(txHistoryStore),
-    exportEntries: txHistoryStore.exportEntries.bind(txHistoryStore),
+    addEntry: store.addEntry.bind(store),
+    updateEntry: store.updateEntry.bind(store),
+    clearEntries: store.clearEntries.bind(store),
+    exportEntries: store.exportEntries.bind(store),
   };
 }
+

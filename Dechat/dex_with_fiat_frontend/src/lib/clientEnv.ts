@@ -24,6 +24,10 @@ export const clientSchema = z.object({
     .string()
     .url()
     .default('https://soroban-testnet.stellar.org'),
+  NEXT_PUBLIC_STELLAR_NETWORK: z.string().default('TESTNET'),
+  NEXT_PUBLIC_STELLAR_NETWORK_PASSPHRASE: z
+    .string()
+    .default('Test SDF Network ; September 2015'),
   NEXT_PUBLIC_STELLAR_HORIZON_URL: z
     .string()
     .url()
@@ -42,6 +46,10 @@ const processClientEnvVars = () => {
       typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_XLM_SAC_CONTRACT : undefined,
     NEXT_PUBLIC_STELLAR_RPC_URL:
       typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_STELLAR_RPC_URL : undefined,
+    NEXT_PUBLIC_STELLAR_NETWORK:
+      typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_STELLAR_NETWORK : undefined,
+    NEXT_PUBLIC_STELLAR_NETWORK_PASSPHRASE:
+      typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_STELLAR_NETWORK_PASSPHRASE : undefined,
     NEXT_PUBLIC_STELLAR_HORIZON_URL:
       typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_STELLAR_HORIZON_URL : undefined,
     NEXT_PUBLIC_SENTRY_DSN:
@@ -62,3 +70,24 @@ const processClientEnvVars = () => {
 };
 
 export const clientEnv = processClientEnvVars();
+
+export interface StellarDeploymentConfig {
+  network: string;
+  networkPassphrase: string;
+  rpcUrl: string;
+  horizonUrl?: string;
+  contractId: string;
+  xlmSacId: string;
+}
+
+export function getStellarDeploymentConfig(): StellarDeploymentConfig {
+  return {
+    network: clientEnv.NEXT_PUBLIC_STELLAR_NETWORK,
+    networkPassphrase: clientEnv.NEXT_PUBLIC_STELLAR_NETWORK_PASSPHRASE,
+    rpcUrl: clientEnv.NEXT_PUBLIC_STELLAR_RPC_URL,
+    horizonUrl: clientEnv.NEXT_PUBLIC_STELLAR_HORIZON_URL,
+    contractId: clientEnv.NEXT_PUBLIC_FIAT_BRIDGE_CONTRACT,
+    xlmSacId: clientEnv.NEXT_PUBLIC_XLM_SAC_CONTRACT,
+  };
+}
+

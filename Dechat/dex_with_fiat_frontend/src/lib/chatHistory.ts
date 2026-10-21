@@ -22,6 +22,13 @@ const CHAT_HISTORY_KEY = 'defi_chat_history';
 const MAX_SESSIONS = 50; // Limit to prevent storage overflow
 
 export class ChatHistoryManager {
+  static getStorageKey(account?: string, network?: string): string {
+    if (!account && !network) return CHAT_HISTORY_KEY;
+    const net = network || 'TESTNET';
+    const acc = account || 'anonymous';
+    return `${CHAT_HISTORY_KEY}_${net}_${acc}`;
+  }
+
   static generateSessionTitle(messages: ChatMessage[]): string {
     // Find the first user message
     const firstUserMessage = messages.find((msg) => msg.role === 'user');
@@ -36,13 +43,18 @@ export class ChatHistoryManager {
     return `Chat ${new Date().toLocaleDateString()}`;
   }
 
-  static saveToLocalStorage(state: ChatHistoryState): void {
+  static saveToLocalStorage(
+    state: ChatHistoryState,
+    account?: string,
+    network?: string,
+  ): void {
     try {
       // Convert dates to strings for JSON serialization
       const serializable = {
         ...state,
         sessions: state.sessions.map((session) => ({
           ...session,
+          walletAddress: session.walletAddress || account,
           createdAt: session.createdAt.toISOString(),
           lastUpdated: session.lastUpdated.toISOString(),
           messages: session.messages.map((msg) => ({
@@ -52,15 +64,23 @@ export class ChatHistoryManager {
         })),
       };
 
-      localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(serializable));
+      const key = this.getStorageKey(account, network);
+      localStorage.setItem(key, JSON.stringify(serializable));
     } catch (error) {
       console.error('Failed to save chat history:', error);
     }
   }
 
-  static loadFromLocalStorage(): ChatHistoryState {
+  static loadFromLocalStorage(
+    account?: string,
+    network?: string,
+  ): ChatHistoryState {
     try {
-      const stored = localStorage.getItem(CHAT_HISTORY_KEY);
+      const key = this.getStorageKey(account, network);
+      let stored = localStorage.getItem(key);
+      if (!stored && !account && !network) {
+        stored = localStorage.getItem(CHAT_HISTORY_KEY);
+      }
       if (!stored) {
         return { currentSessionId: null, sessions: [] };
       }
@@ -78,11 +98,22 @@ export class ChatHistoryManager {
         })),
       }));
 
+      // Filter sessions by account if account is specified to prevent cross-account leak
+      const scopedSessions = account
+        ? sessions.filter(
+            (s: ChatSession) => !s.walletAddress || s.walletAddress === account,
+          )
+        : sessions;
+
       // Deduplicate sessions by ID (keep the most recent one)
-      const deduped = this.deduplicateSessions(sessions);
+      const deduped = this.deduplicateSessions(scopedSessions);
 
       return {
-        ...parsed,
+        currentSessionId:
+          parsed.currentSessionId &&
+          deduped.some((s) => s.id === parsed.currentSessionId)
+            ? parsed.currentSessionId
+            : deduped[0]?.id || null,
         sessions: deduped,
       };
     } catch (error) {

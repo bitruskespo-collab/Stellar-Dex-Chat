@@ -1,7 +1,6 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
-import { pollTransaction } from '@/lib/stellarContract';
 import {
   X,
   Loader2,
@@ -10,6 +9,10 @@ import {
   ArrowDownUp,
   Download,
   WifiOff,
+  AlertTriangle,
+  RefreshCw,
+  Clock,
+  ShieldAlert,
 } from 'lucide-react';
 import EmptyState from '@/components/ui/EmptyState';
 import CopyButton from '@/components/ui/CopyButton';
@@ -70,17 +73,29 @@ interface StellarFiatModalProps {
   messages?: ChatMessage[];
 }
 
-type TxStatus = 'idle' | 'pending' | 'loading' | 'success' | 'error';
+export type TxStatus =
+  | 'idle'
+  | 'pending'
+  | 'loading'
+  | 'success'
+  | 'error'
+  | 'timeout'
+  | 'context_changed';
 
-const PENDING_TX_KEY = 'stellar_pending_tx';
+export const getPendingTxKey = (account?: string, network?: string) =>
+  `stellar_pending_tx_${network || 'TESTNET'}_${account || 'anonymous'}`;
+
 const SUBMIT_COOLDOWN_MS = 2000;
 
-interface PendingTxRecord {
+export interface PendingTxRecord {
   hash: string;
   amount: string;
   isAdminMode: boolean;
   recipient: string;
   idempotencyKey?: string;
+  account?: string;
+  network?: string;
+  timestamp?: number;
 }
 
 export default function StellarFiatModal({
@@ -167,6 +182,29 @@ export default function StellarFiatModal({
       }
     }
   }, [connection.address, connection.publicKey]);
+
+  // Transaction retry and safe replacement states (Issue #57)
+  const [pendingRecord, setPendingRecord] = useState<PendingTxRecord | null>(null);
+  const [isCheckingStatus, setIsCheckingStatus] = useState(false);
+  const [statusLookupOutcome, setStatusLookupOutcome] = useState<
+    'confirmed' | 'failed' | 'not_found' | 'unknown' | null
+  >(null);
+  const [statusLookupMessage, setStatusLookupMessage] = useState<string>('');
+  const [confirmReplacementChecked, setConfirmReplacementChecked] =
+    useState(false);
+
+  // Environment & contract verification state (Issue #56)
+  const [envVerification, setEnvVerification] =
+    useState<VerificationResult | null>(null);
+
+  // Wallet context tracking & recovery state (Issue #54)
+  const builtContextRef = useRef<{
+    address: string;
+    networkPassphrase: string;
+  } | null>(null);
+  const [recoverableContextMessage, setRecoverableContextMessage] = useState<
+    string | null
+  >(null);
 
   // Helpers avoid JSX branch narrowing (pending/loading render a separate view).
   const isStatusPending = (status as TxStatus) === 'pending';
@@ -261,6 +299,77 @@ export default function StellarFiatModal({
     connection.network,
   ]);
 
+  // Issue #54: Detect wallet account and network changes during signing or preparation
+  useEffect(() => {
+    if (!isOpen) return;
+
+    if (builtContextRef.current) {
+      const addressChanged =
+        builtContextRef.current.address !== connection.address;
+      const networkChanged =
+        builtContextRef.current.networkPassphrase !==
+        connection.networkPassphrase;
+      const disconnected = !connection.isConnected;
+
+      if (addressChanged || networkChanged || disconnected) {
+        // Invalidate simulation and confirmation state immediately on context change
+        setFeeEstimate(null);
+        setRequiresPreSignConfirmation(false);
+
+        if (disconnected) {
+          setStatus('error');
+          setErrorMsg(
+            'Wallet disconnected. Please reconnect Freighter to proceed.',
+          );
+          setRecoverableContextMessage(null);
+        } else {
+          setStatus('context_changed');
+          setRecoverableContextMessage(
+            `Wallet context changed to account ${connection.address.slice(0, 6)}…${connection.address.slice(-4)} (${connection.network || 'TESTNET'}). Previous transaction context has been invalidated. Please confirm to rebuild for the new context.`,
+          );
+        }
+      }
+    }
+
+    builtContextRef.current = connection.isConnected
+      ? {
+          address: connection.address,
+          networkPassphrase: connection.networkPassphrase,
+        }
+      : null;
+  }, [
+    connection.address,
+    connection.networkPassphrase,
+    connection.isConnected,
+    connection.network,
+    isOpen,
+  ]);
+
+  // Issue #56: Verify chain identity and contract metadata
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    verifyNetworkAndContractIdentity(connection.networkPassphrase)
+      .then((res) => {
+        if (!cancelled) setEnvVerification(res);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setEnvVerification({
+            isValid: false,
+            reason: 'RPC_UNAVAILABLE',
+            message:
+              'Failed to verify chain and contract identity with Soroban RPC.',
+            recoveryGuidance: 'Check network connectivity to Soroban RPC.',
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, connection.networkPassphrase]);
+
+  // Issue #57 & #58: Scoped pending transaction recovery and safe status check
   useEffect(() => {
     if (!isOpen) {
       return;
@@ -271,6 +380,7 @@ export default function StellarFiatModal({
       return;
     }
 
+    setPendingRecord(pending);
     setAmount(pending.amount);
     if (pending.recipient) {
       setRecipient(pending.recipient);
@@ -504,7 +614,8 @@ export default function StellarFiatModal({
     (isRiskyAmount &&
       riskConfirmation.trim().toUpperCase() !==
       STELLAR_FIAT_RISK_CONFIRMATION_PHRASE) ||
-    Date.now() - lastActionTimestamp < SUBMIT_COOLDOWN_MS;
+    Date.now() - lastActionTimestamp < SUBMIT_COOLDOWN_MS ||
+    (envVerification !== null && !envVerification.isValid);
 
   const operationType = isAdminMode ? 'Withdraw' : 'Deposit';
   const txNetwork = connection.network || 'TESTNET';
@@ -547,12 +658,85 @@ export default function StellarFiatModal({
 
   if (!isOpen) return null;
 
+  const handleRetryStatusLookup = async () => {
+    if (!pendingRecord?.hash) return;
+    setIsCheckingStatus(true);
+    setStatusLookupMessage('');
+    try {
+      const result = await checkTransactionStatus(pendingRecord.hash);
+      setStatusLookupOutcome(result.status);
+      if (result.status === 'confirmed') {
+        setStatusLookupMessage('Transaction has been confirmed on-chain!');
+        setTxHash(pendingRecord.hash);
+        setStatus('success');
+        const pendingKey = getPendingTxKey(connection.publicKey, connection.network);
+        localStorage.removeItem(pendingKey);
+        localStorage.removeItem('stellar_pending_tx');
+        setPendingRecord(null);
+        await refreshXlmBalance();
+      } else if (result.status === 'failed') {
+        setStatusLookupMessage(
+          'Transaction failed on-chain. It is safe to submit a new transaction.',
+        );
+      } else if (result.status === 'not_found') {
+        setStatusLookupMessage(
+          'Transaction was not found in ledger or mempool. Please wait or confirm replacement.',
+        );
+      } else {
+        setStatusLookupMessage(
+          'Authoritative status remains unavailable on the network.',
+        );
+      }
+    } catch (err) {
+      setStatusLookupOutcome('unknown');
+      setStatusLookupMessage(
+        err instanceof Error ? err.message : 'Failed to query transaction status.',
+      );
+    } finally {
+      setIsCheckingStatus(false);
+    }
+  };
+
+  const handleConfirmReplacement = () => {
+    const pendingKey = getPendingTxKey(connection.publicKey, connection.network);
+    localStorage.removeItem(pendingKey);
+    localStorage.removeItem('stellar_pending_tx');
+    setPendingRecord(null);
+    setConfirmReplacementChecked(false);
+    setStatusLookupOutcome(null);
+    setStatusLookupMessage('');
+    setStatus('idle');
+    setErrorMsg('');
+  };
+
+  const handleConfirmNewContext = () => {
+    setStatus('idle');
+    setErrorMsg('');
+    setRecoverableContextMessage(null);
+    setFeeEstimate(null);
+    builtContextRef.current = connection.isConnected
+      ? {
+          address: connection.address,
+          networkPassphrase: connection.networkPassphrase,
+        }
+      : null;
+  };
+
   const handleAction = async () => {
     if (!connection.isConnected || sessionExpired) {
       setErrorMsg(
         sessionExpired
           ? 'Wallet session has expired. Please reconnect to continue.'
           : 'Wallet disconnected. Please reconnect to continue.',
+      );
+      setStatus('error');
+      return;
+    }
+
+    if (envVerification !== null && !envVerification.isValid) {
+      setErrorMsg(
+        envVerification.message ||
+          'Cannot execute transaction: Network or contract identity mismatch.',
       );
       setStatus('error');
       return;
@@ -710,6 +894,8 @@ export default function StellarFiatModal({
           `[StellarFiatModal] Initiating ${isAdminMode ? 'withdraw' : 'deposit'} with idempotencyKey: ${generatedIdempotencyKey}`,
         );
 
+        const pendingKey = getPendingTxKey(connection.publicKey, connection.network);
+        let capturedHash: string | null = null;
         const onHashKnown = (hash: string) => {
           savePendingRecoveryRecord({
             hash,
@@ -725,6 +911,12 @@ export default function StellarFiatModal({
           });
         };
 
+        const signTxWithContext = (xdr: string) =>
+          signTx(xdr, {
+            address: connection.publicKey,
+            networkPassphrase: connection.networkPassphrase,
+          });
+
         try {
           addNotification(
             'tx_submit',
@@ -737,14 +929,14 @@ export default function StellarFiatModal({
               connection.publicKey,
               to,
               stroopsAmount,
-              signTx,
+              signTxWithContext,
               onHashKnown,
             );
           } else {
             hash = await depositToContract(
               connection.publicKey,
               stroopsAmount,
-              signTx,
+              signTxWithContext,
               onHashKnown,
             );
           }
@@ -780,10 +972,36 @@ export default function StellarFiatModal({
               note: note.trim() || undefined,
             });
           }
-        } catch (err) {
-          setErrorMsg(
-            err instanceof Error ? err.message : 'Transaction failed',
-          );
+        } catch (err: unknown) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+
+          if (errMsg.includes('WALLET_CONTEXT_CHANGED')) {
+            setStatus('context_changed');
+            setRecoverableContextMessage(
+              'Wallet account or network changed during transaction signing. Transaction context has been invalidated. Please confirm to rebuild.',
+            );
+            if (!capturedHash) {
+              localStorage.removeItem(pendingKey);
+              localStorage.removeItem('stellar_pending_tx');
+              setPendingRecord(null);
+            }
+            return;
+          }
+
+          if (
+            errMsg.toLowerCase().includes('timed out') ||
+            (capturedHash && !errMsg.includes('Submission failed'))
+          ) {
+            setStatus('timeout');
+            setErrorMsg(errMsg);
+            setStatusLookupOutcome('unknown');
+            setStatusLookupMessage(
+              'Confirmation timed out. Query authoritative status before attempting replacement.',
+            );
+            return;
+          }
+
+          setErrorMsg(errMsg || 'Transaction failed');
           setStatus('error');
           clearPendingRecoveryRecord();
         }
@@ -909,6 +1127,145 @@ export default function StellarFiatModal({
                 Close
               </button>
             )}
+          </div>
+        ) : status === 'timeout' ? (
+          <div data-testid="timeout-view" className="py-4">
+            <div className="flex items-center gap-3 mb-4 text-amber-400">
+              <AlertTriangle className="w-8 h-8 flex-shrink-0" />
+              <div>
+                <h3 className="font-semibold text-base theme-text-primary">
+                  Transaction Timeout / In-Doubt
+                </h3>
+                <p className="theme-text-secondary text-xs">
+                  Confirmation timed out on the network.
+                </p>
+              </div>
+            </div>
+
+            {pendingRecord?.hash && (
+              <div className="theme-surface-muted theme-border rounded-lg border p-3 mb-4 text-xs font-mono break-all">
+                <span className="theme-text-muted block text-[10px] font-sans font-semibold uppercase tracking-wider mb-1">
+                  Transaction Reference
+                </span>
+                <span className="theme-text-primary">{pendingRecord.hash}</span>
+                <div className="mt-1">
+                  <CopyButton value={pendingRecord.hash} />
+                </div>
+              </div>
+            )}
+
+            <div className="mb-4">
+              <button
+                type="button"
+                data-testid="check-status-button"
+                onClick={() => void handleRetryStatusLookup()}
+                disabled={isCheckingStatus}
+                className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg border border-blue-500/40 text-blue-400 hover:bg-blue-500/10 transition-colors text-xs font-semibold disabled:opacity-50"
+              >
+                {isCheckingStatus ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Querying network...
+                  </>
+                ) : (
+                  'Query Authoritative Status'
+                )}
+              </button>
+
+              {statusLookupMessage && (
+                <div
+                  data-testid="status-outcome"
+                  className={`mt-2 p-2.5 rounded-lg border text-xs ${
+                    statusLookupOutcome === 'confirmed'
+                      ? 'theme-soft-success border-green-500/40'
+                      : statusLookupOutcome === 'failed'
+                        ? 'theme-soft-danger border-red-500/40'
+                        : 'theme-soft-warning border-amber-500/40'
+                  }`}
+                >
+                  <p className="font-medium">
+                    Status:{' '}
+                    <span className="capitalize">{statusLookupOutcome ?? 'Unknown'}</span>
+                  </p>
+                  <p className="mt-0.5">{statusLookupMessage}</p>
+                </div>
+              )}
+            </div>
+
+            <div
+              data-testid="duplicate-risk-warning"
+              className="theme-soft-warning border border-amber-500/30 rounded-lg p-3 mb-4 text-xs"
+            >
+              <div className="flex items-center gap-2 font-semibold text-amber-300 mb-1">
+                <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+                <span>Duplicate Risk Notice</span>
+              </div>
+              <p className="text-amber-200/90 leading-relaxed">
+                If the previous transaction was accepted by validators, submitting a replacement transaction could execute twice, causing duplicate funds to be transferred.
+              </p>
+              {statusLookupOutcome !== 'failed' && (
+                <label className="flex items-start gap-2.5 mt-3 pt-2 border-t border-amber-500/20 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    data-testid="duplicate-risk-checkbox"
+                    checked={confirmReplacementChecked}
+                    onChange={(e) => setConfirmReplacementChecked(e.target.checked)}
+                    className="mt-0.5 rounded border-gray-600 text-blue-600 focus:ring-blue-500"
+                  />
+                  <span className="text-amber-200 text-[11px] font-medium leading-tight">
+                    I understand the risk of duplicate transaction execution and want to proceed with replacement.
+                  </span>
+                </label>
+              )}
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <button
+                type="button"
+                data-testid="confirm-replacement-button"
+                onClick={handleConfirmReplacement}
+                disabled={statusLookupOutcome !== 'failed' && !confirmReplacementChecked}
+                className="theme-primary-button w-full py-2.5 rounded-lg text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+              >
+                Abandon & Submit Replacement
+              </button>
+              <button
+                type="button"
+                onClick={handleClose}
+                className="w-full py-2 text-xs theme-text-muted hover:theme-text-primary transition-colors text-center"
+              >
+                Close & Check Later
+              </button>
+            </div>
+          </div>
+        ) : status === 'context_changed' ? (
+          <div data-testid="context-changed-view" className="text-center py-6">
+            <AlertTriangle className="w-14 h-14 text-amber-400 mx-auto mb-4" />
+            <p className="theme-text-primary font-semibold text-lg mb-2">
+              Wallet Context Changed
+            </p>
+            <p
+              data-testid="recoverable-context-message"
+              className="theme-text-secondary text-xs mb-6 px-4 leading-relaxed"
+            >
+              {recoverableContextMessage ||
+                'Freighter wallet account or network changed during transaction processing. Simulation and confirmation state have been invalidated to protect your account.'}
+            </p>
+            <button
+              type="button"
+              data-testid="confirm-rebuild-button"
+              onClick={handleConfirmNewContext}
+              className="theme-primary-button w-full py-3 rounded-lg font-medium transition-colors text-sm mb-2"
+            >
+              Confirm & Rebuild for Current Context
+            </button>
+            <button
+              type="button"
+              onClick={handleClose}
+              className="w-full py-2 text-xs theme-text-muted hover:theme-text-primary transition-colors"
+            >
+              Cancel
+            </button>
           </div>
         ) : isTransactionBusy ? (
           <div className="text-center py-6">

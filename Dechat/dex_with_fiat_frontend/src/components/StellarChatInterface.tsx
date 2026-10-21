@@ -72,6 +72,10 @@ function StellarChatInterfaceContent() {
     accounts,
     selectedAccountIndex,
     selectAccount,
+    requestAccountSwitch,
+    confirmAccountSwitch,
+    cancelAccountSwitch,
+    pendingAccountSwitch,
     sessionExpired,
     clearSessionExpired,
     isNetworkMismatch,
@@ -693,8 +697,8 @@ function StellarChatInterfaceContent() {
                             className={`flex items-center gap-1 px-1.5 py-1 ${idx === selectedAccountIndex ? (isDarkMode ? 'bg-blue-900/50 text-blue-400' : 'bg-blue-50 text-blue-600') : ''}`}
                           >
                             <button
-                              onClick={async () => {
-                                await selectAccount(idx);
+                              onClick={() => {
+                                requestAccountSwitch(idx);
                                 setShowAccountDropdown(false);
                               }}
                               className={`flex-1 flex items-center gap-2 px-1.5 py-1 text-xs rounded transition-colors ${idx === selectedAccountIndex ? '' : isDarkMode ? 'text-gray-300 hover:bg-gray-700' : 'text-gray-700 hover:bg-gray-50'}`}
@@ -1069,6 +1073,57 @@ function StellarChatInterfaceContent() {
           transactions={txHistory}
           onClearHistory={clearTxHistory}
         />
+
+        {/* Multi-account switch confirmation dialog (Issue #58) */}
+        {pendingAccountSwitch && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-label="Confirm Account Switch"
+              className={`w-full max-w-sm rounded-xl p-5 border shadow-2xl ${
+                isDarkMode
+                  ? 'bg-gray-900 border-gray-700 text-gray-100'
+                  : 'bg-white border-gray-200 text-gray-900'
+              }`}
+            >
+              <h3 className="text-base font-semibold mb-2">Switch Stellar Account</h3>
+              <p className="text-xs text-gray-400 mb-4">
+                Switching accounts will isolate your chat sessions, transaction history, and cancel any pending actions for the current account.
+              </p>
+              <div className="space-y-2 text-xs mb-4 font-mono">
+                <div className="p-2 rounded bg-gray-800/50 border border-gray-700/50">
+                  <span className="text-gray-400 block text-[10px] uppercase font-sans">Active Account:</span>
+                  <span className="break-all">{connection.address}</span>
+                </div>
+                <div className="p-2 rounded bg-blue-950/40 border border-blue-800/40 text-blue-300">
+                  <span className="text-blue-400 block text-[10px] uppercase font-sans">Switching To:</span>
+                  <span className="break-all">{pendingAccountSwitch.targetAddress}</span>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={cancelAccountSwitch}
+                  className="flex-1 py-2 px-3 rounded-lg border border-gray-600 text-xs font-medium hover:bg-gray-800 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    await confirmAccountSwitch();
+                    cancelPendingRequest();
+                    setShowModal(false);
+                  }}
+                  className="flex-1 py-2 px-3 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold transition-colors"
+                >
+                  Confirm Switch
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Session expired banner */}
         {sessionExpired && (
