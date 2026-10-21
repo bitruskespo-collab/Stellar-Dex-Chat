@@ -22,7 +22,11 @@
 
 use crate::{BatchAdminOp, Error, FiatBridge, FiatBridgeClient};
 use proptest::prelude::*;
-use soroban_sdk::{testutils::Address as _, token, Address, Bytes, Env, Symbol, Vec};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    xdr::ToXdr,
+    token, Address, Bytes, Env, Symbol, Vec,
+};
 
 fn create_token_contract<'a>(
     env: &Env,
@@ -66,6 +70,13 @@ fn set_cooldown_op(env: &Env, ledgers: u32) -> BatchAdminOp {
     BatchAdminOp {
         op_type: Symbol::new(env, "set_cooldown"),
         payload: Bytes::from_slice(env, &ledgers.to_be_bytes()),
+    }
+}
+
+fn set_limit_op(env: &Env, token: &Address, limit: i128, nonce: u64) -> BatchAdminOp {
+    BatchAdminOp {
+        op_type: Symbol::new(env, "set_limit"),
+        payload: (token.clone(), limit, nonce).to_xdr(env),
     }
 }
 
@@ -197,6 +208,88 @@ fn failing_inner_op_does_not_mark_proposal_executed() {
     let proposal = client.get_multisig_proposal(&id).unwrap();
     assert!(!proposal.executed);
     assert_eq!(client.get_cooldown(), cooldown_before);
+}
+
+#[test]
+fn multisig_set_limit_shares_setter_validation_and_nonce_rules() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, signers) = setup_bridge_with_signers(&env, 2, 2);
+    let admin = signers.get(0).unwrap();
+    let signer = signers.get(1).unwrap();
+    let token = client.get_token().unwrap();
+
+    let valid_id = client.propose_multisig_action(
+        &admin,
+        &set_limit_op(&env, &token, 500_000, 0),
+    );
+    client.approve_multisig_action(&signer, &valid_id);
+    client.execute_multisig_action(&valid_id);
+    assert_eq!(client.get_limit(), 500_000);
+    assert_eq!(client.get_set_limit_nonce(&admin), 1);
+
+    client.set_limit_max_cap(&1_000);
+    let invalid_id = client.propose_multisig_action(
+        &admin,
+        &set_limit_op(&env, &token, 1_001, 1),
+    );
+    client.approve_multisig_action(&signer, &invalid_id);
+    assert_eq!(
+        client.try_execute_multisig_action(&invalid_id),
+        Err(Ok(Error::ExceedsLimitMaxCap))
+    );
+    let invalid_proposal = client.get_multisig_proposal(&invalid_id).unwrap();
+    assert!(!invalid_proposal.executed);
+    assert_eq!(client.get_limit(), 500_000);
+    assert_eq!(client.get_set_limit_nonce(&admin), 1);
+}
+
+#[test]
+fn timelocked_actions_dispatch_and_keep_failed_actions_queued() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _signers) = setup_bridge_with_signers(&env, 1, 1);
+    let valid_cooldown = 777u32;
+    let valid_id = client.queue_admin_action(
+        &Symbol::new(&env, "set_cooldown"),
+        &Bytes::from_slice(&env, &valid_cooldown.to_be_bytes()),
+        &34_560,
+    );
+    env.ledger().set_sequence_number(env.ledger().sequence() + 34_561);
+    client.execute_admin_action(&valid_id);
+    assert_eq!(client.get_cooldown(), valid_cooldown);
+
+    let invalid_id = client.queue_admin_action(
+        &Symbol::new(&env, "set_cooldown"),
+        &Bytes::from_slice(&env, &[0, 0, 0, 1, 0]),
+        &34_560,
+    );
+    env.ledger().set_sequence_number(env.ledger().sequence() + 34_561);
+    assert_eq!(
+        client.try_execute_admin_action(&invalid_id),
+        Err(Ok(Error::InternalError))
+    );
+    assert_eq!(
+        client.try_execute_admin_action(&invalid_id),
+        Err(Ok(Error::InternalError))
+    );
+
+    let invalid_value = u32::MAX;
+    let invalid_value_id = client.queue_admin_action(
+        &Symbol::new(&env, "set_cooldown"),
+        &Bytes::from_slice(&env, &invalid_value.to_be_bytes()),
+        &34_560,
+    );
+    env.ledger().set_sequence_number(env.ledger().sequence() + 34_561);
+    assert_eq!(
+        client.try_execute_admin_action(&invalid_value_id),
+        Err(Ok(Error::InvalidAmount))
+    );
+    assert!(client
+        .get_queued_admin_action(&invalid_value_id)
+        .is_some());
 }
 
 /// A non-signer cannot contribute an approval, so it cannot push a proposal

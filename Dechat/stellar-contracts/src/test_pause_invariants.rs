@@ -1,8 +1,8 @@
 //! Invariant tests for [`FiatBridge::pause`] / [`FiatBridge::unpause`].
 //!
-//! Pausing is an emergency circuit-breaker that blocks all state-changing
-//! entry points while leaving read-only view functions and existing on-chain
-//! state untouched. The invariants asserted here are:
+//! Global and scoped pauses block selected value-moving paths while leaving
+//! read-only views, cancellation, and recovery paths available. The invariants
+//! asserted here are:
 //!
 //! * a paused contract rejects `deposit`, `withdraw`, `request_withdrawal`,
 //!   and `execute_withdrawal` with `Error::ContractPaused`;
@@ -20,7 +20,7 @@
 
 #![cfg(test)]
 
-use crate::{Error, FiatBridge, FiatBridgeClient};
+use crate::{Error, FiatBridge, FiatBridgeClient, PauseScope};
 use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger},
     token, Address, Bytes, Env, Vec,
@@ -155,6 +155,98 @@ fn test_pause_blocks_execute_withdrawal() {
     let result = bridge.try_execute_withdrawal(&request_id, &None, &0, &0);
 
     assert_eq!(result, Err(Ok(Error::ContractPaused)));
+}
+
+#[test]
+fn scoped_pause_blocks_only_its_path_and_preserves_recovery() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_, bridge, _, token_addr, _, token_admin) = setup_bridge(&env);
+    let user = Address::generate(&env);
+    token_admin.mint(&user, &10_000);
+    let reference = Bytes::from_slice(&env, b"test");
+    bridge.deposit(&user, &1_000, &token_addr, &reference, &0, &0, &None);
+    let queued = bridge.request_withdrawal(&user, &500, &token_addr, &None, &0);
+
+    bridge.set_pause_scope(&PauseScope::WithdrawalExecution, &true);
+    let state = bridge.get_pause_state();
+    assert!(!state.global);
+    assert!(state.withdrawal_execution);
+    assert!(!state.deposits);
+    assert!(!state.withdrawal_requests);
+    assert!(!state.admin_transfers);
+
+    assert_eq!(
+        bridge.try_execute_withdrawal(&queued, &None, &0, &0),
+        Err(Ok(Error::ContractPaused))
+    );
+    bridge.deposit(&user, &100, &token_addr, &reference, &0, &0, &None);
+    let additional = bridge.request_withdrawal(&user, &100, &token_addr, &None, &0);
+    assert_ne!(additional, queued);
+
+    bridge.cancel_withdrawal(&queued);
+    assert_eq!(bridge.get_wq_depth(), 1);
+}
+
+#[test]
+fn deposit_scope_does_not_block_withdrawal_requests() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_, bridge, _, token_addr, _, token_admin) = setup_bridge(&env);
+    let user = Address::generate(&env);
+    token_admin.mint(&user, &5_000);
+    let reference = Bytes::from_slice(&env, b"test");
+    bridge.deposit(&user, &1_000, &token_addr, &reference, &0, &0, &None);
+
+    bridge.set_pause_scope(&PauseScope::Deposits, &true);
+    assert_eq!(
+        bridge.try_deposit(&user, &100, &token_addr, &reference, &0, &0, &None),
+        Err(Ok(Error::ContractPaused))
+    );
+    let request_id = bridge.request_withdrawal(&user, &100, &token_addr, &None, &0);
+    assert!(bridge.get_withdrawal_request(&request_id).is_some());
+}
+
+#[test]
+fn request_scope_does_not_block_deposits() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_, bridge, _, token_addr, _, token_admin) = setup_bridge(&env);
+    let user = Address::generate(&env);
+    token_admin.mint(&user, &5_000);
+
+    bridge.set_pause_scope(&PauseScope::WithdrawalRequests, &true);
+    assert_eq!(
+        bridge.try_request_withdrawal(&user, &100, &token_addr, &None, &0),
+        Err(Ok(Error::ContractPaused))
+    );
+    let reference = Bytes::from_slice(&env, b"test");
+    bridge.deposit(&user, &1_000, &token_addr, &reference, &0, &0, &None);
+    assert_eq!(bridge.get_total_deposited(), 1_000);
+}
+
+#[test]
+fn admin_transfer_scope_does_not_block_queue_recovery() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_, bridge, admin, token_addr, _, token_admin) = setup_bridge(&env);
+    let user = Address::generate(&env);
+    token_admin.mint(&user, &5_000);
+    let reference = Bytes::from_slice(&env, b"test");
+    bridge.deposit(&user, &1_000, &token_addr, &reference, &0, &0, &None);
+    let request_id = bridge.request_withdrawal(&user, &100, &token_addr, &None, &0);
+
+    bridge.set_pause_scope(&PauseScope::AdminTransfers, &true);
+    assert_eq!(
+        bridge.try_withdraw(&admin, &user, &50, &token_addr),
+        Err(Ok(Error::ContractPaused))
+    );
+    bridge.cancel_withdrawal(&request_id);
+    assert_eq!(bridge.get_wq_depth(), 0);
 }
 
 #[test]
@@ -374,7 +466,7 @@ fn test_pause_does_not_affect_view_functions() {
 }
 
 #[test]
-fn test_pause_blocks_all_state_changing_operations() {
+fn test_global_pause_blocks_value_moving_entrypoints() {
     let env = Env::default();
     env.mock_all_auths();
 

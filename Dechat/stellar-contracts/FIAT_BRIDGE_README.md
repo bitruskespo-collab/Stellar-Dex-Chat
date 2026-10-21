@@ -41,6 +41,37 @@ flowchart TD
 
 ---
 
+## Withdrawal Queue Scheduling
+
+Pending requests are indexed in global and risk-tier linked queues. Settling,
+cancelling, or reclaiming a request removes its links with bounded work. The
+admin scheduler examines at most `MAX_RISK_TIER + 1` tier heads. With
+`age_intervals = floor(age_ledgers / 720)`, its score is
+`effective_tier * 33 + 32 - min(age_intervals, 32)`, where
+`effective_tier = max(0, risk_tier - age_intervals)`. Lower scores go first;
+ties are ordered by enqueue ledger and request ID. The score is bounded by
+1,088. Aging changes scheduling only:
+timelocks, authorization, denylist, circuit-breaker, and solvency checks still
+apply when funds move.
+
+`get_withdrawal_queue_page(cursor, limit)` returns pending requests in request-ID
+order. `limit` must be between 1 and 100, and `next_cursor` is the continuation
+cursor. For existing deployments, call
+`migrate_withdrawal_queue_index(cursor, limit)` as admin until it returns
+`None`; each call scans at most 25 request IDs. Queue mutations return
+`QueueIndexMigrationRequired` until this backfill completes.
+
+## Scoped Emergency Pauses
+
+`set_pause_scope(scope, paused)` independently controls deposits, new withdrawal
+requests, withdrawal execution, or admin/fee transfers. `get_pause_state()`
+reports these flags and the legacy global pause. Scoped pauses do not disable
+read-only views, queue cancellation, expiry reclamation, or token recovery.
+Pause checks do not bypass or replace the contract's other authorization and
+solvency checks.
+
+---
+
 ## Circuit Breaker
 
 The FiatBridge uses a **global rolling withdrawal circuit breaker** as a last-resort safety stop for withdrawal flows.
@@ -117,6 +148,7 @@ All errors are returned as `Result<_, Error>` variants. The contract uses a flat
 | 16 | `NoPendingAdmin` | Admin Transfer | `accept_admin` called but no pending admin was set | `accept_admin` |
 | 17 | `ActionNotReady` | Timelock | Timelock delay is less than `MIN_TIMELOCK_DELAY`, or execution attempted before `target_ledger` | `queue_admin_action`, `execute_admin_action` |
 | 18 | `ActionNotQueued` | Timelock | No queued admin action exists for the given ID | `execute_admin_action` |
+| 504 | `QueueIndexMigrationRequired` | Withdrawal Queue | Existing queue index backfill must complete before queue mutations | `request_withdrawal`, `execute_withdrawal`, `cancel_withdrawal`, `finalize_cancellation`, `reclaim_expired_withdrawal` |
 | 19 | `NoEmergencyRecoveryAddress` | Emergency | Emergency recovery address has not been set | (reserved for emergency recovery flow) |
 | 20 | `InactivityThresholdNotReached` | Emergency | Admin inactivity period has not yet elapsed | (reserved for inactivity-triggered recovery) |
 | 21 | `InvalidRecipient` | Withdrawal | Recipient address failed validation | (reserved for future recipient checks) |
@@ -170,7 +202,13 @@ A GitHub Actions step validates that the error table stays in sync with the cont
 | `withdraw(to, amount, token)` | admin | Immediate admin withdrawal |
 | `request_withdrawal(to, amount, token)` | admin | Queue a time-locked withdrawal |
 | `execute_withdrawal(id, partial?)` | — | Execute a queued withdrawal after unlock |
+| `get_withdrawal_queue_page(cursor, limit)` | — | Read pending withdrawals in bounded request-ID pages |
+| `get_next_priority_withdrawal()` | — | Select the next request by aging-adjusted risk tier |
+| `get_withdrawal_schedule_info(id)` | — | Read age, effective tier, score, and enqueue ledger |
 | `cancel_withdrawal(id)` | admin | Cancel a queued withdrawal |
+| `set_pause_scope(scope, paused)` | admin | Pause one value-moving path |
+| `get_pause_state()` | — | Read global and scoped pause flags |
+| `migrate_withdrawal_queue_index(cursor, limit)` | admin | Backfill the bounded pending queue index |
 | `set_limit(token, limit)` | admin | Update per-token deposit limit |
 | `set_limit_max_cap(max_cap)` | admin | Set the global ceiling for future per-token liability limits |
 | `get_set_limit_max_cap()` | — | Read the current global per-token limit ceiling |

@@ -1850,7 +1850,7 @@ fn test_withdrawal_quota_resets_after_window() {
 }
 
 #[test]
-fn test_pause_blocks_state_changing_user_operations_until_unpaused() {
+fn test_global_pause_blocks_value_movement_but_allows_cancellation() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -1880,10 +1880,8 @@ fn test_pause_blocks_state_changing_user_operations_until_unpaused() {
         bridge.try_execute_withdrawal(&req_id, &None, &0, &0, &0),
         Err(Ok(Error::ContractPaused))
     );
-    assert_eq!(
-        bridge.try_cancel_withdrawal(&req_id),
-        Err(Ok(Error::ContractPaused))
-    );
+    bridge.cancel_withdrawal(&req_id);
+    assert_eq!(bridge.get_wq_depth(), 0);
 
     bridge.unpause();
     bridge.deposit(&user, &100, &token_addr, &Bytes::new(&env), &0, &0, &None);

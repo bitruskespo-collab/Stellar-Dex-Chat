@@ -10,7 +10,7 @@
 //! * **Queue depth shrinks by one per cancellation.**
 //! * **The cancelled request is unreachable afterwards.**
 //! * **Unauthorised callers are rejected and leave no state change.**
-//! * **Cancellation while paused is rejected.**
+//! * **Cancellation remains available while paused for recovery.**
 //! * **Non-existent request ids are rejected.**
 //! * **Failure paths do not partially mutate storage.**
 //!
@@ -247,7 +247,7 @@ fn cancelled_request_cannot_be_cancelled_again() {
 }
 
 #[test]
-fn paused_contract_rejects_cancellation() {
+fn paused_contract_allows_cancellation() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -260,8 +260,8 @@ fn paused_contract_rejects_cancellation() {
 
     fx.bridge.pause();
     let result = fx.bridge.try_cancel_withdrawal(&id);
-    assert_eq!(result, Err(Ok(Error::ContractPaused)));
-    assert_eq!(fx.bridge.get_wq_depth(), before_depth);
+    assert_eq!(result, Ok(Ok(())));
+    assert_eq!(fx.bridge.get_wq_depth(), before_depth - 1);
     assert_core_accounting_invariants(&fx);
 }
 

@@ -45,6 +45,7 @@ Generated from the `Error` enum in `Dechat/stellar-contracts/src/lib.rs`.
 | 501 | `RequestNotFound` | Withdrawal Queue | Withdrawal request does not exist |
 | 502 | `WithdrawalLocked` | Withdrawal Queue | Withdrawal request not yet unlocked |
 | 503 | `OperatorDailyLimitExceeded` | Withdrawal Queue | Operator's daily withdrawal limit exceeded |
+| 504 | `QueueIndexMigrationRequired` | Withdrawal Queue | Existing queue index backfill must complete before queue mutations |
 | 601 | `ActionNotQueued` | Governance & Timelock | Admin action is not queued |
 | 602 | `ActionNotReady` | Governance & Timelock | Admin action timelock has not elapsed |
 | 603 | `InactivityThresholdNotReached` | Governance & Timelock | Inactivity threshold not yet reached |
@@ -80,7 +81,7 @@ Generated from the `Error` enum in `Dechat/stellar-contracts/src/lib.rs`.
 | Authorization | 201–207 | Access control and permissions |
 | Constraints | 301–319 | Amount, limit, and business rule validation |
 | Funds & Balances | 401–402 | Balance checks and fee management |
-| Withdrawal Queue | 501–503 | Withdrawal request processing |
+| Withdrawal Queue | 501–504 | Withdrawal request processing |
 | Governance & Timelock | 601–607 | Admin actions and contract upgrades |
 | External Services | 701–704 | Oracle and pricing integration |
 | Quota & Migration | 801–803 | Quota enforcement and data migrations |

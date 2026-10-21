@@ -150,10 +150,8 @@ fn reclaim_expired_withdrawal_removes_from_queue_and_releases_liability() {
     assert!(client.get_withdrawal_request(&id).is_none());
 }
 
-/// Issue #1424: `reclaim_expired_withdrawal` used to skip the pause check
-/// that `execute_withdrawal` and `cancel_withdrawal` already had.
 #[test]
-fn reclaim_expired_withdrawal_now_respects_pause() {
+fn reclaim_expired_withdrawal_remains_available_during_pause() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -170,8 +168,8 @@ fn reclaim_expired_withdrawal_now_respects_pause() {
 
     client.pause();
 
-    let result = client.try_reclaim_expired_withdrawal(&id);
-    assert_eq!(result, Err(Ok(Error::ContractPaused)));
+    client.reclaim_expired_withdrawal(&id);
+    assert_eq!(client.get_wq_depth(), 0);
 }
 
 /// Cancelling and reclaiming operate correctly on distinct tiers, proving

@@ -1,6 +1,6 @@
 #![cfg(test)]
 extern crate std;
-use crate::{FiatBridge, FiatBridgeClient};
+use crate::{FiatBridge, FiatBridgeClient, MAX_AUDIT_PAGE_SIZE};
 use soroban_sdk::{testutils::Address as _, Address, Bytes, Env};
 use std::println;
 
@@ -171,4 +171,62 @@ fn test_resource_budgets_deterministic_execution() {
             max_mem
         );
     }
+}
+
+#[test]
+fn withdrawal_queue_work_is_bounded_as_history_grows() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (bridge, _admin, token_addr, token_admin) = setup_benchmark_bridge(&env);
+    let user = Address::generate(&env);
+    token_admin.mint(&user, &20_000);
+    bridge.deposit(&user, &10_000, &token_addr, &Bytes::new(&env), &0, &0, &None);
+
+    env.cost_estimate().budget().reset_default();
+    let first_request_id = bridge.request_withdrawal(&user, &1, &token_addr, &None, &0);
+    let first_request_cpu = env.cost_estimate().budget().cpu_instruction_cost();
+    let first_request_mem = env.cost_estimate().budget().memory_bytes_cost();
+
+    env.cost_estimate().budget().reset_default();
+    let _ = bridge.get_next_priority_withdrawal();
+    let first_schedule_cpu = env.cost_estimate().budget().cpu_instruction_cost();
+    let first_schedule_mem = env.cost_estimate().budget().memory_bytes_cost();
+
+    env.cost_estimate().budget().reset_default();
+    bridge.cancel_withdrawal(&first_request_id);
+    let first_dequeue_cpu = env.cost_estimate().budget().cpu_instruction_cost();
+    let first_dequeue_mem = env.cost_estimate().budget().memory_bytes_cost();
+
+    for _ in 0..100 {
+        bridge.request_withdrawal(&user, &1, &token_addr, &None, &0);
+    }
+
+    env.cost_estimate().budget().reset_default();
+    let large_request_id = bridge.request_withdrawal(&user, &1, &token_addr, &None, &0);
+    let large_request_cpu = env.cost_estimate().budget().cpu_instruction_cost();
+    let large_request_mem = env.cost_estimate().budget().memory_bytes_cost();
+
+    env.cost_estimate().budget().reset_default();
+    let _ = bridge.get_next_priority_withdrawal();
+    let large_schedule_cpu = env.cost_estimate().budget().cpu_instruction_cost();
+    let large_schedule_mem = env.cost_estimate().budget().memory_bytes_cost();
+
+    env.cost_estimate().budget().reset_default();
+    bridge.cancel_withdrawal(&large_request_id);
+    let large_dequeue_cpu = env.cost_estimate().budget().cpu_instruction_cost();
+    let large_dequeue_mem = env.cost_estimate().budget().memory_bytes_cost();
+
+    env.cost_estimate().budget().reset_default();
+    let _ = bridge.get_withdrawal_queue_page(&0, &MAX_AUDIT_PAGE_SIZE);
+    let page_cpu = env.cost_estimate().budget().cpu_instruction_cost();
+    let page_mem = env.cost_estimate().budget().memory_bytes_cost();
+
+    println!(
+        "MEASURED: withdrawal queue depth 1 -> 101; enqueue CPU {first_request_cpu} -> {large_request_cpu}, MEM {first_request_mem} -> {large_request_mem}; dequeue CPU {first_dequeue_cpu} -> {large_dequeue_cpu}, MEM {first_dequeue_mem} -> {large_dequeue_mem}; scheduler CPU {first_schedule_cpu} -> {large_schedule_cpu}, MEM {first_schedule_mem} -> {large_schedule_mem}; 100-entry page CPU {page_cpu}, MEM {page_mem}"
+    );
+    assert_eq!(bridge.get_wq_depth(), 100);
+    assert!(large_request_cpu > 0 && large_request_mem > 0);
+    assert!(large_schedule_cpu > 0 && large_schedule_mem > 0);
+    assert!(large_dequeue_cpu > 0 && large_dequeue_mem > 0);
+    assert!(page_cpu > 0 && page_mem > 0);
 }

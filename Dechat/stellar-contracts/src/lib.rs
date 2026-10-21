@@ -1,8 +1,8 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, token, xdr::ToXdr, Address,
-    Bytes, BytesN, Env, Symbol, Vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, token,
+    xdr::{FromXdr, ToXdr}, Address, Bytes, BytesN, Env, Symbol, Vec,
 };
 
 pub mod math;
@@ -92,6 +92,7 @@ pub enum Error {
     RequestNotFound = 501,
     WithdrawalLocked = 502,
     OperatorDailyLimitExceeded = 503,
+    QueueIndexMigrationRequired = 504,
 
     // --- 600 series: Governance & Timelock ---
     ActionNotQueued = 601,
@@ -148,6 +149,10 @@ pub enum Error {
 // ── Models ────────────────────────────────────────────────────────────────
 pub const AUDIT_SCHEMA_VERSION: u32 = 1;
 pub const MAX_AUDIT_PAGE_SIZE: u32 = 100;
+pub const MAX_QUEUE_MIGRATION_PAGE_SIZE: u32 = 25;
+const MAX_RECEIPTS_TO_EXTEND_PER_WITHDRAWAL: u32 = 100;
+pub const MAX_RISK_TIER: u32 = 32;
+pub const RISK_AGING_INTERVAL_LEDGERS: u32 = 720;
 
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -185,6 +190,29 @@ pub enum LiabilityAuditStatus {
 }
 
 #[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PauseScope {
+    /// Blocks `deposit` calls only.
+    Deposits = 0,
+    /// Blocks new `request_withdrawal` calls only.
+    WithdrawalRequests = 1,
+    /// Blocks `execute_withdrawal`; requests and cancellations remain available.
+    WithdrawalExecution = 2,
+    /// Blocks direct and fee withdrawals; cancellation and rescue paths remain available.
+    AdminTransfers = 3,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PauseState {
+    pub global: bool,
+    pub deposits: bool,
+    pub withdrawal_requests: bool,
+    pub withdrawal_execution: bool,
+    pub admin_transfers: bool,
+}
+
+#[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LiabilityAuditView {
     pub version: u32,
@@ -198,6 +226,86 @@ pub struct LiabilityAuditView {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LiabilityAuditPage {
     pub records: Vec<LiabilityAuditView>,
+    pub next_cursor: Option<u64>,
+}
+
+/// Scheduling metadata for a single queued withdrawal request.
+///
+/// Operators use this value to explain why a specific request appears where it
+/// does in the service order without re-implementing the scoring formula
+/// off-chain.
+///
+/// ## Score formula and bounds
+///
+/// ```text
+/// aging_score = effective_tier * (MAX_RISK_TIER + 1)
+///               + (MAX_RISK_TIER - min(age_intervals, MAX_RISK_TIER))
+/// ```
+///
+/// where:
+/// - `effective_tier = risk_tier.saturating_sub(age_intervals)` ∈ `[0, MAX_RISK_TIER]`
+/// - `age_intervals  = (current_ledger - queued_ledger) / RISK_AGING_INTERVAL_LEDGERS`
+///
+/// All arithmetic is saturating; the maximum representable score is:
+/// ```text
+/// MAX_RISK_TIER * (MAX_RISK_TIER + 1) + MAX_RISK_TIER
+///   = MAX_RISK_TIER * (MAX_RISK_TIER + 2)
+///   = 32 * 34 = 1_088
+/// ```
+/// which fits comfortably inside `u64`.
+///
+/// A lower `aging_score` means higher scheduling priority. The score is
+/// bounded by `MAX_RISK_TIER * (MAX_RISK_TIER + 2)`; ties use enqueue ledger
+/// and request ID in ascending order, matching `get_next_priority_withdrawal`.
+///
+/// ## Safety guarantees
+///
+/// Computing or returning this struct is a **pure read**; it never bypasses
+/// the timelock (`unlock_ledger`), authorization checks, denylist, or solvency
+/// guards enforced by `execute_withdrawal`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithdrawalScheduleInfo {
+    /// Deterministic scheduling score — lower means higher priority.
+    ///
+    /// Bound: `[0, MAX_RISK_TIER * (MAX_RISK_TIER + 2)]` = `[0, 1_088]`
+    pub aging_score: u64,
+    /// Age-adjusted tier used by the scheduler at the queried ledger.
+    ///
+    /// Bound: `[0, MAX_RISK_TIER]`
+    pub effective_tier: u32,
+    /// Number of full `RISK_AGING_INTERVAL_LEDGERS` intervals the request has
+    /// been waiting.  Each interval reduces `effective_tier` by one (floors at
+    /// 0).
+    ///
+    /// Bound: `[0, u32::MAX / RISK_AGING_INTERVAL_LEDGERS]` — saturating
+    pub age_intervals: u32,
+    /// Ledger at which the withdrawal was queued (copied from
+    /// [`WithdrawRequest::queued_ledger`]).
+    pub queued_ledger: u32,
+    /// Original risk tier supplied at request time (before aging).
+    ///
+    /// Bound: `[0, MAX_RISK_TIER]`
+    pub risk_tier: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithdrawalQueueEntry {
+    pub request_id: u64,
+    pub request: WithdrawRequest,
+    pub effective_risk_tier: u32,
+    /// Deterministic scheduling score at the ledger this page was fetched.
+    ///
+    /// Lower means higher priority.  See [`WithdrawalScheduleInfo`] for the
+    /// exact formula and bounds.
+    pub aging_score: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithdrawalQueuePage {
+    pub entries: Vec<WithdrawalQueueEntry>,
     pub next_cursor: Option<u64>,
 }
 
@@ -673,6 +781,15 @@ pub struct PausedEvent {
 #[derive(Clone, Debug)]
 pub struct UnpausedEvent {
     pub version: u32,
+    pub by: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PauseScopeUpdatedEvent {
+    pub version: u32,
+    pub scope: PauseScope,
+    pub paused: bool,
     pub by: Address,
 }
 
@@ -1235,6 +1352,18 @@ pub enum DataKey {
     SetLimitNonce(Address),
     /// Pending cancellation lifecycle record keyed by withdrawal `request_id`.
     CancellationRequest(u64),
+    PausedDeposits,
+    PausedWithdrawalRequests,
+    PausedWithdrawalExecution,
+    PausedAdminTransfers,
+    WithdrawQueueTail,
+    WithdrawQueueNext(u64),
+    WithdrawQueuePrev(u64),
+    QueueIndexReady,
+    QueueIndexMigrationCursor,
+    TierQueueTail(u32),
+    TierQueueNext(u64),
+    TierQueuePrev(u64),
 }
 
 pub const ORACLE_PRICE_DECIMALS: i128 = 10_000_000;
@@ -1392,6 +1521,12 @@ impl FiatBridge {
             .set(&DataKey::WithdrawQueueHead, &Option::<u64>::None);
         env.storage()
             .instance()
+            .set(&DataKey::WithdrawQueueTail, &Option::<u64>::None);
+        env.storage()
+            .instance()
+            .set(&DataKey::QueueIndexReady, &true);
+        env.storage()
+            .instance()
             .set(&DataKey::LastAdminActionLedger, &env.ledger().sequence());
         env.storage()
             .instance()
@@ -1520,7 +1655,7 @@ impl FiatBridge {
         env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
         Self::validate_memo_hash(&env, &memo_hash)?;
         from.require_auth();
-        Self::require_not_paused(&env)?;
+        Self::require_not_paused_scope(&env, PauseScope::Deposits)?;
         // Reject a tripped breaker before any quota accounting or token call.
         // The rolling-volume helper below still handles lazy auto-reset.
         Self::require_circuit_breaker_clear(&env)?;
@@ -1868,7 +2003,7 @@ impl FiatBridge {
             return Err(Error::Unauthorized);
         }
 
-        Self::require_not_paused(&env)?;
+        Self::require_not_paused_scope(&env, PauseScope::AdminTransfers)?;
 
         if amount <= 0 {
             return Err(Error::ZeroAmount);
@@ -1973,12 +2108,16 @@ impl FiatBridge {
         env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
         Self::validate_memo_hash(&env, &memo_hash)?;
         let _admin = Self::require_admin(&env)?;
-        Self::require_not_paused(&env)?;
+        Self::require_not_paused_scope(&env, PauseScope::WithdrawalRequests)?;
+        Self::require_queue_index_ready(&env)?;
         Self::require_circuit_breaker_clear(&env)?;
         Self::check_and_increment_rate_limit(&env, Symbol::new(&env, "withdrawal_request"))?;
 
         if amount <= 0 {
             return Err(Error::ZeroAmount);
+        }
+        if risk_tier > MAX_RISK_TIER {
+            return Err(Error::InvalidAmount);
         }
 
         // Denylist
@@ -2008,15 +2147,21 @@ impl FiatBridge {
             .instance()
             .get(&DataKey::CooldownLedgers)
             .unwrap_or(0);
+        let expiry_window: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::WithdrawalExpiryWindow)
+            .unwrap_or(WITHDRAWAL_EXPIRY_WINDOW_LEDGERS);
         let request_id: u64 = env
             .storage()
             .instance()
             .get(&DataKey::NextRequestID)
             .unwrap_or(0);
-        let receipt_min_ttl = MIN_TTL
+        let request_min_ttl = MIN_TTL
             .saturating_add(lock_period)
-            .saturating_add(cooldown_ledgers);
-        Self::extend_receipt_ttls_for_depositor(&env, &to, receipt_min_ttl);
+            .saturating_add(cooldown_ledgers)
+            .saturating_add(expiry_window);
+        Self::extend_receipt_ttls_for_depositor(&env, &to, request_min_ttl);
 
         let queue_len: u64 = env
             .storage()
@@ -2036,6 +2181,11 @@ impl FiatBridge {
         env.storage()
             .persistent()
             .set(&DataKey::WithdrawQueue(request_id), &request);
+        env.storage().persistent().extend_ttl(
+            &DataKey::WithdrawQueue(request_id),
+            request_min_ttl,
+            request_min_ttl,
+        );
         let liability_record = LiabilityAuditView {
             version: AUDIT_SCHEMA_VERSION,
             request_id,
@@ -2046,15 +2196,15 @@ impl FiatBridge {
         env.storage()
             .persistent()
             .set(&DataKey::LiabilityRecord(request_id), &liability_record);
+        env.storage().persistent().extend_ttl(
+            &DataKey::LiabilityRecord(request_id),
+            request_min_ttl,
+            request_min_ttl,
+        );
         env.storage()
             .instance()
             .set(&DataKey::NextRequestID, &(request_id + 1));
 
-        if queue_len == 0 {
-            env.storage()
-                .instance()
-                .set(&DataKey::WithdrawQueueHead, &Some(request_id));
-        }
         env.storage()
             .instance()
             .set(&DataKey::WithdrawQueueLen, &(queue_len + 1));
@@ -2065,11 +2215,7 @@ impl FiatBridge {
             .instance()
             .get(&DataKey::TierQueueLen(risk_tier))
             .unwrap_or(0);
-        if tier_len == 0 {
-            env.storage()
-                .instance()
-                .set(&DataKey::TierQueueHead(risk_tier), &Some(request_id));
-        }
+        Self::append_withdrawal_queue_index(&env, request_id, risk_tier, request_min_ttl);
         env.storage()
             .instance()
             .set(&DataKey::TierQueueLen(risk_tier), &(tier_len + 1));
@@ -2154,7 +2300,8 @@ impl FiatBridge {
         nonce: u64,
     ) -> Result<(), Error> {
         env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
-        Self::require_not_paused(&env)?;
+        Self::require_not_paused_scope(&env, PauseScope::WithdrawalExecution)?;
+        Self::require_queue_index_ready(&env)?;
         Self::check_and_increment_rate_limit(&env, Symbol::new(&env, "withdrawal_execution"))?;
         let mut request: WithdrawRequest = env
             .storage()
@@ -2333,7 +2480,7 @@ impl FiatBridge {
     /// * [`Error::TokenNotWhitelisted`] – If the associated token configuration is missing.
     pub fn cancel_withdrawal(env: Env, request_id: u64) -> Result<(), Error> {
         let _admin = Self::require_admin(&env)?;
-        Self::require_not_paused(&env)?;
+        Self::require_queue_index_ready(&env)?;
         if !env
             .storage()
             .persistent()
@@ -2399,7 +2546,6 @@ impl FiatBridge {
         caller: Address,
     ) -> Result<(), Error> {
         env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
-        Self::require_not_paused(&env)?;
         caller.require_auth();
 
         let request: WithdrawRequest = env
@@ -2467,7 +2613,6 @@ impl FiatBridge {
     /// * [`Error::CancellationNotRequested`] – No cancellation is pending for this id.
     pub fn approve_cancellation(env: Env, request_id: u64) -> Result<(), Error> {
         env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
-        Self::require_not_paused(&env)?;
         let admin = Self::require_admin(&env)?;
 
         let mut cancellation: CancellationRequest = env
@@ -2518,8 +2663,8 @@ impl FiatBridge {
     ///   (e.g. fully executed before finalization).
     pub fn finalize_cancellation(env: Env, request_id: u64) -> Result<(), Error> {
         env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
-        Self::require_not_paused(&env)?;
         let _admin = Self::require_admin(&env)?;
+        Self::require_queue_index_ready(&env)?;
 
         let cancellation: CancellationRequest = env
             .storage()
@@ -2592,7 +2737,7 @@ impl FiatBridge {
         env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
 
         let _admin = Self::require_admin(&env)?;
-        Self::require_not_paused(&env)?;
+        Self::require_queue_index_ready(&env)?;
 
         let request: WithdrawRequest = env
             .storage()
@@ -2629,50 +2774,6 @@ impl FiatBridge {
         Ok(())
     }
 
-    fn advance_withdraw_queue_head(env: &Env, removed_id: u64) {
-        let head: Option<u64> = env
-            .storage()
-            .instance()
-            .get(&DataKey::WithdrawQueueHead)
-            .unwrap_or(None);
-        if head != Some(removed_id) {
-            return;
-        }
-
-        let queue_len: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::WithdrawQueueLen)
-            .unwrap_or(0);
-        if queue_len == 0 {
-            env.storage()
-                .instance()
-                .set(&DataKey::WithdrawQueueHead, &Option::<u64>::None);
-            return;
-        }
-
-        let next_id: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::NextRequestID)
-            .unwrap_or(0);
-
-        let mut i = removed_id.saturating_add(1);
-        while i < next_id {
-            if env.storage().persistent().has(&DataKey::WithdrawQueue(i)) {
-                env.storage()
-                    .instance()
-                    .set(&DataKey::WithdrawQueueHead, &Some(i));
-                return;
-            }
-            i += 1;
-        }
-
-        env.storage()
-            .instance()
-            .set(&DataKey::WithdrawQueueHead, &Option::<u64>::None);
-    }
-
     /// Sets the per-transaction limit for a specific token with replay protection.
     ///
     /// # Overflow Prevention & Safety Invariants
@@ -2700,41 +2801,7 @@ impl FiatBridge {
     /// * [`Error::ZeroAmount`] – If `limit <= 0`.
     pub fn set_limit(env: Env, token: Address, limit: i128, nonce: u64) -> Result<(), Error> {
         let admin = Self::require_admin(&env)?;
-
-        // Validate and increment nonce for replay protection
-        Self::validate_and_increment_set_limit_nonce(&env, &admin, nonce)?;
-
-        // Check against configured max cap
-        let max_cap: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::LimitMaxCap)
-            .unwrap_or(i128::MAX);
-        if limit > max_cap {
-            return Err(Error::ExceedsLimitMaxCap);
-        }
-        // Block if circuit breaker is active
-        Self::require_circuit_breaker_clear(&env)?;
-        let mut config: TokenConfig = env
-            .storage()
-            .persistent()
-            .get(&DataKey::TokenRegistry(token.clone()))
-            .ok_or(Error::TokenNotWhitelisted)?;
-        config.limit = limit;
-        env.storage()
-            .persistent()
-            .set(&DataKey::TokenRegistry(token.clone()), &config);
-
-        SetLimitEvent {
-            version: EVENT_VERSION,
-            token: token.clone(),
-            limit,
-            by: admin.clone(),
-            ledger: env.ledger().sequence(),
-        }
-        .publish(&env);
-
-        Ok(())
+        Self::apply_set_limit(&env, &token, limit, nonce, &admin)
     }
 
     pub fn set_token_allowlist_enabled(
@@ -2898,16 +2965,7 @@ impl FiatBridge {
 
     pub fn set_cooldown(env: Env, ledgers: u32) -> Result<(), Error> {
         let _admin = Self::require_admin(&env)?;
-
-        // Reject u32::MAX as it could cause overflow issues
-        if ledgers == u32::MAX {
-            return Err(Error::InvalidAmount);
-        }
-
-        env.storage()
-            .instance()
-            .set(&DataKey::CooldownLedgers, &ledgers);
-        Ok(())
+        Self::apply_cooldown(&env, ledgers)
     }
 
     /// Configure the withdrawal cooldown applied after a large deposit.
@@ -2941,30 +2999,56 @@ impl FiatBridge {
 
     pub fn set_lock_period(env: Env, ledgers: u32) -> Result<(), Error> {
         let _admin = Self::require_admin(&env)?;
-        env.storage().instance().set(&DataKey::LockPeriod, &ledgers);
-        Ok(())
+        Self::apply_lock_period(&env, ledgers)
     }
 
     pub fn pause(env: Env) -> Result<(), Error> {
         let admin = Self::require_admin(&env)?;
-        env.storage().instance().set(&DataKey::Paused, &true);
-        PausedEvent {
-            version: EVENT_VERSION,
-            by: admin.clone(),
-        }
-        .publish(&env);
-        Ok(())
+        Self::apply_global_pause(&env, &admin, true)
     }
 
     pub fn unpause(env: Env) -> Result<(), Error> {
         let admin = Self::require_admin(&env)?;
-        env.storage().instance().set(&DataKey::Paused, &false);
-        UnpausedEvent {
-            version: EVENT_VERSION,
-            by: admin.clone(),
+        Self::apply_global_pause(&env, &admin, false)
+    }
+
+    pub fn set_pause_scope(
+        env: Env,
+        scope: PauseScope,
+        paused: bool,
+    ) -> Result<(), Error> {
+        let admin = Self::require_admin(&env)?;
+        Self::apply_pause_scope(&env, scope, paused, &admin)
+    }
+
+    pub fn get_pause_state(env: Env) -> PauseState {
+        PauseState {
+            global: env
+                .storage()
+                .instance()
+                .get(&DataKey::Paused)
+                .unwrap_or(false),
+            deposits: env
+                .storage()
+                .instance()
+                .get(&DataKey::PausedDeposits)
+                .unwrap_or(false),
+            withdrawal_requests: env
+                .storage()
+                .instance()
+                .get(&DataKey::PausedWithdrawalRequests)
+                .unwrap_or(false),
+            withdrawal_execution: env
+                .storage()
+                .instance()
+                .get(&DataKey::PausedWithdrawalExecution)
+                .unwrap_or(false),
+            admin_transfers: env
+                .storage()
+                .instance()
+                .get(&DataKey::PausedAdminTransfers)
+                .unwrap_or(false),
         }
-        .publish(&env);
-        Ok(())
     }
 
     /// Set the anti-sandwich delay in ledgers. Use 0 to disable. Requires admin.
@@ -2979,16 +3063,7 @@ impl FiatBridge {
     /// * [`Error::InvalidAmount`] – If `ledgers == u32::MAX`.
     pub fn set_anti_sandwich_delay(env: Env, ledgers: u32) -> Result<(), Error> {
         let _admin = Self::require_admin(&env)?;
-
-        // Reject u32::MAX as it could cause overflow issues
-        if ledgers == u32::MAX {
-            return Err(Error::InvalidAmount);
-        }
-
-        env.storage()
-            .instance()
-            .set(&DataKey::AntiSandwichDelay, &ledgers);
-        Ok(())
+        Self::apply_anti_sandwich_delay(&env, ledgers)
     }
 
     pub fn transfer_admin(env: Env, new_admin: Address) -> Result<(), Error> {
@@ -3716,6 +3791,13 @@ impl FiatBridge {
         if env.ledger().sequence() <= action.target_ledger {
             return Err(Error::ActionNotReady);
         }
+
+        let operation = BatchAdminOp {
+            op_type: action.action_type.clone(),
+            payload: action.payload.clone(),
+        };
+        Self::execute_single_admin_op(&env, &operation)?;
+
         env.storage()
             .persistent()
             .remove(&DataKey::QueuedAdminAction(id));
@@ -4531,6 +4613,7 @@ impl FiatBridge {
         nonce: u64,
     ) -> Result<(), Error> {
         let admin = Self::require_admin(&env)?;
+        Self::require_not_paused_scope(&env, PauseScope::AdminTransfers)?;
 
         if amount <= 0 {
             return Err(Error::ZeroAmount);
@@ -4632,6 +4715,7 @@ impl FiatBridge {
         nonce: u64,
     ) -> Result<(), Error> {
         let admin = Self::require_admin(&env)?;
+        Self::require_not_paused_scope(&env, PauseScope::AdminTransfers)?;
 
         // ── Issue #1113: per-caller replay protection ────────────────────
         Self::validate_and_increment_fee_withdrawal_nonce(&env, &admin, nonce)?;
@@ -4871,26 +4955,7 @@ impl FiatBridge {
     /// - `Error::InvalidAmount` – if the threshold is u32::MAX
     pub fn set_slippage_threshold(env: Env, threshold_bps: u32) -> Result<(), Error> {
         let _admin = Self::require_admin(&env)?;
-
-        // Reject u32::MAX as it could cause overflow issues
-        if threshold_bps == u32::MAX {
-            return Err(Error::InvalidAmount);
-        }
-
-        // Validate slippage threshold is reasonable (0-10000 bps = 0-100%)
-        if threshold_bps > 10000 {
-            return Err(Error::SlippageTooHigh);
-        }
-
-        env.storage()
-            .instance()
-            .set(&DataKey::SlippageThreshold, &threshold_bps);
-        SlippageThresholdSetEvent {
-            version: EVENT_VERSION,
-            threshold_bps,
-        }
-        .publish(&env);
-        Ok(())
+        Self::apply_slippage_threshold(&env, threshold_bps)
     }
 
     // ── Issue #1044: fee recipient management ───────────────────────────
@@ -4957,6 +5022,52 @@ impl FiatBridge {
 
     pub fn get_withdrawal_request(env: Env, id: u64) -> Option<WithdrawRequest> {
         env.storage().persistent().get(&DataKey::WithdrawQueue(id))
+    }
+
+    /// Return pending requests in stable request-ID order. Each page examines
+    /// at most `limit` IDs, including IDs whose requests have already settled.
+    pub fn get_withdrawal_queue_page(
+        env: Env,
+        cursor: u64,
+        limit: u32,
+    ) -> Result<WithdrawalQueuePage, Error> {
+        if limit == 0 || limit > MAX_AUDIT_PAGE_SIZE {
+            return Err(Error::InvalidPageSize);
+        }
+        let total_requests: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextRequestID)
+            .unwrap_or(0);
+        let current_ledger = env.ledger().sequence();
+        let mut entries = Vec::new(&env);
+        let mut current_id = cursor;
+        let mut scanned = 0;
+        while current_id < total_requests && scanned < limit {
+            if let Some(request) = env
+                .storage()
+                .persistent()
+                .get::<_, WithdrawRequest>(&DataKey::WithdrawQueue(current_id))
+            {
+                entries.push_back(WithdrawalQueueEntry {
+                    request_id: current_id,
+                    effective_risk_tier: Self::effective_risk_tier(&request, current_ledger),
+                    aging_score: Self::compute_aging_score(&request, current_ledger),
+                    request,
+                });
+            }
+            current_id += 1;
+            scanned += 1;
+        }
+        let next_cursor = if current_id < total_requests {
+            Some(current_id)
+        } else {
+            None
+        };
+        Ok(WithdrawalQueuePage {
+            entries,
+            next_cursor,
+        })
     }
 
     /// Returns a paginated view of receipt records with a stable cursor.
@@ -5075,7 +5186,8 @@ impl FiatBridge {
             .unwrap_or(0);
         let mut records: Vec<LiabilityAuditView> = Vec::new(&env);
         let mut current_id = cursor;
-        while current_id < total_requests && records.len() < limit {
+        let mut scanned = 0;
+        while current_id < total_requests && scanned < limit {
             if let Some(record) = env
                 .storage()
                 .persistent()
@@ -5096,6 +5208,7 @@ impl FiatBridge {
                 });
             }
             current_id += 1;
+            scanned += 1;
         }
         let next_cursor = if current_id < total_requests {
             Some(current_id)
@@ -5312,15 +5425,7 @@ impl FiatBridge {
     pub fn set_withdrawal_quota(env: Env, quota: i128) -> Result<(), Error> {
         env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
         let _admin = Self::require_admin(&env)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::WithdrawalQuota, &quota);
-        QuotaSetEvent {
-            version: EVENT_VERSION,
-            quota,
-        }
-        .publish(&env);
-        Ok(())
+        Self::apply_withdrawal_quota(&env, quota)
     }
 
     #[deprecated(note = "use get_config_snapshot instead")]
@@ -5418,6 +5523,18 @@ impl FiatBridge {
         Ok(())
     }
 
+    fn require_queue_index_ready(env: &Env) -> Result<(), Error> {
+        if !env
+            .storage()
+            .instance()
+            .get(&DataKey::QueueIndexReady)
+            .unwrap_or(false)
+        {
+            return Err(Error::QueueIndexMigrationRequired);
+        }
+        Ok(())
+    }
+
     fn require_not_paused(env: &Env) -> Result<(), Error> {
         if env
             .storage()
@@ -5490,10 +5607,151 @@ impl FiatBridge {
     /// per-tier queue bookkeeping. Shared by `execute_withdrawal`,
     /// `cancel_withdrawal`, and `reclaim_expired_withdrawal`, which otherwise
     /// each repeated the same remove/decrement/advance sequence.
+    fn append_withdrawal_queue_index(
+        env: &Env,
+        request_id: u64,
+        tier: u32,
+        min_ttl: u32,
+    ) {
+        let request_ttl = Self::withdrawal_request_index_ttl(env, request_id).max(min_ttl);
+        let queue_tail: Option<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::WithdrawQueueTail)
+            .unwrap_or(None);
+        if let Some(tail) = queue_tail {
+            let link_ttl = request_ttl.max(Self::withdrawal_request_index_ttl(env, tail));
+            env.storage()
+                .persistent()
+                .set(&DataKey::WithdrawQueueNext(tail), &Some(request_id));
+            env.storage().persistent().extend_ttl(
+                &DataKey::WithdrawQueueNext(tail),
+                link_ttl,
+                link_ttl,
+            );
+            env.storage()
+                .persistent()
+                .set(&DataKey::WithdrawQueuePrev(request_id), &Some(tail));
+            env.storage().persistent().extend_ttl(
+                &DataKey::WithdrawQueuePrev(request_id),
+                link_ttl,
+                link_ttl,
+            );
+        } else {
+            env.storage()
+                .instance()
+                .set(&DataKey::WithdrawQueueHead, &Some(request_id));
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::WithdrawQueueTail, &Some(request_id));
+
+        let tier_tail: Option<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::TierQueueTail(tier))
+            .unwrap_or(None);
+        if let Some(tail) = tier_tail {
+            let link_ttl = request_ttl.max(Self::withdrawal_request_index_ttl(env, tail));
+            env.storage()
+                .persistent()
+                .set(&DataKey::TierQueueNext(tail), &Some(request_id));
+            env.storage().persistent().extend_ttl(
+                &DataKey::TierQueueNext(tail),
+                link_ttl,
+                link_ttl,
+            );
+            env.storage()
+                .persistent()
+                .set(&DataKey::TierQueuePrev(request_id), &Some(tail));
+            env.storage().persistent().extend_ttl(
+                &DataKey::TierQueuePrev(request_id),
+                link_ttl,
+                link_ttl,
+            );
+        } else {
+            env.storage()
+                .instance()
+                .set(&DataKey::TierQueueHead(tier), &Some(request_id));
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::TierQueueTail(tier), &Some(request_id));
+    }
+
+    fn withdrawal_request_index_ttl(env: &Env, request_id: u64) -> u32 {
+        let remaining_unlock = env
+            .storage()
+            .persistent()
+            .get::<_, WithdrawRequest>(&DataKey::WithdrawQueue(request_id))
+            .map(|request| request.unlock_ledger.saturating_sub(env.ledger().sequence()))
+            .unwrap_or(0);
+        let expiry_window: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::WithdrawalExpiryWindow)
+            .unwrap_or(WITHDRAWAL_EXPIRY_WINDOW_LEDGERS);
+        MIN_TTL
+            .saturating_add(remaining_unlock)
+            .saturating_add(expiry_window)
+    }
+
     fn remove_from_withdraw_queue(env: &Env, request_id: u64, request: &WithdrawRequest) {
         env.storage()
             .persistent()
             .remove(&DataKey::WithdrawQueue(request_id));
+
+        let previous: Option<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::WithdrawQueuePrev(request_id))
+            .unwrap_or(None);
+        let next: Option<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::WithdrawQueueNext(request_id))
+            .unwrap_or(None);
+        let global_link_ttl = previous
+            .map(|id| Self::withdrawal_request_index_ttl(env, id))
+            .unwrap_or(0)
+            .max(
+                next.map(|id| Self::withdrawal_request_index_ttl(env, id))
+                    .unwrap_or(0),
+            );
+        if let Some(previous_id) = previous {
+            env.storage()
+                .persistent()
+                .set(&DataKey::WithdrawQueueNext(previous_id), &next);
+            env.storage().persistent().extend_ttl(
+                &DataKey::WithdrawQueueNext(previous_id),
+                global_link_ttl,
+                global_link_ttl,
+            );
+        } else {
+            env.storage()
+                .instance()
+                .set(&DataKey::WithdrawQueueHead, &next);
+        }
+        if let Some(next_id) = next {
+            env.storage()
+                .persistent()
+                .set(&DataKey::WithdrawQueuePrev(next_id), &previous);
+            env.storage().persistent().extend_ttl(
+                &DataKey::WithdrawQueuePrev(next_id),
+                global_link_ttl,
+                global_link_ttl,
+            );
+        } else {
+            env.storage()
+                .instance()
+                .set(&DataKey::WithdrawQueueTail, &previous);
+        }
+        env.storage()
+            .persistent()
+            .remove(&DataKey::WithdrawQueuePrev(request_id));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::WithdrawQueueNext(request_id));
 
         let queue_len: u64 = env
             .storage()
@@ -5505,9 +5763,59 @@ impl FiatBridge {
                 .instance()
                 .set(&DataKey::WithdrawQueueLen, &(queue_len - 1));
         }
-        Self::advance_withdraw_queue_head(env, request_id);
-
         let tier = request.risk_tier;
+        let previous: Option<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TierQueuePrev(request_id))
+            .unwrap_or(None);
+        let next: Option<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TierQueueNext(request_id))
+            .unwrap_or(None);
+        let tier_link_ttl = previous
+            .map(|id| Self::withdrawal_request_index_ttl(env, id))
+            .unwrap_or(0)
+            .max(
+                next.map(|id| Self::withdrawal_request_index_ttl(env, id))
+                    .unwrap_or(0),
+            );
+        if let Some(previous_id) = previous {
+            env.storage()
+                .persistent()
+                .set(&DataKey::TierQueueNext(previous_id), &next);
+            env.storage().persistent().extend_ttl(
+                &DataKey::TierQueueNext(previous_id),
+                tier_link_ttl,
+                tier_link_ttl,
+            );
+        } else {
+            env.storage()
+                .instance()
+                .set(&DataKey::TierQueueHead(tier), &next);
+        }
+        if let Some(next_id) = next {
+            env.storage()
+                .persistent()
+                .set(&DataKey::TierQueuePrev(next_id), &previous);
+            env.storage().persistent().extend_ttl(
+                &DataKey::TierQueuePrev(next_id),
+                tier_link_ttl,
+                tier_link_ttl,
+            );
+        } else {
+            env.storage()
+                .instance()
+                .set(&DataKey::TierQueueTail(tier), &previous);
+        }
+        env.storage()
+            .persistent()
+            .remove(&DataKey::TierQueuePrev(request_id));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::TierQueueNext(request_id));
+
         let tier_len: u64 = env
             .storage()
             .instance()
@@ -5518,7 +5826,6 @@ impl FiatBridge {
                 .instance()
                 .set(&DataKey::TierQueueLen(tier), &(tier_len - 1));
         }
-        Self::advance_tier_queue_head(env, tier, request_id);
     }
 
     /// Releases `amount` of previously-reserved liability for `token` using
@@ -5547,13 +5854,14 @@ impl FiatBridge {
             .instance()
             .get(&DataKey::ReceiptCounter)
             .unwrap_or(0);
-
-        let mut idx = 0;
-        while idx < receipt_counter {
+        let mut current_id = receipt_counter;
+        let mut scanned = 0;
+        while current_id > 0 && scanned < MAX_RECEIPTS_TO_EXTEND_PER_WITHDRAWAL {
+            current_id -= 1;
             if let Some(receipt_hash) = env
                 .storage()
                 .temporary()
-                .get::<_, BytesN<32>>(&DataKey::ReceiptIndex(idx))
+                .get::<_, BytesN<32>>(&DataKey::ReceiptIndex(current_id))
             {
                 let receipt_key = DataKey::Receipt(receipt_hash.clone());
                 if let Some(receipt) = env.storage().persistent().get::<_, Receipt>(&receipt_key) {
@@ -5562,14 +5870,14 @@ impl FiatBridge {
                             .persistent()
                             .extend_ttl(&receipt_key, min_ttl, min_ttl);
                         env.storage().temporary().extend_ttl(
-                            &DataKey::ReceiptIndex(idx),
+                            &DataKey::ReceiptIndex(current_id),
                             min_ttl,
                             min_ttl,
                         );
                     }
                 }
             }
-            idx += 1;
+            scanned += 1;
         }
     }
 
@@ -5836,57 +6144,241 @@ impl FiatBridge {
         Ok(batch_result)
     }
 
+    fn apply_cooldown(env: &Env, ledgers: u32) -> Result<(), Error> {
+        if ledgers == u32::MAX {
+            return Err(Error::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::CooldownLedgers, &ledgers);
+        Ok(())
+    }
+
+    fn apply_lock_period(env: &Env, ledgers: u32) -> Result<(), Error> {
+        env.storage().instance().set(&DataKey::LockPeriod, &ledgers);
+        Ok(())
+    }
+
+    fn apply_withdrawal_quota(env: &Env, quota: i128) -> Result<(), Error> {
+        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        env.storage()
+            .instance()
+            .set(&DataKey::WithdrawalQuota, &quota);
+        QuotaSetEvent {
+            version: EVENT_VERSION,
+            quota,
+        }
+        .publish(env);
+        Ok(())
+    }
+
+    fn apply_anti_sandwich_delay(env: &Env, ledgers: u32) -> Result<(), Error> {
+        if ledgers == u32::MAX {
+            return Err(Error::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::AntiSandwichDelay, &ledgers);
+        Ok(())
+    }
+
+    fn apply_slippage_threshold(env: &Env, threshold_bps: u32) -> Result<(), Error> {
+        if threshold_bps == u32::MAX {
+            return Err(Error::InvalidAmount);
+        }
+        if threshold_bps > 10000 {
+            return Err(Error::SlippageTooHigh);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::SlippageThreshold, &threshold_bps);
+        SlippageThresholdSetEvent {
+            version: EVENT_VERSION,
+            threshold_bps,
+        }
+        .publish(env);
+        Ok(())
+    }
+
+    fn apply_set_limit(
+        env: &Env,
+        token: &Address,
+        limit: i128,
+        nonce: u64,
+        admin: &Address,
+    ) -> Result<(), Error> {
+        if limit <= 0 {
+            return Err(Error::ZeroAmount);
+        }
+        let max_cap: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::LimitMaxCap)
+            .unwrap_or(i128::MAX);
+        if limit > max_cap {
+            return Err(Error::ExceedsLimitMaxCap);
+        }
+        Self::require_circuit_breaker_clear(env)?;
+        let mut config: TokenConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TokenRegistry(token.clone()))
+            .ok_or(Error::TokenNotWhitelisted)?;
+        let current_nonce: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::SetLimitNonce(admin.clone()))
+            .unwrap_or(0);
+        Self::check_nonce(current_nonce, nonce)?;
+
+        Self::validate_and_increment_set_limit_nonce(env, admin, nonce)?;
+        config.limit = limit;
+        env.storage()
+            .persistent()
+            .set(&DataKey::TokenRegistry(token.clone()), &config);
+        SetLimitEvent {
+            version: EVENT_VERSION,
+            token: token.clone(),
+            limit,
+            by: admin.clone(),
+            ledger: env.ledger().sequence(),
+        }
+        .publish(env);
+        Ok(())
+    }
+
+    fn apply_global_pause(env: &Env, admin: &Address, paused: bool) -> Result<(), Error> {
+        env.storage().instance().set(&DataKey::Paused, &paused);
+        if paused {
+            PausedEvent {
+                version: EVENT_VERSION,
+                by: admin.clone(),
+            }
+            .publish(env);
+        } else {
+            UnpausedEvent {
+                version: EVENT_VERSION,
+                by: admin.clone(),
+            }
+            .publish(env);
+        }
+        Ok(())
+    }
+
+    fn apply_pause_scope(
+        env: &Env,
+        scope: PauseScope,
+        paused: bool,
+        admin: &Address,
+    ) -> Result<(), Error> {
+        let key = match scope {
+            PauseScope::Deposits => DataKey::PausedDeposits,
+            PauseScope::WithdrawalRequests => DataKey::PausedWithdrawalRequests,
+            PauseScope::WithdrawalExecution => DataKey::PausedWithdrawalExecution,
+            PauseScope::AdminTransfers => DataKey::PausedAdminTransfers,
+        };
+        env.storage().instance().set(&key, &paused);
+        PauseScopeUpdatedEvent {
+            version: EVENT_VERSION,
+            scope,
+            paused,
+            by: admin.clone(),
+        }
+        .publish(env);
+        Ok(())
+    }
+
+    fn require_not_paused_scope(env: &Env, scope: PauseScope) -> Result<(), Error> {
+        let global_paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false);
+        let key = match scope {
+            PauseScope::Deposits => DataKey::PausedDeposits,
+            PauseScope::WithdrawalRequests => DataKey::PausedWithdrawalRequests,
+            PauseScope::WithdrawalExecution => DataKey::PausedWithdrawalExecution,
+            PauseScope::AdminTransfers => DataKey::PausedAdminTransfers,
+        };
+        if global_paused || env.storage().instance().get(&key).unwrap_or(false) {
+            return Err(Error::ContractPaused);
+        }
+        Ok(())
+    }
+
     fn execute_single_admin_op(env: &Env, op: &BatchAdminOp) -> Result<(), Error> {
         let op_name = &op.op_type;
 
         if *op_name == Symbol::new(env, "set_cooldown") {
             let ledgers = Self::bytes_to_u32(env, &op.payload)?;
-            env.storage()
-                .instance()
-                .set(&DataKey::CooldownLedgers, &ledgers);
-            Ok(())
+            Self::apply_cooldown(env, ledgers)
         } else if *op_name == Symbol::new(env, "set_lock") {
             let ledgers = Self::bytes_to_u32(env, &op.payload)?;
-            env.storage().instance().set(&DataKey::LockPeriod, &ledgers);
-            Ok(())
+            Self::apply_lock_period(env, ledgers)
         } else if *op_name == Symbol::new(env, "set_quota") {
             let quota = Self::bytes_to_i128(env, &op.payload)?;
-            env.storage()
-                .instance()
-                .set(&DataKey::WithdrawalQuota, &quota);
-            Ok(())
+            Self::apply_withdrawal_quota(env, quota)
         } else if *op_name == Symbol::new(env, "set_sandwich") {
             let ledgers = Self::bytes_to_u32(env, &op.payload)?;
-            env.storage()
-                .instance()
-                .set(&DataKey::AntiSandwichDelay, &ledgers);
-            Ok(())
+            Self::apply_anti_sandwich_delay(env, ledgers)
         } else if *op_name == Symbol::new(env, "set_slippage_threshold") {
             let threshold_bps = Self::bytes_to_u32(env, &op.payload)?;
-            // Validate slippage threshold is reasonable (0-10000 bps = 0-100%)
-            if threshold_bps > 10000 {
-                return Err(Error::SlippageTooHigh);
-            }
-            env.storage()
-                .instance()
-                .set(&DataKey::SlippageThreshold, &threshold_bps);
-            SlippageThresholdSetEvent {
-                version: EVENT_VERSION,
-                threshold_bps,
-            }
-            .publish(env);
-            Ok(())
+            Self::apply_slippage_threshold(env, threshold_bps)
         } else if *op_name == Symbol::new(env, "set_limit") {
-            // Payload: [Address(token), i128(limit)]
-            // For simplicity in multisig mockup, we might need a better encoding or specialized ops.
-            // But let's add the basic admin ones first.
-            Err(Error::InternalError)
+            let (token, limit, nonce): (Address, i128, u64) =
+                FromXdr::from_xdr(env, &op.payload).map_err(|_| Error::InternalError)?;
+            if (token.clone(), limit, nonce).to_xdr(env) != op.payload {
+                return Err(Error::InternalError);
+            }
+            let admin: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::Admin)
+                .ok_or(Error::NotInitialized)?;
+            Self::apply_set_limit(env, &token, limit, nonce, &admin)
         } else if *op_name == Symbol::new(env, "pause") {
-            env.storage().instance().set(&DataKey::Paused, &true);
-            Ok(())
+            if op.payload.len() != 0 {
+                return Err(Error::InternalError);
+            }
+            let admin: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::Admin)
+                .ok_or(Error::NotInitialized)?;
+            Self::apply_global_pause(env, &admin, true)
         } else if *op_name == Symbol::new(env, "unpause") {
-            env.storage().instance().set(&DataKey::Paused, &false);
-            Ok(())
+            if op.payload.len() != 0 {
+                return Err(Error::InternalError);
+            }
+            let admin: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::Admin)
+                .ok_or(Error::NotInitialized)?;
+            Self::apply_global_pause(env, &admin, false)
+        } else if *op_name == Symbol::new(env, "set_pause_scope") {
+            // Payload is [scope_id, paused], with scope IDs matching PauseScope.
+            if op.payload.len() != 2 {
+                return Err(Error::InternalError);
+            }
+            let scope = match op.payload.get(0).ok_or(Error::InternalError)? {
+                0 => PauseScope::Deposits,
+                1 => PauseScope::WithdrawalRequests,
+                2 => PauseScope::WithdrawalExecution,
+                3 => PauseScope::AdminTransfers,
+                _ => return Err(Error::InternalError),
+            };
+            let paused = match op.payload.get(1).ok_or(Error::InternalError)? {
+                0 => false,
+                1 => true,
+                _ => return Err(Error::InternalError),
+            };
+            let admin: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::Admin)
+                .ok_or(Error::NotInitialized)?;
+            Self::apply_pause_scope(env, scope, paused, &admin)
         } else if *op_name == Symbol::new(env, "update_multisig") {
             // Special op to update signers and threshold
             // Payload: [threshold(u32), signers(Vec<Address>)]
@@ -5898,7 +6390,7 @@ impl FiatBridge {
     }
 
     fn bytes_to_u32(_env: &Env, bytes: &Bytes) -> Result<u32, Error> {
-        if bytes.len() < 4 {
+        if bytes.len() != 4 {
             return Err(Error::InternalError);
         }
         let mut arr = [0u8; 4];
@@ -5909,7 +6401,7 @@ impl FiatBridge {
     }
 
     fn bytes_to_i128(_env: &Env, bytes: &Bytes) -> Result<i128, Error> {
-        if bytes.len() < 16 {
+        if bytes.len() != 16 {
             return Err(Error::InternalError);
         }
         let mut arr = [0u8; 16];
@@ -6112,85 +6604,286 @@ impl FiatBridge {
 
     // ── Issue #226: withdrawal queue risk-tier prioritization ─────────────
 
-    /// Return the `request_id` that should be processed next according to
-    /// risk-tier priority.  Tier 0 is the highest priority; within each tier
-    /// FIFO order is preserved.  Returns `None` when the queue is empty.
+    /// Return the next request using aging-adjusted risk tier, then FIFO order.
     pub fn get_next_priority_withdrawal(env: Env) -> Option<u64> {
-        // Scan tier 0, 1, 2, … and return the head of the first non-empty tier.
-        // We scan up to `next_id` distinct tier values as an upper bound.
-        let next_id: u64 = env
+        if !env
             .storage()
             .instance()
-            .get(&DataKey::NextRequestID)
-            .unwrap_or(0);
-        // Tier indices are u32; in practice only a handful of tiers are used.
-        // We cap the scan at 256 to stay within compute budget.
-        let max_tier: u32 = (next_id.min(256)) as u32;
-        for t in 0..=max_tier {
-            let tier_len: u64 = env
+            .get(&DataKey::QueueIndexReady)
+            .unwrap_or(false)
+        {
+            return None;
+        }
+
+        let current_ledger = env.ledger().sequence();
+        let mut best: Option<(u64, u32, u64)> = None;
+        for tier in 0..=MAX_RISK_TIER {
+            let queue_len: u64 = env
                 .storage()
                 .instance()
-                .get(&DataKey::TierQueueLen(t))
+                .get(&DataKey::TierQueueLen(tier))
                 .unwrap_or(0);
-            if tier_len == 0 {
+            if queue_len == 0 {
                 continue;
             }
             let head: Option<u64> = env
                 .storage()
                 .instance()
-                .get(&DataKey::TierQueueHead(t))
+                .get(&DataKey::TierQueueHead(tier))
                 .unwrap_or(None);
-            if head.is_some() {
-                return head;
+            let Some(request_id) = head else {
+                continue;
+            };
+            let Some(request) = env
+                .storage()
+                .persistent()
+                .get::<_, WithdrawRequest>(&DataKey::WithdrawQueue(request_id))
+            else {
+                continue;
+            };
+            let score = Self::compute_aging_score(&request, current_ledger);
+            let candidate = (score, request.queued_ledger, request_id);
+            if best.map_or(true, |best_candidate| candidate < best_candidate) {
+                best = Some(candidate);
             }
         }
-        None
+        best.map(|(_, _, request_id)| request_id)
     }
 
-    /// Advance the per-tier queue head after a request with `tier` is removed.
-    fn advance_tier_queue_head(env: &Env, tier: u32, removed_id: u64) {
-        let head_key = DataKey::TierQueueHead(tier);
-        let head: Option<u64> = env.storage().instance().get(&head_key).unwrap_or(None);
-        if head != Some(removed_id) {
-            return;
+    pub fn migrate_withdrawal_queue_index(
+        env: Env,
+        cursor: u64,
+        limit: u32,
+    ) -> Result<Option<u64>, Error> {
+        let _admin = Self::require_admin(&env)?;
+        if limit == 0 || limit > MAX_QUEUE_MIGRATION_PAGE_SIZE {
+            return Err(Error::InvalidPageSize);
         }
-
-        let tier_len: u64 = env
+        if env
             .storage()
             .instance()
-            .get(&DataKey::TierQueueLen(tier))
-            .unwrap_or(0);
-        if tier_len == 0 {
-            env.storage()
-                .instance()
-                .set(&head_key, &Option::<u64>::None);
-            return;
+            .get(&DataKey::QueueIndexReady)
+            .unwrap_or(false)
+        {
+            return Ok(None);
         }
 
-        let next_id: u64 = env
+        let saved_cursor: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::QueueIndexMigrationCursor)
+            .unwrap_or(0);
+        if cursor != saved_cursor {
+            return Err(Error::InvalidAmount);
+        }
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::QueueIndexMigrationCursor)
+        {
+            env.storage()
+                .instance()
+                .set(&DataKey::WithdrawQueueHead, &Option::<u64>::None);
+            env.storage()
+                .instance()
+                .set(&DataKey::WithdrawQueueTail, &Option::<u64>::None);
+            env.storage()
+                .instance()
+                .set(&DataKey::WithdrawQueueLen, &0u64);
+            for tier in 0..=MAX_RISK_TIER {
+                env.storage()
+                    .instance()
+                    .set(&DataKey::TierQueueHead(tier), &Option::<u64>::None);
+                env.storage()
+                    .instance()
+                    .set(&DataKey::TierQueueTail(tier), &Option::<u64>::None);
+                env.storage()
+                    .instance()
+                    .set(&DataKey::TierQueueLen(tier), &0u64);
+            }
+        }
+
+        let total_requests: u64 = env
             .storage()
             .instance()
             .get(&DataKey::NextRequestID)
             .unwrap_or(0);
-
-        let mut i = removed_id.saturating_add(1);
-        while i < next_id {
-            if let Some(req) = env
+        let mut current_id = cursor;
+        let mut scanned = 0;
+        while current_id < total_requests && scanned < limit {
+            if let Some(mut request) = env
                 .storage()
                 .persistent()
-                .get::<_, WithdrawRequest>(&DataKey::WithdrawQueue(i))
+                .get::<_, WithdrawRequest>(&DataKey::WithdrawQueue(current_id))
             {
-                if req.risk_tier == tier {
-                    env.storage().instance().set(&head_key, &Some(i));
-                    return;
+                if request.risk_tier > MAX_RISK_TIER {
+                    request.risk_tier = MAX_RISK_TIER;
+                    env.storage()
+                        .persistent()
+                        .set(&DataKey::WithdrawQueue(current_id), &request);
                 }
+                let min_ttl = Self::withdrawal_request_index_ttl(&env, current_id);
+                env.storage().persistent().extend_ttl(
+                    &DataKey::WithdrawQueue(current_id),
+                    min_ttl,
+                    min_ttl,
+                );
+                if env
+                    .storage()
+                    .persistent()
+                    .has(&DataKey::LiabilityRecord(current_id))
+                {
+                    env.storage().persistent().extend_ttl(
+                        &DataKey::LiabilityRecord(current_id),
+                        min_ttl,
+                        min_ttl,
+                    );
+                }
+                Self::append_withdrawal_queue_index(
+                    &env,
+                    current_id,
+                    request.risk_tier,
+                    min_ttl,
+                );
+                let queue_len: u64 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::WithdrawQueueLen)
+                    .unwrap_or(0);
+                env.storage()
+                    .instance()
+                    .set(&DataKey::WithdrawQueueLen, &(queue_len + 1));
+                let tier_len: u64 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::TierQueueLen(request.risk_tier))
+                    .unwrap_or(0);
+                env.storage().instance().set(
+                    &DataKey::TierQueueLen(request.risk_tier),
+                    &(tier_len + 1),
+                );
             }
-            i += 1;
+            current_id += 1;
+            scanned += 1;
         }
 
-        env.storage()
-            .instance()
-            .set(&head_key, &Option::<u64>::None);
+        if current_id >= total_requests {
+            env.storage()
+                .instance()
+                .set(&DataKey::QueueIndexReady, &true);
+            env.storage()
+                .instance()
+                .remove(&DataKey::QueueIndexMigrationCursor);
+            Ok(None)
+        } else {
+            env.storage()
+                .instance()
+                .set(&DataKey::QueueIndexMigrationCursor, &current_id);
+            Ok(Some(current_id))
+        }
+    }
+
+    fn effective_risk_tier(request: &WithdrawRequest, current_ledger: u32) -> u32 {
+        let age_intervals =
+            current_ledger.saturating_sub(request.queued_ledger) / RISK_AGING_INTERVAL_LEDGERS;
+        request
+            .risk_tier
+            .min(MAX_RISK_TIER)
+            .saturating_sub(age_intervals)
+    }
+
+    /// Compute the deterministic scheduling score for a withdrawal request.
+    ///
+    /// ## Formula
+    ///
+    /// ```text
+    /// age_intervals  = (current_ledger - queued_ledger) / RISK_AGING_INTERVAL_LEDGERS
+    /// effective_tier = risk_tier.saturating_sub(age_intervals)
+    /// age_credit     = min(age_intervals, MAX_RISK_TIER)
+    /// aging_score    = effective_tier * (MAX_RISK_TIER + 1)
+    ///                  + (MAX_RISK_TIER - age_credit)
+    /// ```
+    ///
+    /// ## Bounds
+    ///
+    /// | term              | min | max                               |
+    /// |-------------------|-----|-----------------------------------|
+    /// | `age_intervals`   | 0   | `u32::MAX / RISK_AGING_INTERVAL_LEDGERS` ≤ 5_957_369 |
+    /// | `effective_tier`  | 0   | `MAX_RISK_TIER` (32)              |
+    /// | `age_credit`      | 0   | `MAX_RISK_TIER` (32)              |
+    /// | `aging_score`     | 0   | 32 × 33 + 32 = 1_088             |
+    ///
+    /// **Overflow safety**: the score uses capped u32 components and saturating
+    /// u64 arithmetic. Its maximum is 32 × 33 + 32 = 1,088.
+    ///
+    /// ## Priority interpretation
+    ///
+    /// A lower score means higher priority. An age credit capped at 32 makes
+    /// older requests score ahead of new arrivals in the same effective tier;
+    /// the 33-point tier stride keeps adjacent tiers ordered without overlap.
+    ///
+    /// ## Security note
+    ///
+    /// This is a **pure computation** helper.  It never writes to storage and
+    /// cannot bypass timelocks, authorization checks, the denylist, or solvency
+    /// invariants enforced by `execute_withdrawal`.
+    fn compute_aging_score(request: &WithdrawRequest, current_ledger: u32) -> u64 {
+        let age_intervals =
+            current_ledger.saturating_sub(request.queued_ledger) / RISK_AGING_INTERVAL_LEDGERS;
+        let effective_tier = request
+            .risk_tier
+            .min(MAX_RISK_TIER)
+            .saturating_sub(age_intervals);
+        let age_credit = age_intervals.min(MAX_RISK_TIER);
+        let tier_component = (effective_tier as u64)
+            .saturating_mul((MAX_RISK_TIER as u64).saturating_add(1));
+        tier_component.saturating_add((MAX_RISK_TIER - age_credit) as u64)
+    }
+
+    /// Return the scheduling metadata for a queued withdrawal request.
+    ///
+    /// Returns `None` when the request does not exist (was never queued,
+    /// has been executed, cancelled, or expired).
+    ///
+    /// The returned [`WithdrawalScheduleInfo`] is computed at the **current
+    /// ledger** so callers see how the scheduler would rank the request *right
+    /// now*.  Repeated calls at different ledgers will show a monotonically
+    /// non-increasing `effective_tier` and non-decreasing `age_intervals`.
+    ///
+    /// ## Guarantees
+    ///
+    /// * **Pure read**: writes nothing to storage, emits no events.
+    /// * **No auth required**: any caller may inspect scheduling metadata for
+    ///   any request.
+    /// * **Does not bypass gates**: the score reflects the current scheduling
+    ///   rank only.  Actual execution still requires the timelock to have
+    ///   elapsed, authorization from the withdraw operator, a denylist-clean
+    ///   recipient, and sufficient contract solvency.
+    ///
+    /// ## Score formula
+    ///
+    /// See [`WithdrawalScheduleInfo::aging_score`] for the full formula and
+    /// overflow-safety argument.
+    pub fn get_withdrawal_schedule_info(
+        env: Env,
+        request_id: u64,
+    ) -> Option<WithdrawalScheduleInfo> {
+        let request: WithdrawRequest = env
+            .storage()
+            .persistent()
+            .get(&DataKey::WithdrawQueue(request_id))?;
+        let current_ledger = env.ledger().sequence();
+        let age_intervals =
+            current_ledger.saturating_sub(request.queued_ledger) / RISK_AGING_INTERVAL_LEDGERS;
+        let effective_tier = request.risk_tier.saturating_sub(age_intervals);
+        let aging_score = Self::compute_aging_score(&request, current_ledger);
+        Some(WithdrawalScheduleInfo {
+            aging_score,
+            effective_tier,
+            age_intervals,
+            queued_ledger: request.queued_ledger,
+            risk_tier: request.risk_tier.min(MAX_RISK_TIER),
+        })
     }
 
     // ── Single Withdraw Operator Role (Issue #118) ─────────────────────────
@@ -7646,3 +8339,6 @@ mod test_cancellation_lifecycle_invariants;
 
 #[cfg(test)]
 mod test_escrow_solvency_proptest;
+
+#[cfg(test)]
+mod test_aging_fairness;

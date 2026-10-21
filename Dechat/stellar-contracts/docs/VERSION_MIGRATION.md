@@ -133,6 +133,28 @@ Shorter delays are rejected with `Error::ActionNotReady`.
 
 **Boundary check:** Execution requires `current_ledger > target_ledger` (strict `>`), adding one extra ledger of safety margin.
 
+### Withdrawal Queue Index Backfill
+
+The linked pending-request index is initialized automatically on new
+deployments. After upgrading an existing deployment, queue mutations remain
+gated until an admin backfills the index:
+
+```rust
+let next_cursor = bridge.migrate_withdrawal_queue_index(cursor, 100)?;
+```
+
+Start with cursor `0` and pass each returned cursor to the next call. Each call
+scans at most 25 request IDs; `None` means the index is ready. Requests with
+legacy risk tiers above 32 are normalized to tier 32 during backfill. A page
+failure does not advance the migration cursor.
+
+New withdrawal requests accept risk tiers 0 through 32. The scheduler reduces
+the effective tier by one every 720 ledgers, down to tier 0. Its bounded score
+is `effective_tier * 33 + 32 - min(age_intervals, 32)`; lower scores are served
+first, then enqueue ledger and request ID break ties. `get_withdrawal_schedule_info`
+and `get_withdrawal_queue_page` expose these fields. Queue pages use request-ID
+ordering and limits from 1 through 100.
+
 ### Admin Renounce Pattern
 
 The `queue_renounce_admin` / `execute_renounce_admin` functions follow the same timelock pattern but are irreversible:

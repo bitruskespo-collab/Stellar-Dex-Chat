@@ -2,8 +2,8 @@
 //!
 //! `get_next_priority_withdrawal` is the read-only scheduler for the
 //! withdrawal queue: it answers "which `request_id` should be processed
-//! next?" by scanning risk tiers in ascending order (tier 0 is the highest
-//! priority) and returning the head of the first non-empty tier. The
+//! next?" by comparing the bounded, aging-adjusted tier of each non-empty
+//! risk-tier head. The
 //! invariants asserted here are:
 //!
 //! * **Purity.** The call is read-only. Repeated calls return the same answer
@@ -13,8 +13,9 @@
 //!   names a request that is still live in the queue
 //!   (`get_withdrawal_request(id).is_some()`); an empty queue always yields
 //!   `None`.
-//! * **Tier priority.** The returned request always sits in the lowest
-//!   occupied tier, regardless of insertion order.
+//! * **Aging fairness.** A request's effective tier decreases by one every
+//!   `RISK_AGING_INTERVAL_LEDGERS`, down to tier 0; equal effective tiers are
+//!   ordered by enqueue ledger and then request ID.
 //! * **FIFO within a tier.** Within the winning tier the oldest live request
 //!   (lowest `request_id`) is returned.
 //! * **Accounting is untouched.** `total_deposited`, `total_withdrawn` and
@@ -32,14 +33,11 @@
 //!   `request_id` counter exactly where they were, even though the entry
 //!   point writes queue bookkeeping before its later validation steps.
 //!
-//! ## Known bound: the tier scan window
+//! ## Scheduling bounds
 //!
-//! The implementation caps its scan at `min(next_request_id, 256)` tiers to
-//! stay inside the Soroban compute budget. A request filed in a tier numbered
-//! above that bound is therefore invisible to the scheduler until enough
-//! requests exist to widen the window. That is deliberate, and
-//! [`priority_scan_window_is_bounded_by_next_request_id`] pins the behaviour
-//! down so a future change to the bound is a conscious one.
+//! Risk tiers are capped at `MAX_RISK_TIER`, and the scheduler inspects only
+//! those tier heads. A request ages to tier 0 within
+//! `MAX_RISK_TIER * RISK_AGING_INTERVAL_LEDGERS` ledgers.
 //!
 //! Registered from `lib.rs` behind `#[cfg(test)]`; this file deliberately
 //! carries no inner `#![cfg(test)]` so clippy's `duplicated_attributes` lint
@@ -48,12 +46,12 @@
 //! See [`docs/INVARIANT_TESTING.md`](docs/INVARIANT_TESTING.md) for the
 //! invariant-testing strategy and contributor checklist.
 
-use crate::{Error, FiatBridge, FiatBridgeClient};
+use crate::{
+    Error, FiatBridge, FiatBridgeClient, MAX_AUDIT_PAGE_SIZE, MAX_RISK_TIER,
+    RISK_AGING_INTERVAL_LEDGERS,
+};
 use proptest::prelude::*;
-use soroban_sdk::{testutils::Address as _, token, Address, Bytes, Env, Vec};
-
-/// Mirrors the contract-private scan cap in `get_next_priority_withdrawal`.
-const TIER_SCAN_CAP: u64 = 256;
+use soroban_sdk::{testutils::Address as _, testutils::Ledger, token, Address, Bytes, Env, Vec};
 
 fn create_token_contract<'a>(
     env: &Env,
@@ -353,33 +351,82 @@ fn cancelled_request_is_never_returned_again() {
     assert!(bridge.get_withdrawal_request(&head).is_none());
 }
 
-/// The scheduler only scans `min(next_request_id, 256)` tiers, so a lone
-/// request filed above that window is not yet visible. This documents a
-/// deliberate compute-budget bound rather than an accident: the same request
-/// surfaces once the window widens.
+/// Tier visibility is independent of queue depth, and unsupported tiers are
+/// rejected instead of becoming unreachable scheduler entries.
 #[test]
-fn priority_scan_window_is_bounded_by_next_request_id() {
+fn priority_tier_bound_is_explicit_and_queue_depth_independent() {
     let env = Env::default();
     env.mock_all_auths();
 
     let (bridge, _admin, token_addr, token_admin) = setup_bridge(&env);
     let user = funded_user(&env, &bridge, &token_addr, &token_admin, 10_000);
 
-    // One request in tier 4 while `next_request_id` is only 1: the scan covers
-    // tiers 0..=1 and cannot see it.
+    // A tier-4 request is visible even though it is the first queue entry.
     let high = bridge.request_withdrawal(&user, &50, &token_addr, &None, &4);
     assert_eq!(bridge.get_wq_depth(), 1);
-    assert_eq!(bridge.get_next_priority_withdrawal(), None);
+    assert_eq!(bridge.get_next_priority_withdrawal(), Some(high));
     assert!(bridge.get_withdrawal_request(&high).is_some());
 
-    // Widen the window past tier 4 and the same request becomes visible.
-    for _ in 0..4 {
-        bridge.request_withdrawal(&user, &50, &token_addr, &None, &9);
-    }
-    assert_eq!(bridge.get_next_priority_withdrawal(), Some(high));
+    let unsupported_tier = MAX_RISK_TIER + 1;
+    assert_eq!(
+        bridge.try_request_withdrawal(&user, &50, &token_addr, &None, &unsupported_tier),
+        Err(Ok(Error::InvalidAmount))
+    );
+}
 
-    // The bound itself is a constant of the implementation.
-    assert_eq!(TIER_SCAN_CAP, 256);
+/// A sustained stream of tier-0 arrivals cannot indefinitely outrank an older
+/// request: tier 4 reaches effective tier 0 after four aging intervals.
+#[test]
+fn aging_promotes_low_priority_requests_ahead_of_new_arrivals() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (bridge, _admin, token_addr, token_admin) = setup_bridge(&env);
+    let user = funded_user(&env, &bridge, &token_addr, &token_admin, 10_000);
+    let low_priority = bridge.request_withdrawal(&user, &50, &token_addr, &None, &4);
+    let start = env.ledger().sequence();
+
+    for interval in 1..=4 {
+        env.ledger().set_sequence_number(
+            start + interval * RISK_AGING_INTERVAL_LEDGERS,
+        );
+        bridge.request_withdrawal(&user, &50, &token_addr, &None, &0);
+        let next = bridge
+            .get_next_priority_withdrawal()
+            .expect("tier-0 arrivals keep the queue non-empty");
+        if interval < 4 {
+            assert_ne!(next, low_priority);
+        } else {
+            assert_eq!(next, low_priority);
+        }
+    }
+}
+
+#[test]
+fn withdrawal_pages_use_stable_bounded_cursors() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (bridge, _admin, token_addr, token_admin) = setup_bridge(&env);
+    let user = funded_user(&env, &bridge, &token_addr, &token_admin, 10_000);
+    for _ in 0..130 {
+        bridge.request_withdrawal(&user, &50, &token_addr, &None, &0);
+    }
+
+    let first = bridge
+        .get_withdrawal_queue_page(&0, &MAX_AUDIT_PAGE_SIZE)
+        .unwrap();
+    assert_eq!(first.entries.len(), MAX_AUDIT_PAGE_SIZE);
+    assert_eq!(first.entries.get(0).unwrap().request_id, 0);
+    assert_eq!(first.entries.get(99).unwrap().request_id, 99);
+    assert_eq!(first.next_cursor, Some(100));
+
+    let second = bridge
+        .get_withdrawal_queue_page(&first.next_cursor.unwrap(), &MAX_AUDIT_PAGE_SIZE)
+        .unwrap();
+    assert_eq!(second.entries.len(), 30);
+    assert_eq!(second.entries.get(29).unwrap().request_id, 129);
+    assert_eq!(second.next_cursor, None);
 }
 
 // ── Authorisation and failure paths ──────────────────────────────────────

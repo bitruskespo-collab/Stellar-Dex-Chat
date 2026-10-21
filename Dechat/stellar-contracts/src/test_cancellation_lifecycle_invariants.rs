@@ -20,7 +20,7 @@
 //! * Cancellation after a partial payment releases only the residual amount.
 //! * `finalize_cancellation` without prior approval is rejected.
 //! * Cancellation of a non-existent request is rejected.
-//! * Paused contract rejects all lifecycle transitions.
+//! * Paused contract keeps cancellation recovery transitions available.
 //!
 //! Registered from `lib.rs` behind `#[cfg(test)]`.
 
@@ -444,7 +444,7 @@ fn non_admin_cannot_finalize_cancellation() {
 // ── Paused contract ───────────────────────────────────────────────────────
 
 #[test]
-fn paused_contract_rejects_request_cancellation() {
+fn paused_contract_allows_request_cancellation() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -455,14 +455,12 @@ fn paused_contract_rejects_request_cancellation() {
         .request_withdrawal(&user, &200, &fx.token_addr, &None, &0);
 
     fx.bridge.pause();
-    assert_eq!(
-        fx.bridge.try_request_cancellation(&id, &user),
-        Err(Ok(Error::ContractPaused))
-    );
+    fx.bridge.request_cancellation(&id, &user);
+    assert!(fx.bridge.get_cancellation_request(&id).is_some());
 }
 
 #[test]
-fn paused_contract_rejects_approve_cancellation() {
+fn paused_contract_allows_approve_cancellation() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -475,14 +473,12 @@ fn paused_contract_rejects_approve_cancellation() {
     fx.bridge.request_cancellation(&id, &user);
     fx.bridge.pause();
 
-    assert_eq!(
-        fx.bridge.try_approve_cancellation(&id),
-        Err(Ok(Error::ContractPaused))
-    );
+    fx.bridge.approve_cancellation(&id);
+    assert!(fx.bridge.get_cancellation_request(&id).is_some());
 }
 
 #[test]
-fn paused_contract_rejects_finalize_cancellation() {
+fn paused_contract_allows_finalize_cancellation() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -496,10 +492,9 @@ fn paused_contract_rejects_finalize_cancellation() {
     fx.bridge.approve_cancellation(&id);
     fx.bridge.pause();
 
-    assert_eq!(
-        fx.bridge.try_finalize_cancellation(&id),
-        Err(Ok(Error::ContractPaused))
-    );
+    fx.bridge.finalize_cancellation(&id);
+    assert!(fx.bridge.get_cancellation_request(&id).is_none());
+    assert!(fx.bridge.get_withdrawal_request(&id).is_none());
 }
 
 // ── Interaction with cancel_withdrawal shortcut ───────────────────────────

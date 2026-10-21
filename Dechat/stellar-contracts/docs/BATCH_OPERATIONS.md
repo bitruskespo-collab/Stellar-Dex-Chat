@@ -85,6 +85,28 @@ pub struct BatchResult {
 
 ### Supported Operations
 
+Every fixed-width integer payload is length-checked exactly; trailing bytes are
+rejected. For the structured `set_limit` payload, the entire byte sequence must
+match canonical XDR for the decoded tuple.
+
+#### Set Token Limit
+
+**Symbol:** `"set_limit"`
+
+**Payload:** Canonical XDR tuple `(token: Address, limit: i128, nonce: u64)`.
+The nonce must equal the admin's current `get_set_limit_nonce` value.
+
+**Effect:** Applies the same token-registration, positive-limit, maximum-cap,
+circuit-breaker, nonce, and event logic as the public `set_limit` setter.
+
+```rust
+let payload = (token.clone(), limit, nonce).to_xdr(&env);
+ops.push_back(BatchAdminOp {
+    op_type: Symbol::new(&env, "set_limit"),
+    payload,
+});
+```
+
 #### Set Cooldown Period
 
 **Symbol:** `"set_cooldown"`  
@@ -145,6 +167,22 @@ ops.push_back(BatchAdminOp {
     payload,
 });
 ```
+
+#### Set Slippage Threshold
+
+**Symbol:** `"set_slippage_threshold"`
+
+**Payload:** 4-byte big-endian unsigned integer (u32), from 0 through 10,000 basis points
+
+**Effect:** Sets the maximum accepted slippage for batch operations. Values above 10,000 or payloads with extra bytes are rejected, matching `set_slippage_threshold`.
+
+#### Set a Scoped Pause
+
+**Symbol:** `"set_pause_scope"`
+
+**Payload:** Two bytes `[scope_id, paused]`. Scope IDs are 0 for deposits, 1 for withdrawal requests, 2 for withdrawal execution, and 3 for admin/fee transfers. `paused` must be 0 or 1.
+
+**Effect:** Changes only the selected pause scope and emits the same scope-update event as `set_pause_scope`.
 
 #### Pause Contract
 
