@@ -1288,6 +1288,7 @@ Repo Avatar
 - **deps:** Bump the actions group across 1 directory with 6 updates
 - **changelog:** Update changelog [skip ci]
 - **changelog:** Update changelog [skip ci]
+- **changelog:** Update changelog [skip ci]
 
 ### Deprecated
 
