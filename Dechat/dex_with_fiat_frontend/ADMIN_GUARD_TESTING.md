@@ -115,3 +115,66 @@ Review triggers (a new revision is required when any of these occur):
 Reviewed with contract, frontend, and API owners. Every high-risk flow (AC1,
 AC3, AC5, AC6) has an explicit control or a tracked follow-up gap recorded
 above.
+
+---
+
+# Capability Flags & Kill-Switch Runbook
+
+This section documents the staged-rollout and kill-switch controls for
+frontend and API capabilities (issue #123). Flags are **server-controlled** and
+**per-environment**; the frontend only reflects server state and never decides
+whether a capability is allowed.
+
+## Flag model
+
+Each capability has an explicit default per environment. A flag is a boolean
+`enabled` value; the server is the single source of truth.
+
+| Capability | development | staging | production |
+| ---------- | ----------- | ------- | ---------- |
+| `frontend.trading` | enabled | enabled | enabled |
+| `frontend.payouts` | enabled | enabled | disabled |
+| `api.toolRouting` | enabled | enabled | enabled |
+| `api.payouts` | enabled | disabled | disabled |
+
+Defaults are declared in code (not inferred from missing values): an unknown or
+missing flag resolves to **disabled** (fail-closed).
+
+## Enforcement
+
+- The server evaluates the flag on every request for the capability and
+  rejects disabled capabilities with a `403` before any state change.
+- Hiding a UI control is **not** enforcement; direct API requests are checked
+  the same way as UI-originated requests.
+- Flags never weaken wallet signature verification or on-chain (Soroban)
+  authorization. A disabled flag blocks the capability; an enabled flag does
+  **not** bypass signature or contract checks.
+
+## Mutation & audit
+
+- Only authorized administrators (enforced by `AdminGuard` / server admin
+  allow-list) may change a flag. Unauthorized callers receive `403` and no
+  change is applied.
+- Every change is audited with: **actor**, **timestamp**, **reason**, and
+  **prior value**. The audit entry is written atomically with the change.
+
+## Rollback / kill-switch procedure
+
+1. Identify the capability and environment.
+2. Set the flag to `disabled` with a written reason.
+3. Confirm the audit entry records actor, time, reason, and prior value.
+4. Verify a direct request to the capability is rejected (`403`).
+5. Re-enable only after the root cause is resolved and re-tested.
+
+## Prohibited
+
+- Do **not** bypass on-chain checks or signature verification to "work around"
+  a disabled flag.
+- Do **not** rely on hidden UI controls as a security boundary.
+- Do **not** mutate flags outside the audited, authorized path.
+
+## Validation
+
+Test all flag states (enabled/disabled per environment) and direct requests to
+each capability. Confirm unauthorized callers cannot change or bypass flags and
+that disabled capabilities are rejected server-side.

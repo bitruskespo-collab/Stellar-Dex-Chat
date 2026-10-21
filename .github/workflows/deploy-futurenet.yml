@@ -59,6 +59,85 @@ jobs:
         run: |
           npx --yes @cyclonedx/cyclonedx-npm@^1.19.0 --output-file sbom-node.cdx.json --output-format json
 
+      - name: Pre-deployment readiness gate
+        id: readiness
+        env:
+          FUTURENET_ADMIN_SECRET_KEY: ${{ secrets.FUTURENET_ADMIN_SECRET_KEY }}
+          FUTURENET_RPC_URL: https://rpc-futurenet.stellar.org
+          FUTURENET_NETWORK_PASSPHRASE: 'Test SDF Future Network ; April 2020'
+          EXPECTED_NETWORK_PASSPHRASE: 'Test SDF Future Network ; April 2020'
+          OVERRIDE_REASON: ${{ vars.READINESS_OVERRIDE_REASON }}
+        run: |
+          set -uo pipefail
+          FAILED=0
+          record() {
+            # $1=check $2=status(ok|fail) $3=owner $4=recovery
+            echo "| $1 | $2 | $3 | $4 |" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$2" = "fail" ]; then FAILED=1; fi
+          }
+          echo "## 🚦 Pre-deployment Readiness Gate" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Check | Status | Owner | Recovery |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- | --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+
+          # 1. Artifact digest
+          WASM_PATH=$(find target -name '*.wasm' -path '*release*' | head -n 1)
+          if [ -n "$WASM_PATH" ] && [ -s "$WASM_PATH" ]; then
+            DIGEST=$(sha256sum "$WASM_PATH" | awk '{print $1}')
+            echo "wasm_path=$WASM_PATH" >> $GITHUB_OUTPUT
+            echo "wasm_digest=$DIGEST" >> $GITHUB_OUTPUT
+            record "artifact-digest" "ok" "@contract-owner" "Rebuild contract; see docs/runbooks/contract-deploy.md"
+          else
+            record "artifact-digest" "fail" "@contract-owner" "Rebuild contract; see docs/runbooks/contract-deploy.md"
+          fi
+
+          # 2. Network / config
+          if [ "$FUTURENET_NETWORK_PASSPHRASE" = "$EXPECTED_NETWORK_PASSPHRASE" ] && [ -n "$FUTURENET_RPC_URL" ]; then
+            record "network-config" "ok" "@platform-owner" "Verify network passphrase/RPC; see docs/runbooks/network-config.md"
+          else
+            record "network-config" "fail" "@platform-owner" "Verify network passphrase/RPC; see docs/runbooks/network-config.md"
+          fi
+
+          # 3. Migrations
+          if [ -d migrations ] || [ -f migrations ]; then
+            record "migrations" "ok" "@contract-owner" "Review pending migrations; see docs/runbooks/migrations.md"
+          else
+            record "migrations" "ok" "@contract-owner" "No migrations directory; see docs/runbooks/migrations.md"
+          fi
+
+          # 4. Signer availability
+          if [ -n "${FUTURENET_ADMIN_SECRET_KEY:-}" ]; then
+            record "signer-availability" "ok" "@security-owner" "Rotate/restore admin signer; see docs/runbooks/signer.md"
+          else
+            record "signer-availability" "fail" "@security-owner" "Rotate/restore admin signer; see docs/runbooks/signer.md"
+          fi
+
+          # 5. Provider health
+          if curl -fsS --max-time 10 "$FUTURENET_RPC_URL" -H 'Content-Type: application/json' \
+              -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' > /dev/null; then
+            record "provider-health" "ok" "@platform-owner" "Check RPC provider status; see docs/runbooks/provider-health.md"
+          else
+            record "provider-health" "fail" "@platform-owner" "Check RPC provider status; see docs/runbooks/provider-health.md"
+          fi
+
+          # 6. Rollback readiness
+          if [ -f scripts/deploy_fiat_bridge_futurenet.sh ]; then
+            record "rollback-readiness" "ok" "@release-manager" "Execute rollback; see docs/runbooks/rollback.md"
+          else
+            record "rollback-readiness" "fail" "@release-manager" "Execute rollback; see docs/runbooks/rollback.md"
+          fi
+
+          if [ "$FAILED" -ne 0 ]; then
+            if [ -n "${OVERRIDE_REASON:-}" ]; then
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "⚠️ **Authorized override recorded:** $OVERRIDE_REASON" >> "$GITHUB_STEP_SUMMARY"
+              echo "::warning::Readiness gate overridden: $OVERRIDE_REASON"
+            else
+              echo "::error::Readiness gate failed; promotion blocked. Set READINESS_OVERRIDE_REASON to authorize an override."
+              exit 1
+            fi
+          fi
+
       - name: Deploy to Futurenet
         id: deploy
         env:
@@ -77,7 +156,10 @@ jobs:
       - name: Compute artifact digests and provenance
         id: provenance
         run: |
-          WASM_PATH=$(find target -name '*.wasm' -path '*release*' | head -n 1)
+          WASM_PATH="${{ steps.readiness.outputs.wasm_path }}"
+          if [ -z "$WASM_PATH" ]; then
+            WASM_PATH=$(find target -name '*.wasm' -path '*release*' | head -n 1)
+          fi
           if [ -z "$WASM_PATH" ]; then
             echo "::error::No release WASM artifact found for provenance"
             exit 1
@@ -100,6 +182,71 @@ jobs:
             "contract_id": "${{ steps.deploy.outputs.contract_id }}"
           }
           EOF
+
+      - name: Post-deployment canary verification
+        id: canary
+        env:
+          FUTURENET_RPC_URL: https://rpc-futurenet.stellar.org
+          FUTURENET_NETWORK_PASSPHRASE: 'Test SDF Future Network ; April 2020'
+          EXPECTED_NETWORK_PASSPHRASE: 'Test SDF Future Network ; April 2020'
+          CONTRACT_ID: ${{ steps.deploy.outputs.contract_id }}
+          OVERRIDE_REASON: ${{ vars.READINESS_OVERRIDE_REASON }}
+        run: |
+          set -uo pipefail
+          FAILED=0
+          record() {
+            echo "| $1 | $2 | $3 | $4 |" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$2" = "fail" ]; then FAILED=1; fi
+          }
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "## 🐤 Post-deployment Canary Verification" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Canary | Status | Owner | Recovery |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- | --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+
+          # 1. Chain identity (read-only)
+          CHAIN=$(curl -fsS --max-time 10 "$FUTURENET_RPC_URL" -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"getNetwork"}' | jq -r '.result.passphrase // empty')
+          if [ "$CHAIN" = "$EXPECTED_NETWORK_PASSPHRASE" ]; then
+            record "chain-identity" "ok" "@platform-owner" "Verify network passphrase; see docs/runbooks/network-config.md"
+          else
+            record "chain-identity" "fail" "@platform-owner" "Verify network passphrase; see docs/runbooks/network-config.md"
+          fi
+
+          # 2. Contract queries (read-only)
+          if [ -n "$CONTRACT_ID" ] && curl -fsS --max-time 10 "$FUTURENET_RPC_URL" -H 'Content-Type: application/json' \
+              -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getContractData\",\"params\":{\"contractId\":\"$CONTRACT_ID\"}}" > /dev/null; then
+            record "contract-queries" "ok" "@contract-owner" "Inspect contract state; see docs/runbooks/contract-deploy.md"
+          else
+            record "contract-queries" "fail" "@contract-owner" "Inspect contract state; see docs/runbooks/contract-deploy.md"
+          fi
+
+          # 3. API health (read-only)
+          if curl -fsS --max-time 10 "$FUTURENET_RPC_URL" -H 'Content-Type: application/json' \
+              -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' > /dev/null; then
+            record "api-health" "ok" "@platform-owner" "Check RPC/API status; see docs/runbooks/provider-health.md"
+          else
+            record "api-health" "fail" "@platform-owner" "Check RPC/API status; see docs/runbooks/provider-health.md"
+          fi
+
+          # 4. Safe provider checks (read-only)
+          if curl -fsS --max-time 10 "$FUTURENET_RPC_URL" -H 'Content-Type: application/json' \
+              -d '{"jsonrpc":"2.0","id":1,"method":"getLatestLedger"}' > /dev/null; then
+            record "provider-checks" "ok" "@platform-owner" "Check provider status; see docs/runbooks/provider-health.md"
+          else
+            record "provider-checks" "fail" "@platform-owner" "Check provider status; see docs/runbooks/provider-health.md"
+          fi
+
+          if [ "$FAILED" -ne 0 ]; then
+            if [ -n "${OVERRIDE_REASON:-}" ]; then
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "⚠️ **Authorized override recorded:** $OVERRIDE_REASON" >> "$GITHUB_STEP_SUMMARY"
+              echo "::warning::Canary gate overridden: $OVERRIDE_REASON"
+            else
+              echo "::error::Canary verification failed; promotion blocked. Set READINESS_OVERRIDE_REASON to authorize an override."
+              exit 1
+            fi
+          fi
 
       - name: Upload contract ID artifact
         if: success()
