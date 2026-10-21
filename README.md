@@ -64,3 +64,6 @@ MIT
 
 <!-- handsoff-issue-120 -->
 - #120: feat(observability): add PII-redacted structured payout lifecycle logs
+
+<!-- handsoff-issue-13 -->
+- #13: feat(contract): reserve withdrawal amounts when requests are queued
