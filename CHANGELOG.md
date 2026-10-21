@@ -429,6 +429,7 @@ Repo Avatar
 - **frontend:** Add CSP and security headers in next.config.ts
 - **contract:** Include caller and ledger in deposit, withdraw, set_limit, set_operator events
 - **frontend:** Add dynamic theme tokens to NotificationsCenter.tsx
+- **frontend:** Wallet context validation, network verification, multi-account isolation, and safe retry
 - Bounded audit views, idempotent payout initiation, lifecycle transitions, and raw webhook verification
 - **contract:** Rolling fiat caps, fee accrual conservation, token precision, and transfer validation (#23, #24, #25, #26)
 - **governance:** Clarify change scoping, required evidence, and payout exception audits
@@ -1281,6 +1282,7 @@ Repo Avatar
 - **changelog:** Update changelog [skip ci]
 - **changelog:** Update changelog [skip ci]
 - **deps:** Bump the actions group across 1 directory with 6 updates
+- **changelog:** Update changelog [skip ci]
 
 ### Deprecated
 
