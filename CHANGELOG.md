@@ -945,6 +945,10 @@ Repo Avatar
 - #120 feat(observability): add PII-redacted structured payout lifecy
 - #121 feat(observability): alert on aging withdrawals and payout rec
 - #122 ops: rehearse backup and disaster recovery for payout state
+- #123 feat(ops): add staged rollout and kill-switch controls for fro
+- #124 ops: automate production readiness and canary verification
+- #125 ci: enforce least-privilege path-aware workflows and required
+- #126 test(e2e): run full-stack flows against disposable Soroban and
 
 ### Changed
 
@@ -1282,6 +1286,7 @@ Repo Avatar
 - **changelog:** Update changelog [skip ci]
 - **changelog:** Update changelog [skip ci]
 - **deps:** Bump the actions group across 1 directory with 6 updates
+- **changelog:** Update changelog [skip ci]
 - **changelog:** Update changelog [skip ci]
 
 ### Deprecated
