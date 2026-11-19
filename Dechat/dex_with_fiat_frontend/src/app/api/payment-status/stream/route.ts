@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { subscribeToPaymentStatus } from '@/lib/paymentStatusEvents';
 import { applyRateLimit, getClientIp } from '@/lib/rateLimit';
 import { paymentStatusStreamQuerySchema } from '@/lib/apiSchemas';
+import { validationErrorResponse } from '@/lib/apiErrors';
 
 export const dynamic = 'force-dynamic';
 
@@ -21,14 +22,7 @@ export async function GET(request: NextRequest) {
   });
 
   if (!parsed.success) {
-    return NextResponse.json(
-      {
-        success: false,
-        message: 'Validation failed',
-        errors: parsed.error.issues,
-      },
-      { status: 400 },
-    );
+    return validationErrorResponse(parsed.error);
   }
 
   const { sessionId } = parsed.data;

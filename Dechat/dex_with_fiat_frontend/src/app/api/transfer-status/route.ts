@@ -7,6 +7,17 @@ import {
   getProviderCircuitBreaker,
   handlePayoutApiError,
 } from '@/lib/payout/circuitBreaker';
+import {
+  authorizeTransferAccess,
+  uniformNotFoundResponse,
+  resolveCallerIdentity,
+  unauthorizedResponse,
+  getTransferStatus,
+  isTransferAuthorized,
+  nonEnumeratingNotFoundResponse,
+  validationError,
+  logStructuredError,
+} from '@/lib/payout/transferStatusHelpers';
 
 const RATE_LIMIT = {
   maxRequests: 15,
@@ -31,6 +42,9 @@ export async function POST(request: NextRequest) {
 
   const limited = applyRateLimit(ip, '/api/transfer-status', RATE_LIMIT);
   if (limited) return limited;
+
+  const correlationId =
+    request.headers.get('x-correlation-id') || crypto.randomUUID();
 
   try {
     let body: unknown;
@@ -123,7 +137,10 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(errorDetails.body, {
       status: errorDetails.status,
-      headers: errorDetails.headers,
+      headers: {
+        ...errorDetails.headers,
+        'X-Correlation-Id': correlationId,
+      },
     });
   }
 }

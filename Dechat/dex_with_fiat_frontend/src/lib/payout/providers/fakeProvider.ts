@@ -25,6 +25,10 @@ export class FakePayoutProvider implements PayoutProvider {
   private transfers = new Map<string, InitiatedTransfer>();
   private simulatedErrors = new Map<string, PayoutProviderError>();
   private retryCounts = new Map<string, number>();
+  private pendingRecoveryScenarios = new Map<
+    string,
+    { status: NormalizedPayoutStatus; failureReason?: string }
+  >();
 
   constructor() {
     this.seedDefaultAccounts();
@@ -47,6 +51,7 @@ export class FakePayoutProvider implements PayoutProvider {
     this.transfers.clear();
     this.simulatedErrors.clear();
     this.retryCounts.clear();
+    this.pendingRecoveryScenarios.clear();
     this.seedDefaultAccounts();
   }
 
@@ -68,6 +73,30 @@ export class FakePayoutProvider implements PayoutProvider {
 
   clearSimulatedError(operation: string) {
     this.simulatedErrors.delete(operation);
+  }
+
+  /**
+   * Registers a deterministic recovery scenario for a transfer reference.
+   *
+   * The first `checkTransferStatus` call for the reference reports `pending`
+   * (simulating a transaction that was interrupted before confirmation), and
+   * every subsequent call reports the configured terminal status. This lets
+   * cross-browser smoke specs exercise pending transaction recovery without
+   * relying on timing or real provider state.
+   */
+  simulatePendingRecovery(
+    reference: string,
+    finalStatus: NormalizedPayoutStatus,
+    failureReason?: string,
+  ) {
+    this.pendingRecoveryScenarios.set(reference, {
+      status: finalStatus,
+      failureReason,
+    });
+  }
+
+  clearPendingRecovery(reference: string) {
+    this.pendingRecoveryScenarios.delete(reference);
   }
 
   async verifyAccount(input: VerifyAccountInput): Promise<VerifiedAccount> {
@@ -177,6 +206,27 @@ export class FakePayoutProvider implements PayoutProvider {
         statusCode: 404,
         retryable: false,
       });
+    }
+
+    const recovery = this.pendingRecoveryScenarios.get(input.reference);
+    if (recovery) {
+      // First poll reports pending; subsequent polls settle to the final status.
+      this.pendingRecoveryScenarios.delete(input.reference);
+      this.transfers.set(input.reference, {
+        ...transfer,
+        status: recovery.status,
+        rawResponse: { failureReason: recovery.failureReason },
+      });
+
+      return {
+        reference: transfer.reference,
+        status: 'pending',
+        providerReference: transfer.providerReference,
+        transferCode: transfer.transferCode,
+        amountMinor: transfer.amountMinor,
+        currency: transfer.currency,
+        rawResponse: { fake: true, recovery: true },
+      };
     }
 
     return {

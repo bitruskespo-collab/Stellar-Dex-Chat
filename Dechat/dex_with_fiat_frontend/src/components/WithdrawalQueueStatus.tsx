@@ -46,6 +46,10 @@ export function WithdrawalQueueStatus({
     return (
       <div
         data-testid="queue-status-loading"
+        data-queue-state="loading"
+        role="status"
+        aria-live="polite"
+        aria-busy="true"
         className={`theme-surface-muted theme-border rounded-xl border p-4 flex items-center gap-3 text-sm text-gray-400 ${className}`}
       >
         <Loader2 className="w-4 h-4 animate-spin text-blue-400 shrink-0" />
@@ -58,6 +62,9 @@ export function WithdrawalQueueStatus({
     return (
       <div
         data-testid="queue-status-version-mismatch"
+        data-queue-state="version_mismatch"
+        role="alert"
+        aria-live="assertive"
         className={`bg-amber-950/40 border border-amber-600/50 rounded-xl p-4 text-xs text-amber-200 ${className}`}
       >
         <div className="flex items-center gap-2 font-semibold mb-1 text-amber-300">
@@ -76,6 +83,9 @@ export function WithdrawalQueueStatus({
     return (
       <div
         data-testid="queue-status-rpc-error"
+        data-queue-state="rpc_error"
+        role="alert"
+        aria-live="assertive"
         className={`bg-red-950/40 border border-red-600/50 rounded-xl p-4 text-xs text-red-200 ${className}`}
       >
         <div className="flex items-center justify-between gap-2 mb-2">
@@ -86,6 +96,7 @@ export function WithdrawalQueueStatus({
           <button
             type="button"
             onClick={handleRefresh}
+            data-testid="queue-status-retry"
             className="inline-flex items-center gap-1 text-[11px] underline hover:text-white"
           >
             <RefreshCw className="w-3 h-3" /> Retry
@@ -102,6 +113,9 @@ export function WithdrawalQueueStatus({
     return (
       <div
         data-testid="queue-status-empty"
+        data-queue-state="empty"
+        role="status"
+        aria-live="polite"
         className={`theme-surface-muted theme-border rounded-xl border p-4 text-xs ${className}`}
       >
         <div className="flex items-center justify-between">
@@ -122,6 +136,10 @@ export function WithdrawalQueueStatus({
   return (
     <div
       data-testid="queue-status-active"
+      data-queue-state={isStale ? 'stale' : 'active'}
+      data-queue-depth={depth}
+      role="status"
+      aria-live="polite"
       className={`theme-surface-muted theme-border rounded-xl border p-4 space-y-3 ${className}`}
     >
       <div className="flex items-center justify-between">
@@ -142,7 +160,9 @@ export function WithdrawalQueueStatus({
         <button
           type="button"
           onClick={handleRefresh}
+          data-testid="queue-status-refresh"
           title="Refresh queue status"
+          aria-label="Refresh queue status"
           className="p-1 text-gray-400 hover:text-gray-200 transition-colors"
         >
           <RefreshCw className="w-3.5 h-3.5" />
@@ -154,7 +174,10 @@ export function WithdrawalQueueStatus({
           <span className="text-gray-400 text-[10px] block uppercase tracking-wider mb-0.5">
             Queue Depth
           </span>
-          <span className="font-bold text-sm theme-text-primary">
+          <span
+            data-testid="queue-status-depth"
+            className="font-bold text-sm theme-text-primary"
+          >
             {depth} {depth === 1 ? 'request' : 'requests'}
           </span>
         </div>
@@ -163,7 +186,10 @@ export function WithdrawalQueueStatus({
           <span className="text-gray-400 text-[10px] block uppercase tracking-wider mb-0.5">
             Oldest Pending Age
           </span>
-          <span className="font-bold text-sm theme-text-primary">
+          <span
+            data-testid="queue-status-oldest-age"
+            className="font-bold text-sm theme-text-primary"
+          >
             {oldestAgeLedgers !== null && oldestAgeLedgers > 0
               ? `${oldestAgeLedgers} ledgers`
               : 'Recent'}
@@ -175,7 +201,12 @@ export function WithdrawalQueueStatus({
       {estimatedPosition !== null && (
         <div className="flex items-center justify-between text-xs px-1">
           <span className="text-gray-400">Estimated Queue Position:</span>
-          <span className="font-semibold text-blue-400">#{estimatedPosition + 1}</span>
+          <span
+            data-testid="queue-status-position"
+            className="font-semibold text-blue-400"
+          >
+            #{estimatedPosition + 1}
+          </span>
         </div>
       )}
 
@@ -187,7 +218,10 @@ export function WithdrawalQueueStatus({
       )}
 
       {/* Differentiate queue estimate from guaranteed settlement time */}
-      <div className="flex items-start gap-1.5 bg-blue-950/30 border border-blue-800/40 rounded-lg p-2.5 text-[11px] text-blue-200">
+      <div
+        data-testid="queue-status-settlement-disclaimer"
+        className="flex items-start gap-1.5 bg-blue-950/30 border border-blue-800/40 rounded-lg p-2.5 text-[11px] text-blue-200"
+      >
         <Info className="w-3.5 h-3.5 text-blue-400 shrink-0 mt-0.5" />
         <span className="leading-snug">{settlementDisclaimer}</span>
       </div>

@@ -9,17 +9,36 @@ import path from 'node:path';
 
 const BUDGET_FILE = path.resolve('.bundle-budget.json');
 
+// Prerequisite: the budget file must exist and be readable before any checks run.
 if (!fs.existsSync(BUDGET_FILE)) {
-  console.error(`Error: Budget file ${BUDGET_FILE} not found.`);
+  console.error(`[PREREQUISITE FAILED] Budget file ${BUDGET_FILE} not found.`);
+  console.error('Create .bundle-budget.json (see docs) before running the frontend validation mode.');
   process.exit(1);
 }
 
-const config = JSON.parse(fs.readFileSync(BUDGET_FILE, 'utf-8'));
+let config;
+try {
+  config = JSON.parse(fs.readFileSync(BUDGET_FILE, 'utf-8'));
+} catch (err) {
+  console.error(`[PREREQUISITE FAILED] Budget file ${BUDGET_FILE} is not valid JSON: ${err.message}`);
+  process.exit(1);
+}
+
+if (!config || !Array.isArray(config.budgets) || config.budgets.length === 0) {
+  console.error(`[PREREQUISITE FAILED] Budget file ${BUDGET_FILE} must define a non-empty "budgets" array.`);
+  process.exit(1);
+}
+
 console.log('=== Route-Level Bundle & Interaction Budget Verifier ===');
 
 let hasViolations = false;
 
 for (const budget of config.budgets) {
+  if (!budget || typeof budget.route !== 'string') {
+    console.error('[PREREQUISITE FAILED] Each budget entry must include a "route" string.');
+    process.exit(1);
+  }
+
   console.log(`Checking route [${budget.route}]:`);
   console.log(`  Target Initial JS: <= ${budget.maxInitialJsKb} KB`);
   console.log(`  Target Vendor Chunk: <= ${budget.maxVendorChunkKb} KB`);

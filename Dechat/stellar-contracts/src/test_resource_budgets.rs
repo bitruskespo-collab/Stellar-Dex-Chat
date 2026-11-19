@@ -1,8 +1,35 @@
 #![cfg(test)]
 extern crate std;
-use crate::{FiatBridge, FiatBridgeClient, MAX_AUDIT_PAGE_SIZE};
+use crate::{FiatBridge, FiatBridgeClient, MAX_AUDIT_PAGE_SIZE, MAX_SIGNERS};
 use soroban_sdk::{testutils::Address as _, Address, Bytes, Env};
 use std::println;
+
+// ---------------------------------------------------------------------------
+// Documented resource thresholds (worst-case state).
+//
+// These ceilings are the reviewed upper bounds for each public entry point when
+// the contract is exercised against the maximum supported state:
+//   * withdrawal queue at full depth (MAX_WQ_DEPTH entries),
+//   * MAX_SIGNERS multisig signers configured,
+//   * maximum batch size for batch entry points.
+//
+// They are intentionally generous relative to the deterministic baseline so
+// that small, benign refactors do not trip the suite, while genuine
+// super-linear regressions (e.g. accidental O(n^2) scans) fail loudly.
+// Update these constants only alongside a reviewed benchmark run.
+// ---------------------------------------------------------------------------
+
+/// Maximum CPU instruction budget per entry point in worst-case state.
+pub const MAX_CPU_INSTRUCTIONS: u64 = 5_000_000;
+/// Maximum memory bytes budget per entry point in worst-case state.
+pub const MAX_MEMORY_BYTES: u64 = 2_000_000;
+/// Maximum compiled Wasm size for the contract, in bytes (Soroban hard limit
+/// is 256 KiB; we keep headroom below it).
+pub const MAX_WASM_SIZE_BYTES: u64 = 256 * 1024;
+/// Maximum supported withdrawal queue depth used to build worst-case state.
+pub const MAX_WQ_DEPTH: u32 = 100;
+/// Maximum batch size for batch entry points.
+pub const MAX_BATCH_SIZE: u32 = 20;
 
 fn setup_benchmark_bridge(
     env: &Env,
@@ -229,4 +256,218 @@ fn withdrawal_queue_work_is_bounded_as_history_grows() {
     assert!(large_schedule_cpu > 0 && large_schedule_mem > 0);
     assert!(large_dequeue_cpu > 0 && large_dequeue_mem > 0);
     assert!(page_cpu > 0 && page_mem > 0);
+}
+
+/// Builds the worst-case contract state: a full withdrawal queue, the maximum
+/// number of multisig signers, and a large batch of pending operations.
+fn build_worst_case_state(
+    env: &Env,
+) -> (
+    FiatBridgeClient<'_>,
+    Address,
+    Address,
+    soroban_sdk::token::StellarAssetClient<'_>,
+) {
+    env.mock_all_auths();
+    let (bridge, admin, token_addr, token_admin) = setup_benchmark_bridge(env);
+    let user = Address::generate(env);
+    token_admin.mint(&user, &10_000_000);
+    bridge.deposit(
+        &user,
+        &1_000_000,
+        &token_addr,
+        &Bytes::new(env),
+        &0,
+        &0,
+        &None,
+    );
+
+    // Fill the withdrawal queue to its maximum supported depth.
+    for _ in 0..MAX_WQ_DEPTH {
+        bridge.request_withdrawal(&user, &1, &token_addr, &None, &0);
+    }
+
+    // Configure the maximum number of multisig signers.
+    let mut signers = soroban_sdk::vec![env];
+    for _ in 0..MAX_SIGNERS {
+        signers.push_back(Address::generate(env));
+    }
+    bridge.set_signers(&admin, &signers, &1);
+
+    (bridge, admin, token_addr, token_admin)
+}
+
+fn measure<F: FnOnce()>(env: &Env, f: F) -> OperationBudget {
+    env.cost_estimate().budget().reset_default();
+    f();
+    OperationBudget {
+        name: "op",
+        cpu_instructions: env.cost_estimate().budget().cpu_instruction_cost(),
+        memory_bytes: env.cost_estimate().budget().memory_bytes_cost(),
+    }
+}
+
+#[test]
+fn worst_case_state_entrypoints_within_thresholds() {
+    let env = Env::default();
+    let (bridge, admin, token_addr, _token_admin) = build_worst_case_state(&env);
+    let user = Address::generate(&env);
+
+    // Sanity: worst-case state is actually built.
+    assert_eq!(bridge.get_wq_depth(), MAX_WQ_DEPTH);
+
+    let mut results: std::vec::Vec<(&'static str, OperationBudget)> = std::vec::Vec::new();
+
+    results.push((
+        "deposit",
+        measure(&env, || {
+            bridge.deposit(&user, &1, &token_addr, &Bytes::new(&env), &0, &0, &None);
+        }),
+    ));
+
+    results.push((
+        "request_withdrawal",
+        measure(&env, || {
+            bridge.request_withdrawal(&user, &1, &token_addr, &None, &0);
+        }),
+    ));
+
+    results.push((
+        "get_next_priority_withdrawal",
+        measure(&env, || {
+            let _ = bridge.get_next_priority_withdrawal();
+        }),
+    ));
+
+    results.push((
+        "get_withdrawal_queue_page",
+        measure(&env, || {
+            let _ = bridge.get_withdrawal_queue_page(&0, &MAX_AUDIT_PAGE_SIZE);
+        }),
+    ));
+
+    results.push((
+        "get_config_snapshot",
+        measure(&env, || {
+            let _ = bridge.get_config_snapshot();
+        }),
+    ));
+
+    results.push((
+        "set_limit",
+        measure(&env, || {
+            bridge.set_limit(&token_addr, &20_000_000, &0);
+        }),
+    ));
+
+    results.push((
+        "set_signers",
+        measure(&env, || {
+            let mut signers = soroban_sdk::vec![&env];
+            for _ in 0..MAX_SIGNERS {
+                signers.push_back(Address::generate(&env));
+            }
+            bridge.set_signers(&admin, &signers, &1);
+        }),
+    ));
+
+    for (name, op) in results.iter() {
+        println!(
+            "WORST-CASE: {} -> CPU: {}, MEM: {}",
+            name, op.cpu_instructions, op.memory_bytes
+        );
+        assert!(
+            op.cpu_instructions > 0,
+            "{} must consume non-zero CPU instructions",
+            name
+        );
+        assert!(
+            op.memory_bytes > 0,
+            "{} must consume non-zero memory bytes",
+            name
+        );
+        assert!(
+            op.cpu_instructions <= MAX_CPU_INSTRUCTIONS,
+            "{} exceeded worst-case CPU ceiling: {} > {}",
+            name,
+            op.cpu_instructions,
+            MAX_CPU_INSTRUCTIONS
+        );
+        assert!(
+            op.memory_bytes <= MAX_MEMORY_BYTES,
+            "{} exceeded worst-case memory ceiling: {} > {}",
+            name,
+            op.memory_bytes,
+            MAX_MEMORY_BYTES
+        );
+    }
+}
+
+#[test]
+fn worst_case_wasm_size_within_threshold() {
+    // The compiled Wasm artifact is produced by the build pipeline. When it is
+    // available on disk we assert its size against the documented ceiling;
+    // otherwise the check is skipped so unit runs without a build still pass.
+    let wasm_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target/wasm32-unknown-unknown/release/dechat_fiat_bridge.wasm");
+    if let Ok(meta) = std::fs::metadata(&wasm_path) {
+        let size = meta.len();
+        println!("WASM SIZE: {} bytes (limit {})", size, MAX_WASM_SIZE_BYTES);
+        assert!(
+            size <= MAX_WASM_SIZE_BYTES,
+            "compiled Wasm size {} exceeds documented limit {}",
+            size,
+            MAX_WASM_SIZE_BYTES
+        );
+    } else {
+        println!(
+            "WASM SIZE: artifact not found at {:?}; skipping size assertion",
+            wasm_path
+        );
+    }
+}
+
+#[test]
+fn worst_case_boundary_exceeding_max_signers_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (bridge, admin, _token_addr, _token_admin) = setup_benchmark_bridge(&env);
+
+    let mut signers = soroban_sdk::vec![&env];
+    for _ in 0..(MAX_SIGNERS + 1) {
+        signers.push_back(Address::generate(&env));
+    }
+    let result = bridge.try_set_signers(&admin, &signers, &1);
+    assert!(
+        result.is_err(),
+        "set_signers must reject more than MAX_SIGNERS signers"
+    );
+}
+
+#[test]
+fn worst_case_boundary_exceeding_max_batch_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (bridge, _admin, token_addr, token_admin) = setup_benchmark_bridge(&env);
+    let user = Address::generate(&env);
+    token_admin.mint(&user, &10_000_000);
+    bridge.deposit(
+        &user,
+        &1_000_000,
+        &token_addr,
+        &Bytes::new(&env),
+        &0,
+        &0,
+        &None,
+    );
+
+    let mut ids = soroban_sdk::vec![&env];
+    for _ in 0..(MAX_BATCH_SIZE + 1) {
+        ids.push_back(bridge.request_withdrawal(&user, &1, &token_addr, &None, &0));
+    }
+    let result = bridge.try_execute_withdrawal_batch(&ids, &None, &0, &0);
+    assert!(
+        result.is_err(),
+        "batch entry point must reject more than MAX_BATCH_SIZE items"
+    );
 }

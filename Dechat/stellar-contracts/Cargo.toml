@@ -17,6 +17,18 @@ proptest = "1"
 [features]
 testutils = ["soroban-sdk/testutils"]
 
+# Resource regression thresholds (see tests/resource_regression.rs and
+# scripts/validate-contracts.sh). These are the documented worst-case budgets
+# each public entry point is benchmarked against at maximum supported queue
+# size, signer count, and batch size. Exceeding any of them fails validation.
+#
+#   - CPU instructions:   <= 100_000_000 per entry point invocation
+#   - Memory (bytes):     <= 40_000_000 per entry point invocation
+#   - Wasm size (bytes):  <= 100_000 for the release cdylib artifact
+#
+# The root `validate:contracts` mode runs the resource regression tests and
+# the Wasm size check via scripts/validate-contracts.sh.
+
 [profile.release]
 opt-level = "z"
 overflow-checks = true

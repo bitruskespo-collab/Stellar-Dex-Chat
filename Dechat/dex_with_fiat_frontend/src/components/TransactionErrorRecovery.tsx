@@ -31,6 +31,10 @@ export const TransactionErrorRecovery: React.FC<TransactionErrorRecoveryProps> =
     <div
       role="alert"
       aria-live="assertive"
+      data-testid="transaction-error-recovery"
+      data-error-code={diagnostics.errorCode || 'unknown'}
+      data-error-category={diagnostics.category}
+      data-retryable={diagnostics.isRetryable ? 'true' : 'false'}
       className="p-4 rounded-lg bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 text-red-900 dark:text-red-200 my-3"
     >
       <div className="flex items-start gap-3">
@@ -46,13 +50,18 @@ export const TransactionErrorRecovery: React.FC<TransactionErrorRecoveryProps> =
 
           <div className="flex items-center gap-2 text-xs text-muted-foreground mb-3">
             <span>Correlation ID:</span>
-            <code className="bg-black/10 dark:bg-white/10 px-1.5 py-0.5 rounded font-mono">
+            <code
+              data-testid="transaction-error-correlation-id"
+              className="bg-black/10 dark:bg-white/10 px-1.5 py-0.5 rounded font-mono"
+            >
               {diagnostics.correlationId}
             </code>
             <button
               type="button"
               onClick={copyCorrelationId}
               aria-label="Copy correlation ID"
+              data-testid="transaction-error-copy-correlation-id"
+              data-copied={copied ? 'true' : 'false'}
               className="text-xs underline hover:no-underline font-medium text-primary"
             >
               {copied ? 'Copied' : 'Copy'}
@@ -64,6 +73,7 @@ export const TransactionErrorRecovery: React.FC<TransactionErrorRecoveryProps> =
               <button
                 type="button"
                 onClick={onRetry}
+                data-testid="transaction-error-retry"
                 className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded font-medium text-xs transition-colors focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
               >
                 Retry Transaction
@@ -73,6 +83,7 @@ export const TransactionErrorRecovery: React.FC<TransactionErrorRecoveryProps> =
               <button
                 type="button"
                 onClick={onDismiss}
+                data-testid="transaction-error-dismiss"
                 className="px-3 py-1.5 bg-gray-200 dark:bg-zinc-800 hover:bg-gray-300 text-gray-800 dark:text-zinc-200 rounded font-medium text-xs transition-colors"
               >
                 Dismiss
@@ -82,6 +93,7 @@ export const TransactionErrorRecovery: React.FC<TransactionErrorRecoveryProps> =
               type="button"
               onClick={() => setShowDiagnostics((prev) => !prev)}
               aria-expanded={showDiagnostics}
+              data-testid="transaction-error-toggle-diagnostics"
               className="px-2 py-1 text-xs text-gray-600 dark:text-gray-400 hover:underline"
             >
               {showDiagnostics ? 'Hide diagnostics' : 'Show diagnostics'}
@@ -89,7 +101,10 @@ export const TransactionErrorRecovery: React.FC<TransactionErrorRecoveryProps> =
           </div>
 
           {showDiagnostics && (
-            <div className="mt-3 p-3 bg-zinc-900 text-zinc-100 rounded text-xs font-mono overflow-x-auto">
+            <div
+              data-testid="transaction-error-diagnostics"
+              className="mt-3 p-3 bg-zinc-900 text-zinc-100 rounded text-xs font-mono overflow-x-auto"
+            >
               <p>Error Code: {diagnostics.errorCode || 'N/A'}</p>
               <p>Category: {diagnostics.category}</p>
               <p>Timestamp: {new Date(diagnostics.timestamp).toISOString()}</p>

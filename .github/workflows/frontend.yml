@@ -303,8 +303,18 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
+      # Install all three engines so the cross-browser wallet/transaction smoke
+      # suite (issue #279) runs on Chromium, Firefox and WebKit.  Any browser
+      # that fails to install fails the job before tests run.
       - name: Install Playwright browsers
-        run: pnpm exec playwright install --with-deps chromium
+        run: pnpm exec playwright install --with-deps chromium firefox webkit
+
+      # Cross-browser smoke coverage: connection, signature rejection, pending
+      # transaction recovery and payout status.  Playwright's default reporter
+      # exits nonzero if any project (browser) has a failing test, so a
+      # browser-specific regression fails this job.
+      - name: Run cross-browser wallet & transaction smoke tests
+        run: pnpm test:e2e:smoke
 
       - name: Run E2E tests
         run: pnpm test:e2e

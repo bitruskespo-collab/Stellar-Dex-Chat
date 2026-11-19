@@ -349,11 +349,66 @@ function runReplayEvaluations(): { passed: number; failed: number } {
   return { passed, failed };
 }
 
-async function runBenchmark() {
-  console.log('🚀 Starting Performance Benchmark...');
-  
+/**
+ * Deterministic, non-network mode for the root validation command.
+ *
+ * Enabled via `--offline` (or `BENCHMARK_OFFLINE=1`). In this mode no RPC or
+ * Horizon calls are made, no report file is written, and the process exits
+ * nonzero if any offline evaluation fails. This keeps the root validation
+ * command reproducible and free of network flakiness.
+ */
+const OFFLINE_MODE = process.argv.includes('--offline') || process.env.BENCHMARK_OFFLINE === '1';
+
+/** Latency thresholds (ms) that must not be exceeded in network mode. */
+const THRESHOLDS = {
+  rpcLatency: Number(process.env.RPC_LATENCY_THRESHOLD_MS ?? 2000),
+  horizonLatency: Number(process.env.HORIZON_LATENCY_THRESHOLD_MS ?? 2000),
+};
+
+interface BenchmarkResults {
+  rpcLatency: number;
+  horizonLatency: number;
+  timestamp: string;
+}
+
+/** Run only the offline evaluations; returns true when all pass. */
+function runOfflineEvaluations(): boolean {
+  const localeResults = runLocaleEvaluations();
+  console.log(`✅ Locale evaluations: ${localeResults.passed} passed, ${localeResults.failed} failed`);
+
+  const replayResults = runReplayEvaluations();
+  console.log(`✅ Replay evaluations: ${replayResults.passed} passed, ${replayResults.failed} failed`);
+
+  return localeResults.failed === 0 && replayResults.failed === 0;
+}
+
+/** Collect threshold violations for a set of measured results. */
+function checkThresholds(results: BenchmarkResults): string[] {
+  const violations: string[] = [];
+  if (results.rpcLatency > THRESHOLDS.rpcLatency) {
+    violations.push(`rpcLatency ${results.rpcLatency}ms > ${THRESHOLDS.rpcLatency}ms`);
+  }
+  if (results.horizonLatency > THRESHOLDS.horizonLatency) {
+    violations.push(`horizonLatency ${results.horizonLatency}ms > ${THRESHOLDS.horizonLatency}ms`);
+  }
+  return violations;
+}
+
+async function runBenchmark(): Promise<number> {
+  console.log(`🚀 Starting Performance Benchmark${OFFLINE_MODE ? ' (offline)' : ''}...`);
+
+  if (OFFLINE_MODE) {
+    const ok = runOfflineEvaluations();
+    if (!ok) {
+      console.error('\n❌ Offline benchmark evaluations failed');
+      return 1;
+    }
+    console.log('\n✅ Offline benchmark evaluations passed');
+    return 0;
+  }
+
   const server = new rpc.Server(RPC_URL);
-  const results = {
+  const results: BenchmarkResults = {
     rpcLatency: 0,
     horizonLatency: 0,
     timestamp: new Date().toISOString(),
@@ -389,10 +444,10 @@ Generated on: ${results.timestamp}
 Network: **Testnet**
 
 ## Network Latency
-| Component | Metric | Baseline (ms) |
-| :--- | :--- | :--- |
-| **Soroban RPC** | \`getLatestLedger\` | ${results.rpcLatency} |
-| **Stellar Horizon** | \`GET /\` | ${results.horizonLatency} |
+| Component | Metric | Baseline (ms) | Threshold (ms) |
+| :--- | :--- | :--- | :--- |
+| **Soroban RPC** | \`getLatestLedger\` | ${results.rpcLatency} | ${THRESHOLDS.rpcLatency} |
+| **Stellar Horizon** | \`GET /\` | ${results.horizonLatency} | ${THRESHOLDS.horizonLatency} |
 
 ## Estimated Application Latency (Observed)
 | Flow Phase | Target (ms) | Baseline (ms) | Status |
@@ -420,10 +475,27 @@ ${sloReport}
 
     fs.writeFileSync('PERFORMANCE_BASELINE.md', report);
     console.log('\n📊 Report saved to PERFORMANCE_BASELINE.md');
+
+    // 6. Enforce thresholds and offline evaluation results.
+    const violations = checkThresholds(results);
+    if (localeResults.failed > 0) violations.push(`locale evaluations failed: ${localeResults.failed}`);
+    if (replayResults.failed > 0) violations.push(`replay evaluations failed: ${replayResults.failed}`);
+
+    if (violations.length > 0) {
+      for (const v of violations) console.error(`❌ threshold violation: ${v}`);
+      return 1;
+    }
+
+    return 0;
   } catch (err) {
     console.error('\n❌ Benchmark failed:', err instanceof Error ? err.message : err);
-    process.exit(1);
+    return 1;
   }
 }
 
-runBenchmark();
+runBenchmark()
+  .then((code) => process.exit(code))
+  .catch((err) => {
+    console.error('\n❌ Benchmark failed:', err instanceof Error ? err.message : err);
+    process.exit(1);
+  });

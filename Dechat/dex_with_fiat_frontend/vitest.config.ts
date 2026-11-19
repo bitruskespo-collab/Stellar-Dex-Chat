@@ -13,7 +13,11 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: './vitest.setup.ts',
-    include: ['src/**/*.{test,spec}.{ts,tsx}'],
+    include: [
+      'src/**/*.{test,spec}.{ts,tsx}',
+      // API consumer contract tests validating responses against the published OpenAPI schema.
+      'tests/contracts/**/*.{test,spec}.{ts,tsx}',
+    ],
     testTimeout: 15000,
     hookTimeout: 15000,
     fakeTimers: {

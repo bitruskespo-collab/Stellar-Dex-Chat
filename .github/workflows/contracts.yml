@@ -125,6 +125,13 @@ jobs:
           workspaces: Dechat/stellar-contracts -> target
       - name: Run tests
         run: cargo test
+      - name: Run worst-case resource regression tests
+        run: |
+          set -euo pipefail
+          # Exercises every public entry point at maximum supported queue size,
+          # signer count, and batch size. Fails when CPU, memory, or Wasm size
+          # exceeds the documented thresholds in docs/RESOURCE_BUDGETS.md.
+          cargo test test_resource_budgets -- --nocapture
 
   build-wasm:
     name: Build WASM

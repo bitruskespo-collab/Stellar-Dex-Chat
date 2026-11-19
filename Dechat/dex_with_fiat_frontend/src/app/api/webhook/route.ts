@@ -125,18 +125,17 @@ export async function POST(request: NextRequest) {
 
     if (!matchedVersion) {
       telemetry.addLog(span.spanId, 'error', 'Invalid webhook signature', {
-        receivedSignature: signature,
+        endpoint: '/api/webhook',
       });
       telemetry.finishSpan(span.spanId, {
         success: false,
-        error: verification.message ?? 'Invalid signature',
+        error: 'Invalid signature',
       });
 
-      console.error('Webhook signature verification failed:', verification.message);
-      const status = verification.error === 'missing_secret' ? 400 : 401;
+      console.error('Webhook signature verification failed');
       return NextResponse.json(
-        { message: verification.message ?? 'Invalid signature' },
-        { status },
+        { message: 'Invalid signature' },
+        { status: 401 },
       );
     }
     // Signature verified: request is recognized as a trusted provider callback and excluded from rate limiting
@@ -144,10 +143,6 @@ export async function POST(request: NextRequest) {
     telemetry.addLog(span.spanId, 'info', 'Webhook signature verified', {
       endpoint: '/api/webhook',
       ...credentialManager.logContext(matchedVersion),
-    });
-
-    telemetry.addLog(span.spanId, 'info', 'Webhook signature verified', {
-      endpoint: '/api/webhook',
     });
 
     // Step 2: Parse payload into domain state only AFTER signature verification has passed
@@ -181,6 +176,23 @@ export async function POST(request: NextRequest) {
       .digest('hex');
     const dataId = event?.data?.id;
     const dataRef = event?.data?.reference;
+    if (!event || typeof event.event !== 'string' || !event.event) {
+      telemetry.addLog(
+        span.spanId,
+        'error',
+        'Missing event type in webhook payload',
+        { endpoint: '/api/webhook' },
+      );
+      telemetry.finishSpan(span.spanId, {
+        success: false,
+        error: 'Missing event type',
+        errorType: 'validation_error',
+      });
+      return NextResponse.json(
+        { message: 'Event must contain a type' },
+        { status: 400 },
+      );
+    }
     if (!dataId && !dataRef) {
       telemetry.addLog(
         span.spanId,
@@ -313,7 +325,7 @@ export async function POST(request: NextRequest) {
             recipient: data.recipient,
             status: data.status,
           });
-          const nextRecord = setTransferStatus({
+          const nextRecord = transitionPayoutStatus({
             reference: data.reference ?? '',
             status: 'success',
             amount: Number(data.amount ?? 0),
@@ -344,7 +356,7 @@ export async function POST(request: NextRequest) {
             status: data.status,
             failure_reason: data.failure_reason,
           });
-          const nextRecord = setTransferStatus({
+          const nextRecord = transitionPayoutStatus({
             reference: data.reference ?? '',
             status: 'failed',
             amount: Number(data.amount ?? 0),
@@ -380,7 +392,7 @@ export async function POST(request: NextRequest) {
             recipient: data.recipient,
             status: data.status,
           });
-          const nextRecord = setTransferStatus({
+          const nextRecord = transitionPayoutStatus({
             reference: data.reference ?? '',
             status: 'reversed',
             amount: Number(data.amount ?? 0),
@@ -417,6 +429,29 @@ export async function POST(request: NextRequest) {
       return response;
     } catch (processError) {
       webhookDeduplicationService.releaseOnError(dedupeEventId);
+      if (processError instanceof InvalidPayoutTransitionError) {
+        telemetry.addLog(
+          span.spanId,
+          'warn',
+          'Invalid payout status transition rejected',
+          {
+            eventId: dedupeEventId,
+            reference: event.data?.reference,
+            reason: processError.message,
+          },
+        );
+        telemetry.finishSpan(span.spanId, {
+          success: false,
+          error: 'Invalid payout transition',
+          errorType: 'validation_error',
+        });
+        const resp = NextResponse.json(
+          { message: 'Invalid payout status transition' },
+          { status: 409 },
+        );
+        telemetry.setTraceHeaders(resp.headers, traceContext);
+        return resp;
+      }
       throw processError;
     }
   } catch (error) {

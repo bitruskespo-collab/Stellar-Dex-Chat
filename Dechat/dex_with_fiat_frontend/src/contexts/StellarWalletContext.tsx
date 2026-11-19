@@ -39,8 +39,42 @@ declare global {
     };
     /** Test-only bridge, registered only for E2E or non-production builds. */
     mockStellarConnect?: (address: string) => void;
+    /**
+     * Test-only wallet bridge, registered only for E2E or non-production
+     * builds. Lets cross-browser smoke specs drive wallet state
+     * deterministically (connect, signature rejection, pending tx recovery).
+     */
+    mockStellarWallet?: MockStellarWalletBridge;
   }
 }
+
+export type MockSignatureOutcome = 'approve' | 'reject';
+
+export interface MockStellarWalletBridge {
+  /** Connect the wallet to the given address (defaults to a fixture address). */
+  connect: (address?: string) => void;
+  /** Disconnect the wallet and clear persisted session state. */
+  disconnect: () => void;
+  /** Configure how the next `signTx` call behaves. */
+  setSignatureOutcome: (outcome: MockSignatureOutcome) => void;
+  /** Simulate a wallet that is still awaiting user approval (pending tx). */
+  setPendingTransaction: (pending: boolean) => void;
+  /** Simulate the wallet losing authorization mid-session. */
+  expireSession: () => void;
+  /** Read the current mock state (useful for assertions). */
+  getState: () => MockStellarWalletState;
+}
+
+export interface MockStellarWalletState {
+  connected: boolean;
+  address: string;
+  signatureOutcome: MockSignatureOutcome;
+  pendingTransaction: boolean;
+}
+
+export const MOCK_WALLET_DEFAULT_ADDRESS =
+  'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF';
+=======
 
 async function getFreighterAccounts(): Promise<{
   accounts: string[];
@@ -146,6 +180,9 @@ export function StellarWalletProvider({ children }: { children: ReactNode }) {
     refreshing: false,
   });
   const refreshPromiseRef = useRef<Promise<void> | null>(null);
+  const mockSignatureOutcomeRef = useRef<MockSignatureOutcome>('approve');
+  const mockPendingTransactionRef = useRef(false);
+  const mockAddressRef = useRef('');
 
   useEffect(() => {
     const check = async () => {
@@ -521,6 +558,17 @@ export function StellarWalletProvider({ children }: { children: ReactNode }) {
         throw new Error('Please switch Freighter to Testnet');
       }
 
+      if (mockWalletEnabled) {
+        if (mockPendingTransactionRef.current) {
+          throw new Error(
+            'Transaction is still pending wallet approval. Please retry once the wallet responds.',
+          );
+        }
+        if (mockSignatureOutcomeRef.current === 'reject') {
+          throw new Error('Transaction signature was rejected by the wallet.');
+        }
+      }
+
       const result = await signTransaction(xdr, {
         networkPassphrase,
         address,
@@ -528,7 +576,7 @@ export function StellarWalletProvider({ children }: { children: ReactNode }) {
       if (result.error) throw new Error(String(result.error));
       return result.signedTxXdr;
     },
-    [connection.address, connection.isConnected, sessionExpired],
+    [connection.address, connection.isConnected, sessionExpired, mockWalletEnabled],
   );
 
   const requestAccountSwitch = useCallback(
@@ -665,6 +713,56 @@ export function StellarWalletProvider({ children }: { children: ReactNode }) {
       }
     };
   }, [mockConnect, mockWalletEnabled]);
+
+  useEffect(() => {
+    if (!mockWalletEnabled || typeof window === 'undefined') return;
+
+    const bridge: MockStellarWalletBridge = {
+      connect: (address?: string) => {
+        const addr = address || MOCK_WALLET_DEFAULT_ADDRESS;
+        mockAddressRef.current = addr;
+        mockSignatureOutcomeRef.current = 'approve';
+        mockPendingTransactionRef.current = false;
+        mockConnect(addr);
+      },
+      disconnect: () => {
+        mockAddressRef.current = '';
+        mockSignatureOutcomeRef.current = 'approve';
+        mockPendingTransactionRef.current = false;
+        disconnect();
+      },
+      setSignatureOutcome: (outcome: MockSignatureOutcome) => {
+        mockSignatureOutcomeRef.current = outcome;
+      },
+      setPendingTransaction: (pending: boolean) => {
+        mockPendingTransactionRef.current = pending;
+      },
+      expireSession: () => {
+        localStorage.removeItem(STORAGE_KEY_ADDRESS);
+        localStorage.removeItem(STORAGE_KEY_INDEX);
+        localStorage.removeItem(STORAGE_KEY_TIMESTAMP);
+        setSessionExpired(true);
+        setConnection(defaultConnection);
+        setAccounts([]);
+        setSelectedAccountIndex(0);
+        setXlmBalance('');
+        setContextVersion((v) => v + 1);
+      },
+      getState: () => ({
+        connected: Boolean(mockAddressRef.current),
+        address: mockAddressRef.current,
+        signatureOutcome: mockSignatureOutcomeRef.current,
+        pendingTransaction: mockPendingTransactionRef.current,
+      }),
+    };
+
+    window.mockStellarWallet = bridge;
+    return () => {
+      if (window.mockStellarWallet === bridge) {
+        delete window.mockStellarWallet;
+      }
+    };
+  }, [disconnect, mockConnect, mockWalletEnabled]);
 
   const isNetworkMismatch =
     connection.isConnected &&

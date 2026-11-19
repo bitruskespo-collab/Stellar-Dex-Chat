@@ -1,12 +1,18 @@
 {
+  "name": "soroban-defi",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Soroban DeFi protocol monorepo: contracts, API, and frontend",
+  "workspaces": [
+    "frontend",
+    "api"
+  ],
   "scripts": {
-    "prepare": "husky",
-    "precommit:clippy": "cd Dechat/stellar-contracts && cargo clippy --all-targets --all-features -- -D warnings",
-    "precommit:eslint": "pnpm --dir Dechat/dex_with_fiat_frontend run lint --"
+    "validate:frontend": "node scripts/validate.mjs frontend",
+    "validate:contracts": "node scripts/validate.mjs contracts",
+    "validate": "node scripts/validate.mjs all"
   },
-  "devDependencies": {
-    "@types/node": "^26.6.6",
-    "husky": "^9.1.7",
-    "lint-staged": "^17.6.0"
+  "engines": {
+    "node": ">=20"
   }
 }

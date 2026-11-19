@@ -109,6 +109,249 @@ export const eventsQuerySchema = z.object({
 
 export type EventsQuery = z.infer<typeof eventsQuerySchema>;
 
+// ---------------------------------------------------------------------------
+// Published OpenAPI contract (versioned)
+// ---------------------------------------------------------------------------
+//
+// The API contract is published as a versioned OpenAPI document. Consumer
+// contract tests validate real route responses against the schemas below so
+// that undocumented response drift (renamed fields, changed status codes,
+// missing error envelopes) fails CI instead of silently breaking clients.
+//
+// Bump `OPENAPI_SCHEMA_VERSION` whenever the published document changes in a
+// backwards-incompatible way; the contract tests assert the version is
+// present in the served document.
+
+/** Version of the published OpenAPI document these schemas mirror. */
+export const OPENAPI_SCHEMA_VERSION = '1.0.0';
+
+/** Path of the published OpenAPI document, relative to the app root. */
+export const OPENAPI_SCHEMA_PATH = 'openapi.yaml';
+
+/** Standard error envelope returned by every route on failure. */
+export const apiErrorSchema = z
+  .object({
+    error: z.string().min(1),
+    code: z.string().min(1).optional(),
+    details: z.unknown().optional(),
+  })
+  .strict();
+
+export type ApiError = z.infer<typeof apiErrorSchema>;
+
+/** `GET /api/health` — 200. */
+export const healthResponseSchema = z
+  .object({
+    status: z.literal('ok'),
+    version: z.string().min(1).optional(),
+    timestamp: z.string().min(1).optional(),
+  })
+  .strict();
+
+export type HealthResponse = z.infer<typeof healthResponseSchema>;
+
+/** `GET /api/banks` — 200. */
+export const bankSchema = z
+  .object({
+    name: z.string().min(1),
+    code: z.string().min(1),
+  })
+  .strict();
+
+export const banksResponseSchema = z
+  .object({
+    banks: z.array(bankSchema),
+  })
+  .strict();
+
+export type BanksResponse = z.infer<typeof banksResponseSchema>;
+
+/** `POST /api/initiate-transfer` — 200. */
+export const initiateTransferResponseSchema = z
+  .object({
+    reference: z.string().min(1),
+    status: z.string().min(1),
+    amount: z.number().nonnegative().optional(),
+    currency: z.string().min(1).optional(),
+  })
+  .strict();
+
+export type InitiateTransferResponse = z.infer<
+  typeof initiateTransferResponseSchema
+>;
+
+/** `GET /api/transfer-status` — 200. */
+export const transferStatusResponseSchema = z
+  .object({
+    reference: z.string().min(1),
+    status: z.string().min(1),
+    updatedAt: z.string().min(1).optional(),
+  })
+  .strict();
+
+export type TransferStatusResponse = z.infer<
+  typeof transferStatusResponseSchema
+>;
+
+/** `GET /api/transfer-status/[reference]` — 200. */
+export const transferStatusByReferenceResponseSchema =
+  transferStatusResponseSchema;
+
+export type TransferStatusByReferenceResponse = z.infer<
+  typeof transferStatusByReferenceResponseSchema
+>;
+
+/** `GET /api/payment-status/stream` — SSE event payload. */
+export const paymentStatusStreamEventSchema = z
+  .object({
+    sessionId: z.string().min(1),
+    status: z.string().min(1),
+    reference: z.string().min(1).optional(),
+  })
+  .strict();
+
+export type PaymentStatusStreamEvent = z.infer<
+  typeof paymentStatusStreamEventSchema
+>;
+
+/** `POST /api/webhook` — 200 acknowledgement. */
+export const webhookResponseSchema = z
+  .object({
+    received: z.literal(true),
+  })
+  .strict();
+
+export type WebhookResponse = z.infer<typeof webhookResponseSchema>;
+
+/** `POST /api/admin/payout-retry` — 200. */
+export const adminPayoutRetryResponseSchema = z
+  .object({
+    reference: z.string().min(1),
+    retried: z.boolean(),
+  })
+  .strict();
+
+export type AdminPayoutRetryResponse = z.infer<
+  typeof adminPayoutRetryResponseSchema
+>;
+
+/** `GET /api/admin/reconciliation` — 200. */
+export const adminReconciliationResponseSchema = z
+  .object({
+    entries: z.array(
+      z
+        .object({
+          reference: z.string().min(1),
+          status: z.string().min(1),
+          amount: z.number().nonnegative(),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
+
+export type AdminReconciliationResponse = z.infer<
+  typeof adminReconciliationResponseSchema
+>;
+
+/**
+ * Response schemas keyed by route path and HTTP status. Only documented
+ * (route, status) pairs are listed; anything else is a contract violation.
+ */
+export const routeResponseSchemas = {
+  '/api/health': {
+    200: healthResponseSchema,
+  },
+  '/api/banks': {
+    200: banksResponseSchema,
+  },
+  '/api/initiate-transfer': {
+    200: initiateTransferResponseSchema,
+  },
+  '/api/transfer-status': {
+    200: transferStatusResponseSchema,
+  },
+  '/api/transfer-status/[reference]': {
+    200: transferStatusByReferenceResponseSchema,
+  },
+  '/api/payment-status/stream': {
+    200: paymentStatusStreamEventSchema,
+  },
+  '/api/webhook': {
+    200: webhookResponseSchema,
+  },
+  '/api/admin/payout-retry': {
+    200: adminPayoutRetryResponseSchema,
+  },
+  '/api/admin/reconciliation': {
+    200: adminReconciliationResponseSchema,
+  },
+} as const;
+
+export type ContractRoute = keyof typeof routeResponseSchemas;
+
+/** Result of validating a response against the published contract. */
+export type ContractValidationResult =
+  | { ok: true; data: unknown }
+  | { ok: false; error: z.ZodError };
+
+/**
+ * Validate a parsed response body against the published schema for a route and
+ * status code. Undocumented status codes fail the contract.
+ */
+export function validateRouteResponse(
+  route: ContractRoute,
+  status: number,
+  body: unknown,
+): ContractValidationResult {
+  const statusSchemas: Record<number, z.ZodTypeAny> = routeResponseSchemas[
+    route
+  ] as Record<number, z.ZodTypeAny>;
+  const schema = statusSchemas[status];
+  if (!schema) {
+    return {
+      ok: false,
+      error: new z.ZodError([
+        {
+          code: z.ZodIssueCode.custom,
+          path: [],
+          message: `Undocumented status ${status} for route ${route}`,
+        },
+      ]),
+    };
+  }
+  const parsed = schema.safeParse(body);
+  return parsed.success
+    ? { ok: true, data: parsed.data }
+    : { ok: false, error: parsed.error };
+}
+
+/**
+ * Validate a `Response` against the published contract for a route. Reads the
+ * body as JSON and checks both the status code and the payload shape.
+ */
+export async function validateResponseContract(
+  route: ContractRoute,
+  response: Response,
+): Promise<ContractValidationResult> {
+  let body: unknown;
+  try {
+    body = await response.clone().json();
+  } catch {
+    return {
+      ok: false,
+      error: new z.ZodError([
+        {
+          code: z.ZodIssueCode.custom,
+          path: [],
+          message: `Response for ${route} is not valid JSON`,
+        },
+      ]),
+    };
+  }
+  return validateRouteResponse(route, response.status, body);
+}
+
 /**
  * Error thrown by {@link fetchWithRetry} when the server answers with a
  * non-OK status.

@@ -416,33 +416,99 @@ describe('StellarWalletContext', () => {
     });
   });
 
-  it('mockConnect sets a TESTNET connection directly', () => {
-    vi.stubEnv('NEXT_PUBLIC_E2E', 'true');
-    const { result } = renderHook(() => useStellarWallet(), { wrapper });
+  describe('mock wallet bridge (E2E)', () => {
+    it('mockConnect sets a TESTNET connection directly', () => {
+      vi.stubEnv('NEXT_PUBLIC_E2E', 'true');
+      const { result } = renderHook(() => useStellarWallet(), { wrapper });
 
-    act(() => {
-      result.current.mockConnect?.(ADDRESS);
+      act(() => {
+        result.current.mockConnect?.(ADDRESS);
+      });
+
+      expect(result.current.connection.isConnected).toBe(true);
+      expect(result.current.connection.address).toBe(ADDRESS);
+      expect(result.current.connection.network).toBe('TESTNET');
     });
 
-    expect(result.current.connection.isConnected).toBe(true);
-    expect(result.current.connection.address).toBe(ADDRESS);
-    expect(result.current.connection.network).toBe('TESTNET');
+    it('exposes window.mockStellarConnect when E2E is enabled', async () => {
+      vi.stubEnv('NEXT_PUBLIC_E2E', 'true');
+      const { result } = renderHook(() => useStellarWallet(), { wrapper });
+
+      await waitFor(() =>
+        expect(typeof window.mockStellarConnect).toBe('function'),
+      );
+
+      act(() => {
+        window.mockStellarConnect?.(SECOND_ADDRESS);
+      });
+
+      expect(result.current.connection.isConnected).toBe(true);
+      expect(result.current.connection.address).toBe(SECOND_ADDRESS);
+      expect(result.current.connection.network).toBe('TESTNET');
+    });
+
+    it('mockConnect populates a deterministic balance for smoke assertions', async () => {
+      vi.stubEnv('NEXT_PUBLIC_E2E', 'true');
+      const { result } = renderHook(() => useStellarWallet(), { wrapper });
+
+      act(() => {
+        result.current.mockConnect?.(ADDRESS);
+      });
+
+      expect(result.current.xlmBalance).toBe('100.0000000');
+      expect(result.current.error).toBeNull();
+    });
+
+    it('mockConnect can simulate a rejected signature for failure-path smoke coverage', async () => {
+      vi.stubEnv('NEXT_PUBLIC_E2E', 'true');
+      const { result } = renderHook(() => useStellarWallet(), { wrapper });
+
+      act(() => {
+        result.current.mockConnect?.(ADDRESS);
+      });
+
+      freighter.signTransaction.mockResolvedValue({
+        error: 'User rejected',
+      });
+
+      await expect(result.current.signTx('UNSIGNED_XDR')).rejects.toThrow(
+        'User rejected',
+      );
+    });
+
+    it('mockConnect can simulate a pending transaction recovery state', async () => {
+      vi.stubEnv('NEXT_PUBLIC_E2E', 'true');
+      const { result } = renderHook(() => useStellarWallet(), { wrapper });
+
+      act(() => {
+        result.current.mockConnect?.(ADDRESS);
+      });
+
+      // Simulate a wallet that drops the connection mid-flight so the
+      // recovery path surfaces a reconnect prompt instead of signing.
+      freighter.getAddress.mockResolvedValue({ error: 'Connection lost' });
+
+      await expect(result.current.signTx('UNSIGNED_XDR')).rejects.toThrow(
+        'Wallet connection lost or authorization expired. Please reconnect.',
+      );
+    });
+
+    it('does not expose the mock wallet bridge in production when E2E is disabled', async () => {
+      vi.stubEnv('NEXT_PUBLIC_E2E', 'false');
+      vi.stubEnv('NODE_ENV', 'production');
+      delete window.mockStellarConnect;
+
+      const { result } = renderHook(() => useStellarWallet(), { wrapper });
+
+      await waitFor(() =>
+        expect(result.current.isFreighterInstalled).toBe(false),
+      );
+      expect(window.mockStellarConnect).toBeUndefined();
+      expect(result.current.mockConnect).toBeUndefined();
+      vi.unstubAllEnvs();
+    });
   });
 
-  it('does not expose the mock wallet bridge in production when E2E is disabled', async () => {
-    vi.stubEnv('NEXT_PUBLIC_E2E', 'false');
-    vi.stubEnv('NODE_ENV', 'production');
-    delete window.mockStellarConnect;
-
-    const { result } = renderHook(() => useStellarWallet(), { wrapper });
-
-    await waitFor(() =>
-      expect(result.current.isFreighterInstalled).toBe(false),
-    );
-    expect(window.mockStellarConnect).toBeUndefined();
-    expect(result.current.mockConnect).toBeUndefined();
-    vi.unstubAllEnvs();
-  });
 
   it('clearSessionExpired resets the sessionExpired flag after an expired session is detected', async () => {
     localStorage.setItem('stellar_address', ADDRESS);

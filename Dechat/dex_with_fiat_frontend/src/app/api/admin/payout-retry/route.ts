@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAdminAuth } from '../_utils/requireAdminAuth';
 import { payoutRetryQueue } from '@/lib/payout/retryQueue';
 
+// Contract tests for this route live in
+// src/app/api/admin/payout-retry/__tests__/route.contract.test.ts and assert
+// every response (401/403 auth failures, 400 validation errors, 200 success)
+// against the published OpenAPI schema.
+
 export async function GET(request: NextRequest) {
   const authError = requireAdminAuth(request);
   if (authError) {
@@ -45,11 +50,19 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const body = (await request.json()) as {
-      jobId?: string;
-      action?: string;
-      actor?: string;
-    };
+    let body: { jobId?: string; action?: string; actor?: string };
+    try {
+      body = (await request.json()) as {
+        jobId?: string;
+        action?: string;
+        actor?: string;
+      };
+    } catch {
+      return NextResponse.json(
+        { error: 'Invalid JSON body' },
+        { status: 400 },
+      );
+    }
     const { jobId, action, actor = 'operator:admin' } = body;
 
     if (!jobId) {

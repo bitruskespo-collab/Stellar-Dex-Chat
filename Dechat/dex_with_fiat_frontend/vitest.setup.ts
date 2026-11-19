@@ -1,6 +1,9 @@
 import '@testing-library/jest-dom';
-import { afterEach, vi } from 'vitest';
+import { afterEach, beforeEach, vi } from 'vitest';
 import { resetNetworkQueueForTests } from '@/lib/networkQueue';
+import { resetRateLimitersForTests } from '@/lib/rateLimit';
+import { resetTransferStoreForTests } from '@/lib/transferStore';
+import { resetProviderMocksForTests } from '@/lib/providers';
 
 vi.mock('server-only', () => ({}));
 
@@ -72,6 +75,30 @@ console.error = (...args: unknown[]) => {
   originalError.apply(console, args);
 };
 
+beforeEach(() => {
+  // Contract tests must only ever see synthetic fixtures; fail fast if a
+  // real credential or user identifier leaks into the environment.
+  const forbiddenEnvKeys = [
+    'DEX_API_KEY',
+    'DEX_API_SECRET',
+    'PROVIDER_API_KEY',
+    'PROVIDER_API_SECRET',
+  ];
+  for (const key of forbiddenEnvKeys) {
+    if (process.env[key]) {
+      throw new Error(
+        `Contract tests must not run with real credentials (${key} is set).`,
+      );
+    }
+  }
+  resetProviderMocksForTests();
+  resetTransferStoreForTests();
+  resetRateLimitersForTests();
+});
+
 afterEach(() => {
   resetNetworkQueueForTests();
+  resetProviderMocksForTests();
+  resetTransferStoreForTests();
+  resetRateLimitersForTests();
 });

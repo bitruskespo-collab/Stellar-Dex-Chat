@@ -107,6 +107,83 @@ fn new_snapshot_env() -> Env {
     })
 }
 
+// ── worst-case resource fixtures ─────────────────────────────────────
+//
+// Shared, deterministic helpers that build the maximum supported state for
+// each public entry point. Used by the resource regression tests (issue #277)
+// and reusable by other suites so worst-case setup is not duplicated.
+
+/// Maximum number of signers the contract accepts at init.
+fn max_signers(env: &Env) -> soroban_sdk::Vec<Address> {
+    let mut signers = soroban_sdk::Vec::new(env);
+    for _ in 0..MAX_SIGNERS {
+        signers.push_back(Address::generate(env));
+    }
+    signers
+}
+
+/// Initialise a bridge with the maximum supported signer set and threshold.
+fn setup_bridge_worst_case_signers(
+    env: &Env,
+    limit: i128,
+) -> (
+    Address,
+    FiatBridgeClient<'_>,
+    Address,
+    Address,
+    TokenClient<'_>,
+    StellarAssetClient<'_>,
+) {
+    let contract_id = env.register(FiatBridge, ());
+    let bridge = FiatBridgeClient::new(env, &contract_id);
+    let admin = Address::generate(env);
+    let token_admin = Address::generate(env);
+    let (token_addr, token, token_sac) = create_token(env, &token_admin);
+    let signers = max_signers(env);
+    bridge.init(
+        &admin,
+        &token_addr,
+        &limit,
+        &1,
+        &signers,
+        &MAX_SIGNERS,
+        &0,
+    );
+    (contract_id, bridge, admin, token_addr, token, token_sac)
+}
+
+/// Fill the withdrawal queue to its maximum supported depth.
+///
+/// Returns the queued request ids in FIFO order. The caller must have funded
+/// `user` with at least `amount * MAX_WITHDRAWAL_QUEUE_DEPTH` tokens and
+/// deposited the same amount into the bridge.
+fn fill_withdrawal_queue(
+    env: &Env,
+    bridge: &FiatBridgeClient<'_>,
+    user: &Address,
+    token_addr: &Address,
+    amount: i128,
+) -> soroban_sdk::Vec<u64> {
+    let mut ids = soroban_sdk::Vec::new(env);
+    for _ in 0..MAX_WITHDRAWAL_QUEUE_DEPTH {
+        let id = bridge.request_withdrawal(user, &amount, token_addr, &None, &0);
+        ids.push_back(id);
+    }
+    ids
+}
+
+/// Build a batch of `MAX_BATCH_ADMIN_OPS` valid admin operations.
+fn max_batch_ops(env: &Env) -> soroban_sdk::Vec<BatchAdminOp> {
+    let mut ops = soroban_sdk::Vec::new(env);
+    for i in 0..MAX_BATCH_ADMIN_OPS {
+        ops.push_back(BatchAdminOp {
+            op_type: Symbol::new(env, "set_cooldown"),
+            payload: Bytes::from_array(env, &(i as u32).to_be_bytes()),
+        });
+    }
+    ops
+}
+
 // ── happy-path tests ──────────────────────────────────────────────────
 
 #[test]

@@ -15,6 +15,13 @@ import { setTransferStatus, getTransferStatus } from '@/lib/transferStore';
 import { initiateTransferSchema } from '@/lib/apiSchemas';
 import { payoutAuditLedger } from '@/lib/payout/auditLedger';
 import { payoutRetryQueue } from '@/lib/payout/retryQueue';
+import { validatePayoutAmount } from '@/lib/payout/amountValidation';
+import {
+  enforcePayoutRouteSecurity,
+  validationError,
+  handlePayoutApiError,
+  logStructuredError,
+} from '@/lib/payout/apiHelpers';
 
 const RATE_LIMIT = { maxRequests: 3, windowMs: 60_000 };
 
@@ -47,6 +54,7 @@ export async function POST(request: NextRequest) {
     traceContext.spanId,
     traceContext.traceId,
   );
+  const correlationId = traceContext.traceId;
 
   try {
     telemetry.addLog(span.spanId, 'info', 'Starting transfer initiation', {
@@ -104,20 +112,6 @@ export async function POST(request: NextRequest) {
     const activeCred = credentialManager.getActiveCredential();
     const credentialVersion = activeCred?.version || 'v1';
 
-    // Idempotency key from header, body reference, or generated fallback
-    const headerIdempotencyKey = request.headers.get('X-Idempotency-Key');
-    const idempotencyKey =
-      headerIdempotencyKey ||
-      (typeof bodyRecord.reference === 'string' && bodyRecord.reference
-        ? bodyRecord.reference
-        : null) ||
-      `idem_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-
-    const cached = idempotencyCache.get(idempotencyKey);
-    if (cached && Date.now() - cached.timestamp < IDEMPOTENCY_TTL_MS) {
-      return NextResponse.json({ success: true, data: cached.result });
-    }
-
     // Validate payout amounts using integer minor units (Issue #40)
     const currency =
       typeof bodyRecord.currency === 'string' ? bodyRecord.currency : 'NGN';
@@ -129,7 +123,7 @@ export async function POST(request: NextRequest) {
       headerIdempotencyKey ||
       (typeof bodyRecord.reference === 'string' && bodyRecord.reference
         ? bodyRecord.reference
-        : `idemp_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`);
+        : `idemp_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`);
 
     const cached = idempotencyCache.get(idempotencyKey);
     if (cached && Date.now() - cached.timestamp < IDEMPOTENCY_TTL_MS) {
@@ -210,7 +204,41 @@ export async function POST(request: NextRequest) {
           ? providerError.message
           : 'Unknown provider error';
 
-      // Enqueue into durable retry queue instead of losing payout intent (Issue #37)
+      // Ambiguous initiation: provider may or may not have accepted the transfer.
+      // Reconcile against provider state before deciding to retry (Issue #37).
+      if (providerError instanceof AmbiguousInitiationError) {
+        const reconciliation = await reconcileAmbiguousInitiation({
+          idempotencyKey,
+          providerReference: providerError.providerReference,
+          correlationId: traceContext.traceId,
+        });
+
+        telemetry.addLog(
+          span.spanId,
+          'warn',
+          'Ambiguous initiation reconciled',
+          { idempotencyKey, outcome: reconciliation.outcome },
+        );
+
+        if (reconciliation.outcome === 'accepted') {
+          setTransferStatus({
+            reference: idempotencyKey,
+            status: 'pending',
+            amount: Number(amount),
+            updatedAt: new Date().toISOString(),
+            clientSessionId,
+          });
+
+          return NextResponse.json(
+            { success: true, data: reconciliation.data },
+            { status: 200 },
+          );
+        }
+      }
+
+      // Provider timeout or unresolved ambiguity: enqueue into durable retry
+      // queue instead of losing payout intent (Issue #37).
+      const now = Date.now();
       const retryJob = payoutRetryQueue.enqueueJob({
         payoutId: idempotencyKey,
         idempotencyKey,
@@ -242,6 +270,7 @@ export async function POST(request: NextRequest) {
           jobId: retryJob.id,
           idempotencyKey,
           error: errorMessage,
+          isTimeout: providerError instanceof ProviderTimeoutError,
         },
       );
 

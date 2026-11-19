@@ -154,6 +154,30 @@ export async function POST(request: NextRequest) {
     const batchSize =
       typeof body.batchSize === 'number' ? body.batchSize : undefined;
 
+    if (
+      body.batchSize !== undefined &&
+      (typeof body.batchSize !== 'number' ||
+        !Number.isFinite(body.batchSize) ||
+        body.batchSize <= 0)
+    ) {
+      return NextResponse.json(
+        { error: 'batchSize must be a positive number' },
+        { status: 400 },
+      );
+    }
+
+    if (
+      body.staleAgeMs !== undefined &&
+      (typeof body.staleAgeMs !== 'number' ||
+        !Number.isFinite(body.staleAgeMs) ||
+        body.staleAgeMs < 0)
+    ) {
+      return NextResponse.json(
+        { error: 'staleAgeMs must be a non-negative number' },
+        { status: 400 },
+      );
+    }
+
     const summary = await reconcileStalePayouts({
       staleAgeMs,
       batchSize,

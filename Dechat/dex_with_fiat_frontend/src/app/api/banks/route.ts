@@ -4,6 +4,7 @@ import { telemetry } from '@/lib/telemetry';
 import { serverEnv as env } from '@/lib/serverEnv';
 import { banksQuerySchema } from '@/lib/apiSchemas';
 import { applyRateLimit, getClientIp } from '@/lib/rateLimit';
+import { fallbackBanks } from '@/lib/fallbackBanks';
 
 const PAYSTACK_SECRET_KEY = env.PAYSTACK_SECRET_KEY;
 const RATE_LIMIT = { maxRequests: 30, windowMs: 60_000 };
@@ -59,72 +60,17 @@ export async function GET(request: NextRequest) {
       );
 
       // Fallback to a minimal set of Nigerian banks if API key is missing
-      const fallbackBanks = [
-        {
-          id: 1,
-          name: 'Access Bank',
-          code: '044',
-          active: true,
-          country: 'Nigeria',
-          currency: 'NGN',
-          type: 'nuban',
-        },
-        {
-          id: 2,
-          name: 'GTBank',
-          code: '058',
-          active: true,
-          country: 'Nigeria',
-          currency: 'NGN',
-          type: 'nuban',
-        },
-        {
-          id: 3,
-          name: 'First Bank',
-          code: '011',
-          active: true,
-          country: 'Nigeria',
-          currency: 'NGN',
-          type: 'nuban',
-        },
-        {
-          id: 4,
-          name: 'Zenith Bank',
-          code: '057',
-          active: true,
-          country: 'Nigeria',
-          currency: 'NGN',
-          type: 'nuban',
-        },
-        {
-          id: 5,
-          name: 'UBA',
-          code: '033',
-          active: true,
-          country: 'Nigeria',
-          currency: 'NGN',
-          type: 'nuban',
-        },
-        {
-          id: 6,
-          name: 'Fidelity Bank',
-          code: '070',
-          active: true,
-          country: 'Nigeria',
-          currency: 'NGN',
-          type: 'nuban',
-        },
-      ];
+      const fallback = fallbackBanks.slice(0, 6);
 
       telemetry.addLog(span.spanId, 'info', 'Fallback banks returned', {
-        bankCount: fallbackBanks.length,
+        bankCount: fallback.length,
         source: 'fallback',
       });
       telemetry.finishSpan(span.spanId, { success: true, fallback: true });
 
       const response = NextResponse.json({
         success: true,
-        data: fallbackBanks,
+        data: fallback,
       });
 
       telemetry.setTraceHeaders(response.headers as Headers, traceContext);
@@ -177,99 +123,6 @@ export async function GET(request: NextRequest) {
     console.error('Error fetching banks from Paystack:', error);
 
     // Fallback to predefined banks if Paystack API fails
-    const fallbackBanks = [
-      {
-        id: 1,
-        name: 'Access Bank',
-        code: '044',
-        active: true,
-        country: 'Nigeria',
-        currency: 'NGN',
-        type: 'nuban',
-      },
-      {
-        id: 2,
-        name: 'GTBank',
-        code: '058',
-        active: true,
-        country: 'Nigeria',
-        currency: 'NGN',
-        type: 'nuban',
-      },
-      {
-        id: 3,
-        name: 'First Bank',
-        code: '011',
-        active: true,
-        country: 'Nigeria',
-        currency: 'NGN',
-        type: 'nuban',
-      },
-      {
-        id: 4,
-        name: 'Zenith Bank',
-        code: '057',
-        active: true,
-        country: 'Nigeria',
-        currency: 'NGN',
-        type: 'nuban',
-      },
-      {
-        id: 5,
-        name: 'UBA',
-        code: '033',
-        active: true,
-        country: 'Nigeria',
-        currency: 'NGN',
-        type: 'nuban',
-      },
-      {
-        id: 6,
-        name: 'Fidelity Bank',
-        code: '070',
-        active: true,
-        country: 'Nigeria',
-        currency: 'NGN',
-        type: 'nuban',
-      },
-      {
-        id: 7,
-        name: 'Union Bank',
-        code: '032',
-        active: true,
-        country: 'Nigeria',
-        currency: 'NGN',
-        type: 'nuban',
-      },
-      {
-        id: 8,
-        name: 'Sterling Bank',
-        code: '232',
-        active: true,
-        country: 'Nigeria',
-        currency: 'NGN',
-        type: 'nuban',
-      },
-      {
-        id: 9,
-        name: 'Stanbic IBTC Bank',
-        code: '221',
-        active: true,
-        country: 'Nigeria',
-        currency: 'NGN',
-        type: 'nuban',
-      },
-      {
-        id: 10,
-        name: 'Wema Bank',
-        code: '035',
-        active: true,
-        country: 'Nigeria',
-        currency: 'NGN',
-        type: 'nuban',
-      },
-    ];
-
     telemetry.addLog(
       span.spanId,
       'info',

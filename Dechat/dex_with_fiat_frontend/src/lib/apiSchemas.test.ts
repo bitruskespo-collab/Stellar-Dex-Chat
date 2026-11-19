@@ -6,6 +6,12 @@ import {
   verifyAccountSchema,
   createRecipientSchema,
 } from './apiSchemas';
+import {
+  loadOpenApiSchema,
+  validateAgainstSchema,
+  getSchemaOperation,
+  listSchemaOperations,
+} from './openApiContract';
 
 describe('apiSchemas - Request Retry with Exponential Backoff', () => {
   beforeEach(() => {
@@ -422,5 +428,210 @@ describe('createRecipientSchema', () => {
       createRecipientSchema.safeParse({ ...valid, type: 'a'.repeat(51) })
         .success,
     ).toBe(false);
+  });
+});
+
+/**
+ * Consumer contract tests (#278).
+ *
+ * Every response asserted here is validated against the versioned OpenAPI
+ * schema so that undocumented response drift fails the build. All fixtures are
+ * synthetic: no credentials, tokens or real user data are used.
+ */
+describe('API consumer contract - published OpenAPI schema', () => {
+  const schema = loadOpenApiSchema();
+
+  const syntheticAccount = {
+    accountNumber: '0000000000',
+    bankCode: '000',
+  };
+
+  const syntheticRecipient = {
+    type: 'nuban',
+    name: 'Synthetic Test Account',
+    account_number: '0000000000',
+    bank_code: '000',
+    currency: 'NGN',
+  };
+
+  it('loads a versioned schema that documents the consumer routes', () => {
+    expect(schema.openapi).toMatch(/^3\./);
+    expect(typeof schema.info.version).toBe('string');
+    expect(schema.info.version.length).toBeGreaterThan(0);
+
+    const operations = listSchemaOperations();
+    expect(operations).toEqual(
+      expect.arrayContaining([
+        'GET /health',
+        'POST /api/verify-account',
+        'POST /api/recipients',
+        'GET /api/admin/recipients',
+      ]),
+    );
+  });
+
+  describe('POST /api/verify-account', () => {
+    const operation = getSchemaOperation('POST /api/verify-account');
+
+    it('documents a 200 success response', () => {
+      expect(operation.responses['200']).toBeDefined();
+    });
+
+    it('accepts a valid request body', () => {
+      const result = validateAgainstSchema(
+        operation.requestBody,
+        syntheticAccount,
+      );
+      expect(result.valid).toBe(true);
+    });
+
+    it('rejects malformed request bodies with a documented 400', () => {
+      expect(operation.responses['400']).toBeDefined();
+
+      const malformed = [
+        { accountNumber: '123', bankCode: '000' },
+        { accountNumber: '0000000000', bankCode: '0' },
+        { accountNumber: '0000000000&currency=USD', bankCode: '000' },
+        { bankCode: '000' },
+      ];
+
+      for (const body of malformed) {
+        const result = validateAgainstSchema(operation.requestBody, body);
+        expect(result.valid).toBe(false);
+      }
+    });
+
+    it('documents a provider-failure response', () => {
+      expect(
+        operation.responses['502'] ?? operation.responses['503'],
+      ).toBeDefined();
+    });
+
+    it('validates a success response body against the schema', () => {
+      const response = {
+        accountName: 'SYNTHETIC TEST ACCOUNT',
+        accountNumber: '0000000000',
+        bankCode: '000',
+      };
+      const result = validateAgainstSchema(
+        operation.responses['200'],
+        response,
+      );
+      expect(result.valid).toBe(true);
+    });
+
+    it('rejects an undocumented success response shape', () => {
+      const drifted = { account_name: 'SYNTHETIC TEST ACCOUNT' };
+      const result = validateAgainstSchema(operation.responses['200'], drifted);
+      expect(result.valid).toBe(false);
+    });
+  });
+
+  describe('POST /api/recipients', () => {
+    const operation = getSchemaOperation('POST /api/recipients');
+
+    it('accepts a valid request body', () => {
+      const result = validateAgainstSchema(
+        operation.requestBody,
+        syntheticRecipient,
+      );
+      expect(result.valid).toBe(true);
+    });
+
+    it('rejects malformed request bodies with a documented 400', () => {
+      expect(operation.responses['400']).toBeDefined();
+
+      const malformed = [
+        { ...syntheticRecipient, account_number: '123' },
+        { ...syntheticRecipient, bank_code: '1' },
+        { ...syntheticRecipient, currency: 'USD' },
+        { ...syntheticRecipient, name: '' },
+      ];
+
+      for (const body of malformed) {
+        const result = validateAgainstSchema(operation.requestBody, body);
+        expect(result.valid).toBe(false);
+      }
+    });
+
+    it('documents a provider-failure response', () => {
+      expect(
+        operation.responses['502'] ?? operation.responses['503'],
+      ).toBeDefined();
+    });
+
+    it('validates a success response body against the schema', () => {
+      const response = {
+        recipient_code: 'RCP_SYNTHETIC0001',
+        type: 'nuban',
+        name: 'Synthetic Test Account',
+        account_number: '0000000000',
+        bank_code: '000',
+        currency: 'NGN',
+        active: true,
+      };
+      const result = validateAgainstSchema(
+        operation.responses['201'] ?? operation.responses['200'],
+        response,
+      );
+      expect(result.valid).toBe(true);
+    });
+  });
+
+  describe('GET /api/admin/recipients', () => {
+    const operation = getSchemaOperation('GET /api/admin/recipients');
+
+    it('documents authorization failures for admin routes', () => {
+      expect(operation.responses['401']).toBeDefined();
+      expect(operation.responses['403']).toBeDefined();
+    });
+
+    it('validates a documented error body for unauthorized access', () => {
+      const unauthorized = { error: 'Unauthorized' };
+      const result = validateAgainstSchema(
+        operation.responses['401'],
+        unauthorized,
+      );
+      expect(result.valid).toBe(true);
+    });
+
+    it('validates a success response body against the schema', () => {
+      const response = {
+        data: [
+          {
+            recipient_code: 'RCP_SYNTHETIC0001',
+            type: 'nuban',
+            name: 'Synthetic Test Account',
+            account_number: '0000000000',
+            bank_code: '000',
+            currency: 'NGN',
+            active: true,
+          },
+        ],
+      };
+      const result = validateAgainstSchema(
+        operation.responses['200'],
+        response,
+      );
+      expect(result.valid).toBe(true);
+    });
+  });
+
+  describe('GET /health', () => {
+    const operation = getSchemaOperation('GET /health');
+
+    it('validates the health response body against the schema', () => {
+      const result = validateAgainstSchema(operation.responses['200'], {
+        status: 'ok',
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it('rejects an undocumented health response shape', () => {
+      const result = validateAgainstSchema(operation.responses['200'], {
+        healthy: true,
+      });
+      expect(result.valid).toBe(false);
+    });
   });
 });

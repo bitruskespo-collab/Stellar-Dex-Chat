@@ -163,7 +163,7 @@ export async function GET(
       });
     }
 
-    return NextResponse.json({
+    const response = NextResponse.json({
       success: true,
       data: transferRecord,
     });

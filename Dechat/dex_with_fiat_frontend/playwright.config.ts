@@ -47,6 +47,9 @@ const E2E_RUN_ID = process.env.E2E_RUN_ID ?? `run-${Date.now()}`;
 const e2eEnv: Record<string, string> = {
   NEXT_PUBLIC_E2E: 'true',
   E2E_RUN_ID,
+  // Issue #279: wallet/transaction UX smoke specs select browser-isolated
+  // wallet mocks via this flag; never inherit a real wallet provider.
+  E2E_WALLET_MOCK: 'true',
   // Force local, disposable endpoints; never inherit production values.
   SOROBAN_RPC_URL: process.env.E2E_SOROBAN_RPC_URL ?? 'http://127.0.0.1:8000/soroban/rpc',
   NEXT_PUBLIC_SOROBAN_RPC_URL:
@@ -85,6 +88,39 @@ export default defineConfig({
     {
       name: 'webkit',
       use: { ...devices['Desktop Safari'] },
+    },
+    // Issue #279: focused cross-browser wallet + transaction UX smoke suite.
+    // Each project pins its own browser so wallet mocks stay isolated per
+    // engine (no shared storage/extension state between browsers).
+    {
+      name: 'wallet-ux-chromium',
+      testDir: './tests/e2e/wallet-ux',
+      testMatch: /.*\.(spec|test)\.ts$/,
+      use: {
+        ...devices['Desktop Chrome'],
+        browserName: 'chromium',
+        walletMock: { browser: 'chromium', storage: 'isolated' },
+      },
+    },
+    {
+      name: 'wallet-ux-firefox',
+      testDir: './tests/e2e/wallet-ux',
+      testMatch: /.*\.(spec|test)\.ts$/,
+      use: {
+        ...devices['Desktop Firefox'],
+        browserName: 'firefox',
+        walletMock: { browser: 'firefox', storage: 'isolated' },
+      },
+    },
+    {
+      name: 'wallet-ux-webkit',
+      testDir: './tests/e2e/wallet-ux',
+      testMatch: /.*\.(spec|test)\.ts$/,
+      use: {
+        ...devices['Desktop Safari'],
+        browserName: 'webkit',
+        walletMock: { browser: 'webkit', storage: 'isolated' },
+      },
     },
     {
       name: 'amount-property',

@@ -23,6 +23,8 @@
     "test:unit:watch": "vitest",
     "test:coverage": "vitest run --coverage --maxWorkers=1 --pool=forks --no-file-parallelism",
     "test:coverage:merge": "vitest run --mergeReports --coverage --reporter=default",
+    "bundle-budget-check": "node scripts/check-bundle-budget.mjs",
+    "validate": "pnpm lint && pnpm typecheck && pnpm test:unit && pnpm build && pnpm bundle-budget-check",
     "sbom:node": "cyclonedx-npm --output-format json --output-file sbom-node.cdx.json",
     "sbom:rust": "cargo cyclonedx --format json --output-pattern package --output-cdx --manifest-path ../dex_with_fiat_backend/Cargo.toml",
     "sbom": "pnpm sbom:node && pnpm sbom:rust"

@@ -19,6 +19,37 @@ export const PENDING_TX_STORAGE_KEY = 'stellar_pending_tx';
  */
 export const RECOVERY_RETENTION_PERIOD_MS = 24 * 60 * 60 * 1000; // 24 hours
 
+/**
+ * Minimal storage abstraction so tests (and E2E specs) can inject a
+ * deterministic, browser-isolated storage implementation instead of relying
+ * on the ambient `window.localStorage`.
+ */
+export interface RecoveryStorage {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+}
+
+/**
+ * Resolves the storage backend to use. Prefers an explicitly injected storage
+ * (used by E2E specs to isolate browser-specific wallet mocks), otherwise
+ * falls back to `window.localStorage` when available.
+ */
+function resolveStorage(storage?: RecoveryStorage | null): RecoveryStorage | null {
+  if (storage) {
+    return storage;
+  }
+  if (typeof window !== 'undefined' && window.localStorage) {
+    return window.localStorage;
+  }
+  return null;
+}
+
+/**
+ * Injectable clock used for deterministic retention/expiry checks in tests.
+ */
+export type RecoveryClock = () => number;
+
 export type RecoveryStage = 'submitting' | 'pending_confirmation';
 
 export type RecoveryOutcome = 'pending' | 'confirmed' | 'failed' | 'unknown';
@@ -49,8 +80,13 @@ export interface PendingRecoveryRecord {
 /**
  * Persists bounded, non-secret recovery metadata to browser localStorage.
  */
-export function savePendingRecoveryRecord(record: PendingRecoveryRecord): void {
-  if (typeof window === 'undefined' || !window.localStorage) {
+export function savePendingRecoveryRecord(
+  record: PendingRecoveryRecord,
+  storage?: RecoveryStorage | null,
+  clock: RecoveryClock = Date.now,
+): void {
+  const target = resolveStorage(storage);
+  if (!target) {
     return;
   }
   try {
@@ -63,11 +99,11 @@ export function savePendingRecoveryRecord(record: PendingRecoveryRecord): void {
       recipient: record.recipient,
       network: record.network,
       account: record.account,
-      timestamp: record.timestamp || Date.now(),
+      timestamp: record.timestamp || clock(),
       stage: record.stage,
       idempotencyKey: record.idempotencyKey,
     };
-    window.localStorage.setItem(PENDING_TX_STORAGE_KEY, JSON.stringify(safeRecord));
+    target.setItem(PENDING_TX_STORAGE_KEY, JSON.stringify(safeRecord));
   } catch {
     // Ignore storage quota or access errors
   }
@@ -77,31 +113,35 @@ export function savePendingRecoveryRecord(record: PendingRecoveryRecord): void {
  * Retrieves the pending recovery record from storage, checking for retention expiry.
  * Automatically clears the record if it exceeds the 24-hour retention period.
  */
-export function getPendingRecoveryRecord(now: number = Date.now()): PendingRecoveryRecord | null {
-  if (typeof window === 'undefined' || !window.localStorage) {
+export function getPendingRecoveryRecord(
+  now: number = Date.now(),
+  storage?: RecoveryStorage | null,
+): PendingRecoveryRecord | null {
+  const target = resolveStorage(storage);
+  if (!target) {
     return null;
   }
   try {
-    const raw = window.localStorage.getItem(PENDING_TX_STORAGE_KEY);
+    const raw = target.getItem(PENDING_TX_STORAGE_KEY);
     if (!raw) {
       return null;
     }
     const record = JSON.parse(raw) as PendingRecoveryRecord;
     if (!record || !record.hash || typeof record.timestamp !== 'number') {
-      window.localStorage.removeItem(PENDING_TX_STORAGE_KEY);
+      target.removeItem(PENDING_TX_STORAGE_KEY);
       return null;
     }
 
     // Check retention expiry
     if (now - record.timestamp > RECOVERY_RETENTION_PERIOD_MS) {
-      window.localStorage.removeItem(PENDING_TX_STORAGE_KEY);
+      target.removeItem(PENDING_TX_STORAGE_KEY);
       return null;
     }
 
     return record;
   } catch {
     try {
-      window.localStorage.removeItem(PENDING_TX_STORAGE_KEY);
+      target.removeItem(PENDING_TX_STORAGE_KEY);
     } catch {
       // ignore
     }
@@ -112,16 +152,23 @@ export function getPendingRecoveryRecord(now: number = Date.now()): PendingRecov
 /**
  * Clears the pending recovery record from localStorage upon reaching a terminal state.
  */
-export function clearPendingRecoveryRecord(): void {
-  if (typeof window === 'undefined' || !window.localStorage) {
+export function clearPendingRecoveryRecord(storage?: RecoveryStorage | null): void {
+  const target = resolveStorage(storage);
+  if (!target) {
     return;
   }
   try {
-    window.localStorage.removeItem(PENDING_TX_STORAGE_KEY);
+    target.removeItem(PENDING_TX_STORAGE_KEY);
   } catch {
     // ignore
   }
 }
+
+/**
+ * Injectable status lookup used to simulate pending/confirmed/failed recovery
+ * in E2E specs without issuing real Soroban RPC calls.
+ */
+export type TransactionStatusLookup = (hash: string) => Promise<RecoveryOutcome>;
 
 /**
  * Resumes status lookup from the Soroban RPC network for a pending transaction.
@@ -132,9 +179,21 @@ export function clearPendingRecoveryRecord(): void {
  * @param hash - Transaction hash to query.
  * @returns One of 'confirmed' | 'pending' | 'failed' | 'unknown'.
  */
-export async function lookupTransactionStatus(hash: string): Promise<RecoveryOutcome> {
+export async function lookupTransactionStatus(
+  hash: string,
+  lookup?: TransactionStatusLookup,
+): Promise<RecoveryOutcome> {
   if (!hash) {
     return 'unknown';
+  }
+
+  if (lookup) {
+    try {
+      return await lookup(hash);
+    } catch (error) {
+      console.warn(`[TransactionRecovery] Injected lookup failed for ${hash}:`, error);
+      return 'unknown';
+    }
   }
 
   try {

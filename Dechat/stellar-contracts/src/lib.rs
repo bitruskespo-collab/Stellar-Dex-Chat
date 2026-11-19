@@ -8342,3 +8342,6 @@ mod test_escrow_solvency_proptest;
 
 #[cfg(test)]
 mod test_aging_fairness;
+
+#[cfg(test)]
+mod test_resource_budgets_worst_case;
