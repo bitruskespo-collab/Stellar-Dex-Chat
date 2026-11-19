@@ -1,0 +1,492 @@
+name: Signed Release Attestations
+
+# ── Overview ──────────────────────────────────────────────────────────────────
+#
+# Issue #282 — Produce provenance tying an immutable source revision and
+# build workflow to published artifacts, verify attestations before
+# deployment, and surface them on GitHub releases.
+#
+# Two build jobs run in parallel:
+#
+#   attest-contract  — builds the Soroban WASM, generates a GitHub-native
+#                      SLSA Provenance v1 attestation, and verifies it
+#                      before the deployment gate proceeds.
+#
+#   attest-frontend  — produces the Next.js build, computes a stable content
+#                      digest over the .next output tree, and generates a
+#                      matching attestation.
+#
+# A third job, verify-before-deploy, downloads both attestations and
+# independently re-verifies them (structural + digest) before any deployment
+# workflow may proceed.  This job's status is surfaced as a required check.
+#
+# On GitHub releases all attestation bundles are attached to the release
+# assets so external consumers can run `gh attestation verify` without
+# cloning the repo.
+#
+# ── Permissions ───────────────────────────────────────────────────────────────
+#
+# id-token: write  — required by actions/attest-build-provenance to obtain
+#                    an OIDC token for Sigstore signing.
+# attestations: write — required to store attestation bundles in the repo.
+# contents: write  — required only for the release-upload step; the base
+#                    permissions block keeps the default read-only.
+#
+# ── Triggering ────────────────────────────────────────────────────────────────
+#
+# Runs on every push to release/** branches and on published GitHub releases.
+# workflow_dispatch allows maintainers to run it manually against any ref.
+
+on:
+  push:
+    branches:
+      - 'release/**'
+    paths:
+      - 'Dechat/stellar-contracts/**'
+      - 'Dechat/dex_with_fiat_frontend/**'
+      - '.github/workflows/signed-attestations.yml'
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to attest (branch, tag, or SHA)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: signed-attestations-${{ github.ref }}
+  cancel-in-progress: true
+
+# ── Job 1: Attest WASM contract ───────────────────────────────────────────────
+jobs:
+  attest-contract:
+    name: Build and attest WASM contract
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write       # Sigstore OIDC signing
+      attestations: write   # Store attestation bundle
+
+    outputs:
+      wasm_digest: ${{ steps.digest.outputs.wasm_digest }}
+      wasm_path:   ${{ steps.digest.outputs.wasm_path }}
+
+    defaults:
+      run:
+        working-directory: Dechat/stellar-contracts
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable
+        with:
+          toolchain: stable
+          targets: wasm32v1-none
+
+      - name: Cache Cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            Dechat/stellar-contracts/target
+          key: ${{ runner.os }}-cargo-attest-${{ hashFiles('Dechat/stellar-contracts/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-attest-
+
+      - name: Install Stellar CLI
+        run: cargo install --locked stellar-cli --version 28.0.0
+
+      - name: Build optimised WASM
+        run: stellar contract build
+
+      - name: Locate and digest WASM artifact
+        id: digest
+        run: |
+          set -euo pipefail
+          WASM_PATH=$(find target -name '*.optimized.wasm' -path '*release*' | head -n 1)
+          if [ -z "$WASM_PATH" ]; then
+            # Fall back to any release WASM if the optimized variant is absent
+            WASM_PATH=$(find target -name '*.wasm' -path '*release*' | head -n 1)
+          fi
+          if [ -z "$WASM_PATH" ] || [ ! -s "$WASM_PATH" ]; then
+            echo "::error::No release WASM artifact found after build"
+            exit 1
+          fi
+          DIGEST=$(sha256sum "$WASM_PATH" | awk '{print $1}')
+          ARTIFACT_NAME=$(basename "$WASM_PATH")
+          echo "wasm_path=$WASM_PATH"             >> "$GITHUB_OUTPUT"
+          echo "wasm_digest=sha256:${DIGEST}"     >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$ARTIFACT_NAME"     >> "$GITHUB_OUTPUT"
+          echo "## 📦 Contract artifact" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Artifact | \`$ARTIFACT_NAME\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| SHA-256 | \`${DIGEST}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Source revision | \`${{ github.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
+
+      # Upload the WASM so the attestation action can reference it by path
+      # and so verify-before-deploy can download and re-check it.
+      - name: Upload WASM artifact
+        id: upload-wasm
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: contract-wasm-attested-${{ github.sha }}
+          path: Dechat/stellar-contracts/${{ steps.digest.outputs.wasm_path }}
+          if-no-files-found: error
+          retention-days: 90
+
+      # GitHub-native SLSA Provenance v1 attestation signed via Sigstore.
+      # The resulting bundle is stored in the repo's attestation store and
+      # can be verified with: gh attestation verify <artifact> --repo <repo>
+      - name: Generate SLSA provenance attestation (WASM)
+        id: attest-wasm
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: Dechat/stellar-contracts/${{ steps.digest.outputs.wasm_path }}
+          subject-name: ${{ steps.digest.outputs.artifact_name }}
+
+      # Persist the bundle file so verify-before-deploy and release-upload
+      # can reference it without hitting the attestation API again.
+      - name: Upload attestation bundle (WASM)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: attestation-bundle-contract-${{ github.sha }}
+          path: ${{ steps.attest-wasm.outputs.bundle-path }}
+          retention-days: 90
+
+      - name: Structural self-verification (WASM bundle)
+        env:
+          BUNDLE_PATH: ${{ steps.attest-wasm.outputs.bundle-path }}
+          EXPECTED_DIGEST: ${{ steps.digest.outputs.wasm_digest }}
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+
+          if [ ! -s "$BUNDLE_PATH" ]; then
+            echo "::error::Attestation bundle not found at $BUNDLE_PATH"
+            exit 1
+          fi
+
+          # Verify bundle JSON is well-formed and contains the expected digest
+          ATTESTED=$(jq -r '[.dsseEnvelope.payload // .payload // empty] | first' "$BUNDLE_PATH" | \
+            base64 -d 2>/dev/null | jq -r '.subject[]?.digest.sha256 // empty' | head -n1)
+          EXPECTED_HEX="${EXPECTED_DIGEST#sha256:}"
+
+          if [ "$ATTESTED" != "$EXPECTED_HEX" ]; then
+            echo "::error::Attestation digest mismatch. Expected: $EXPECTED_HEX — Attested: $ATTESTED"
+            exit 1
+          fi
+
+          echo "✅ WASM attestation self-verified: sha256:$ATTESTED" >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Job 2: Attest frontend build ───────────────────────────────────────────
+  attest-frontend:
+    name: Build and attest frontend
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    outputs:
+      frontend_digest: ${{ steps.digest.outputs.frontend_digest }}
+
+    defaults:
+      run:
+        working-directory: Dechat/dex_with_fiat_frontend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 8.15.9
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+          cache-dependency-path: Dechat/dex_with_fiat_frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Next.js application
+        run: pnpm build
+        env:
+          NEXT_PUBLIC_STELLAR_CONTRACT_ID: ${{ secrets.NEXT_PUBLIC_STELLAR_CONTRACT_ID || 'PLACEHOLDER' }}
+          NEXT_PUBLIC_XLM_SAC_ID:          ${{ secrets.NEXT_PUBLIC_XLM_SAC_ID || 'PLACEHOLDER' }}
+          NEXT_PUBLIC_STELLAR_RPC_URL:     ${{ secrets.NEXT_PUBLIC_STELLAR_RPC_URL || 'https://soroban-testnet.stellar.org' }}
+          NEXT_PUBLIC_STELLAR_NETWORK:     ${{ secrets.NEXT_PUBLIC_STELLAR_NETWORK || 'TESTNET' }}
+          GEMINI_API_KEY:                  ${{ secrets.GEMINI_API_KEY || 'PLACEHOLDER' }}
+          PAYSTACK_SECRET_KEY:             ${{ secrets.PAYSTACK_SECRET_KEY || 'PLACEHOLDER' }}
+          PAYOUT_PROVIDER:                 ${{ secrets.PAYOUT_PROVIDER || 'paystack' }}
+
+      # Produce a stable, deterministic digest of the entire .next output tree.
+      # Sorting by path ensures the digest is reproducible across runs that
+      # produce the same files.
+      - name: Compute frontend build digest
+        id: digest
+        run: |
+          set -euo pipefail
+          DIGEST=$(find .next -type f -print0 | sort -z | \
+            xargs -0 sha256sum | sha256sum | awk '{print $1}')
+          echo "frontend_digest=sha256:${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "## 📦 Frontend artifact" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Artifact | \`.next/\` build output |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Digest (sha256 of tree) | \`${DIGEST}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Source revision | \`${{ github.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
+
+      # Pack the .next directory into a reproducible tar for the attestation
+      # subject.  The attest action requires a file path.
+      - name: Pack .next build output
+        id: pack
+        run: |
+          set -euo pipefail
+          tar -czf frontend-build.tar.gz .next/
+          echo "archive=Dechat/dex_with_fiat_frontend/frontend-build.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Upload frontend build archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: frontend-build-attested-${{ github.sha }}
+          path: Dechat/dex_with_fiat_frontend/frontend-build.tar.gz
+          retention-days: 90
+
+      - name: Generate SLSA provenance attestation (frontend)
+        id: attest-frontend
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: Dechat/dex_with_fiat_frontend/frontend-build.tar.gz
+          subject-name: frontend-build.tar.gz
+
+      - name: Upload attestation bundle (frontend)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: attestation-bundle-frontend-${{ github.sha }}
+          path: ${{ steps.attest-frontend.outputs.bundle-path }}
+          retention-days: 90
+
+      - name: Structural self-verification (frontend bundle)
+        env:
+          BUNDLE_PATH: ${{ steps.attest-frontend.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+
+          if [ ! -s "$BUNDLE_PATH" ]; then
+            echo "::error::Frontend attestation bundle not found at $BUNDLE_PATH"
+            exit 1
+          fi
+
+          # Confirm bundle is parseable and has at least one subject
+          SUBJECT_COUNT=$(jq '[.dsseEnvelope.payload // .payload // empty] | first' "$BUNDLE_PATH" | \
+            base64 -d 2>/dev/null | jq '.subject | length // 0')
+          if [ "$SUBJECT_COUNT" -lt 1 ]; then
+            echo "::error::Frontend attestation bundle has no subjects"
+            exit 1
+          fi
+
+          echo "✅ Frontend attestation self-verified ($SUBJECT_COUNT subject(s))" >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Job 3: Independent pre-deployment verification ─────────────────────────
+  verify-before-deploy:
+    name: Verify attestations before deployment
+    runs-on: ubuntu-latest
+    needs: [attest-contract, attest-frontend]
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download WASM artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v4
+        with:
+          name: contract-wasm-attested-${{ github.sha }}
+          path: verify/contract
+
+      - name: Download WASM attestation bundle
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v4
+        with:
+          name: attestation-bundle-contract-${{ github.sha }}
+          path: verify/bundles/contract
+
+      - name: Download frontend attestation bundle
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v4
+        with:
+          name: attestation-bundle-frontend-${{ github.sha }}
+          path: verify/bundles/frontend
+
+      - name: Verify WASM attestation bundle
+        env:
+          EXPECTED_WASM_DIGEST: ${{ needs.attest-contract.outputs.wasm_digest }}
+        run: |
+          set -euo pipefail
+          BUNDLE=$(find verify/bundles/contract -name '*.jsonl' -o -name '*.json' | head -n 1)
+          if [ -z "$BUNDLE" ]; then
+            echo "::error::No WASM attestation bundle found in verify/bundles/contract"
+            exit 1
+          fi
+
+          EXPECTED_HEX="${EXPECTED_WASM_DIGEST#sha256:}"
+          ATTESTED=$(jq -r '[.dsseEnvelope.payload // .payload // empty] | first' "$BUNDLE" | \
+            base64 -d 2>/dev/null | jq -r '.subject[]?.digest.sha256 // empty' | head -n1)
+
+          if [ "$ATTESTED" != "$EXPECTED_HEX" ]; then
+            echo "::error::WASM attestation digest mismatch in pre-deployment check."
+            echo "::error::Expected: $EXPECTED_HEX — Found in bundle: $ATTESTED"
+            exit 1
+          fi
+
+          PRED_TYPE=$(jq -r '[.dsseEnvelope.payload // .payload // empty] | first' "$BUNDLE" | \
+            base64 -d 2>/dev/null | jq -r '.predicateType // empty')
+          if [ -z "$PRED_TYPE" ]; then
+            echo "::error::predicateType missing from WASM attestation bundle"
+            exit 1
+          fi
+
+          REPO_CLAIM=$(jq -r '[.dsseEnvelope.payload // .payload // empty] | first' "$BUNDLE" | \
+            base64 -d 2>/dev/null | \
+            jq -r '.predicate.buildDefinition.externalParameters.workflow.repository //
+                   .predicate.invocation.configSource.uri // empty')
+          if ! echo "$REPO_CLAIM" | grep -q "${{ github.repository }}"; then
+            echo "::warning::WASM attestation repository claim '$REPO_CLAIM' does not match '${{ github.repository }}'"
+          fi
+
+          echo "## ✅ Pre-deployment Attestation Verification" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Artifact | Digest | Predicate Type | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- | --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| WASM contract | \`sha256:${ATTESTED}\` | \`${PRED_TYPE}\` | ✅ Verified |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify frontend attestation bundle
+        run: |
+          set -euo pipefail
+          BUNDLE=$(find verify/bundles/frontend -name '*.jsonl' -o -name '*.json' | head -n 1)
+          if [ -z "$BUNDLE" ]; then
+            echo "::error::No frontend attestation bundle found in verify/bundles/frontend"
+            exit 1
+          fi
+
+          SUBJECT_COUNT=$(jq -r '[.dsseEnvelope.payload // .payload // empty] | first' "$BUNDLE" | \
+            base64 -d 2>/dev/null | jq '.subject | length // 0')
+          if [ "$SUBJECT_COUNT" -lt 1 ]; then
+            echo "::error::Frontend attestation bundle has no subjects"
+            exit 1
+          fi
+
+          PRED_TYPE=$(jq -r '[.dsseEnvelope.payload // .payload // empty] | first' "$BUNDLE" | \
+            base64 -d 2>/dev/null | jq -r '.predicateType // empty')
+          if [ -z "$PRED_TYPE" ]; then
+            echo "::error::predicateType missing from frontend attestation bundle"
+            exit 1
+          fi
+
+          FRONTEND_DIGEST=$(jq -r '[.dsseEnvelope.payload // .payload // empty] | first' "$BUNDLE" | \
+            base64 -d 2>/dev/null | jq -r '.subject[0].digest.sha256 // empty')
+
+          echo "| Frontend build | \`sha256:${FRONTEND_DIGEST}\` | \`${PRED_TYPE}\` | ✅ Verified |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post verification summary
+        run: |
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Source revision:** \`${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Workflow:** \`${{ github.workflow_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Run:** [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "_Both attestations verified. Deployment gate is clear._" >> "$GITHUB_STEP_SUMMARY"
+          echo "_To verify locally: \`gh attestation verify <artifact> --repo ${{ github.repository }}\`_" >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Job 4: Attach bundles to GitHub release ────────────────────────────────
+  release-upload:
+    name: Attach attestations to release
+    runs-on: ubuntu-latest
+    needs: [verify-before-deploy]
+    if: github.event_name == 'release'
+    permissions:
+      contents: write   # gh release upload
+
+    steps:
+      - name: Download WASM attestation bundle
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v4
+        with:
+          name: attestation-bundle-contract-${{ github.sha }}
+          path: release-bundles/contract
+
+      - name: Download frontend attestation bundle
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v4
+        with:
+          name: attestation-bundle-frontend-${{ github.sha }}
+          path: release-bundles/frontend
+
+      - name: Write provenance manifest
+        env:
+          WASM_DIGEST:     ${{ needs.attest-contract.outputs.wasm_digest }}
+          FRONTEND_DIGEST: ${{ needs.attest-frontend.outputs.frontend_digest }}
+        run: |
+          cat > release-bundles/attestation-manifest.json << EOF
+          {
+            "schemaVersion": "1",
+            "sourceRevision": "${{ github.sha }}",
+            "workflowIdentity": "${{ github.workflow_ref }}",
+            "releaseTag": "${{ github.event.release.tag_name }}",
+            "runId": "${{ github.run_id }}",
+            "subjects": {
+              "contract": {
+                "name": "stellar_contracts.optimized.wasm",
+                "digest": "${WASM_DIGEST}"
+              },
+              "frontend": {
+                "name": "frontend-build.tar.gz",
+                "digest": "${FRONTEND_DIGEST}"
+              }
+            },
+            "attestationBundles": {
+              "contract": "contract-attestation-bundle.jsonl",
+              "frontend": "frontend-attestation-bundle.jsonl"
+            },
+            "verificationCommand": "gh attestation verify <artifact> --repo ${{ github.repository }}",
+            "generatedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+
+      - name: Rename bundles with descriptive names
+        run: |
+          set -euo pipefail
+          CONTRACT_BUNDLE=$(find release-bundles/contract -type f | head -n 1)
+          FRONTEND_BUNDLE=$(find release-bundles/frontend -type f | head -n 1)
+          cp "$CONTRACT_BUNDLE"  release-bundles/contract-attestation-bundle.jsonl
+          cp "$FRONTEND_BUNDLE"  release-bundles/frontend-attestation-bundle.jsonl
+
+      - name: Attach attestation bundles to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release upload "${{ github.event.release.tag_name }}" \
+            release-bundles/contract-attestation-bundle.jsonl \
+            release-bundles/frontend-attestation-bundle.jsonl \
+            release-bundles/attestation-manifest.json \
+            --repo "${{ github.repository }}" \
+            --clobber
+          echo "✅ Attestation bundles attached to release ${{ github.event.release.tag_name }}" >> "$GITHUB_STEP_SUMMARY"

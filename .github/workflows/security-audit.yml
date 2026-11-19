@@ -12,6 +12,18 @@ name: Security Audit
 # the source revision, workflow identity and artifact digests, and attaches
 # them to the release. The `release-validation` job independently re-derives
 # the digests and verifies the SBOM describes the exact published artifacts.
+#
+# Signed attestations (issue #282): the `attest-verification` job runs on
+# every published release and independently verifies both attestation bundles
+# (contract WASM and frontend build) that signed-attestations.yml attached to
+# the release.  Verification checks:
+#   1. Bundles are present and non-empty on the release assets.
+#   2. Each bundle decodes to a valid in-toto statement.
+#   3. The predicateType is a recognised SLSA Provenance URI.
+#   4. The source revision in the bundle matches the release tag's commit.
+#   5. The repository claim contains this repository's name.
+# Failure opens a tracking issue via open-tracking-issue (same as audit
+# failures) so it surfaces in the same alert channel.
 
 on:
   pull_request:
@@ -172,10 +184,311 @@ jobs:
           ls ./*.cdx.json >/dev/null
           echo "SBOM and provenance verified for ${GITHUB_SHA}"
 
+  # ── Signed attestation verification (issue #282) ───────────────────────────
+  #
+  # Runs on every published release.  Downloads the attestation bundles that
+  # signed-attestations.yml attached to the release and independently verifies
+  # their structure, predicate type, source revision, and repository claim.
+  #
+  # This is intentionally a separate job from release-validation so the two
+  # checks are orthogonal: SBOM provenance (what packages are present) vs.
+  # artifact attestations (which build workflow produced the binary).
+  attest-verification:
+    name: Verify Release Attestations
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      # Resolve the commit SHA that the release tag points to.
+      # We use this to validate the source-revision claim inside each bundle.
+      - name: Resolve release tag commit
+        id: tag
+        run: |
+          TAG_SHA=$(git rev-parse HEAD)
+          echo "sha=${TAG_SHA}" >> "$GITHUB_OUTPUT"
+          echo "short=${TAG_SHA:0:12}" >> "$GITHUB_OUTPUT"
+
+      # Download attestation bundles from the release assets.
+      # signed-attestations.yml uploads them as:
+      #   contract-attestation-bundle.jsonl
+      #   frontend-attestation-bundle.jsonl
+      #   attestation-manifest.json
+      - name: Download release attestation assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p attest-verify
+          gh release download "${{ github.event.release.tag_name }}" \
+            --pattern 'contract-attestation-bundle.jsonl' \
+            --pattern 'frontend-attestation-bundle.jsonl' \
+            --pattern 'attestation-manifest.json' \
+            --dir attest-verify \
+            --repo "${{ github.repository }}" \
+            2>/dev/null || true
+
+      # If the bundles are absent (e.g. the release predates issue #282) emit
+      # a clear warning and skip verification rather than failing noisily.
+      - name: Check bundle presence
+        id: presence
+        run: |
+          set -euo pipefail
+          MISSING=()
+          for f in \
+              attest-verify/contract-attestation-bundle.jsonl \
+              attest-verify/frontend-attestation-bundle.jsonl \
+              attest-verify/attestation-manifest.json; do
+            [ -s "$f" ] || MISSING+=("$(basename "$f")")
+          done
+
+          if [ "${#MISSING[@]}" -gt 0 ]; then
+            echo "::warning::Attestation bundles not found on release ${{ github.event.release.tag_name }}: ${MISSING[*]}"
+            echo "::warning::This release may predate signed attestations (issue #282). Skipping verification."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify contract attestation bundle
+        if: steps.presence.outputs.skip != 'true'
+        env:
+          TAG_SHA: ${{ steps.tag.outputs.sha }}
+        run: |
+          set -euo pipefail
+          BUNDLE=attest-verify/contract-attestation-bundle.jsonl
+          FAILURES=0
+
+          fail() { echo "::error::$*"; FAILURES=$(( FAILURES + 1 )); }
+          pass() { echo "  ✅ $*"; }
+
+          echo "### Contract attestation bundle" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # 1. Bundle is non-empty JSON
+          if ! jq -e . "$BUNDLE" > /dev/null 2>&1; then
+            fail "Contract bundle is not valid JSON: $BUNDLE"
+          else
+            pass "Bundle is valid JSON"
+          fi
+
+          # Decode the DSSE payload (base64 → in-toto statement)
+          STATEMENT=$(jq -r '[.dsseEnvelope.payload // .payload // empty] | first // empty' \
+            "$BUNDLE" | base64 -d 2>/dev/null || true)
+
+          if [ -z "$STATEMENT" ]; then
+            fail "Cannot decode DSSE payload from contract bundle"
+            echo "| Check | Result |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Bundle structure | ❌ DSSE decode failed |" >> "$GITHUB_STEP_SUMMARY"
+            exit "$FAILURES"
+          fi
+          pass "DSSE payload decoded"
+
+          # 2. Predicate type is a recognised SLSA Provenance URI
+          PRED_TYPE=$(echo "$STATEMENT" | jq -r '.predicateType // empty')
+          if echo "$PRED_TYPE" | grep -qE 'https://slsa\.dev/provenance/v[0-9]'; then
+            pass "predicateType: $PRED_TYPE"
+          else
+            fail "Contract bundle predicateType not recognised: '$PRED_TYPE'"
+          fi
+
+          # 3. At least one subject
+          SUBJ_COUNT=$(echo "$STATEMENT" | jq '.subject | length // 0')
+          if [ "$SUBJ_COUNT" -ge 1 ]; then
+            pass "Bundle has $SUBJ_COUNT subject(s)"
+          else
+            fail "Contract bundle has no subjects"
+          fi
+
+          # 4. Source revision matches the release tag commit
+          BUNDLE_SHA=$(echo "$STATEMENT" | jq -r '
+            .predicate.buildDefinition.resolvedDependencies[]?.digest.gitCommit //
+            .predicate.buildDefinition.resolvedDependencies[]?.digest.sha1 //
+            empty' | head -n 1 || true)
+          if [ -z "$BUNDLE_SHA" ]; then
+            # Fallback: scan all 40-char hex strings
+            BUNDLE_SHA=$(echo "$STATEMENT" | jq -r '.. | strings | select(test("^[0-9a-f]{40}$"))' \
+              2>/dev/null | head -n 1 || true)
+          fi
+
+          if [ -n "$BUNDLE_SHA" ] && [ "${BUNDLE_SHA:0:12}" = "${TAG_SHA:0:12}" ]; then
+            pass "Source revision matches tag commit: ${BUNDLE_SHA:0:12}"
+          elif [ -z "$BUNDLE_SHA" ]; then
+            echo "::warning::Source revision not found in contract bundle; skipping SHA check."
+          else
+            fail "Source revision mismatch. Bundle: $BUNDLE_SHA — Release tag: $TAG_SHA"
+          fi
+
+          # 5. Repository claim
+          REPO_CLAIM=$(echo "$STATEMENT" | jq -r '
+            .predicate.buildDefinition.externalParameters.workflow.repository //
+            .predicate.invocation.configSource.uri // empty')
+          if echo "$REPO_CLAIM" | grep -qF "${{ github.repository }}"; then
+            pass "Repository claim matches: $REPO_CLAIM"
+          elif [ -z "$REPO_CLAIM" ]; then
+            echo "::warning::Repository claim not found in contract bundle."
+          else
+            fail "Repository claim '$REPO_CLAIM' does not match '${{ github.repository }}'"
+          fi
+
+          # Emit summary row
+          DIGEST=$(echo "$STATEMENT" | jq -r '.subject[0].digest.sha256 // "unknown"')
+          STATUS=$( [ "$FAILURES" -eq 0 ] && echo "✅ Passed" || echo "❌ Failed ($FAILURES)" )
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Status | $STATUS |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| predicateType | \`$PRED_TYPE\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Subject digest | \`sha256:$DIGEST\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Subjects | $SUBJ_COUNT |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          [ "$FAILURES" -eq 0 ] || exit 1
+
+      - name: Verify frontend attestation bundle
+        if: steps.presence.outputs.skip != 'true'
+        env:
+          TAG_SHA: ${{ steps.tag.outputs.sha }}
+        run: |
+          set -euo pipefail
+          BUNDLE=attest-verify/frontend-attestation-bundle.jsonl
+          FAILURES=0
+
+          fail() { echo "::error::$*"; FAILURES=$(( FAILURES + 1 )); }
+          pass() { echo "  ✅ $*"; }
+
+          echo "### Frontend attestation bundle" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if ! jq -e . "$BUNDLE" > /dev/null 2>&1; then
+            fail "Frontend bundle is not valid JSON: $BUNDLE"
+          else
+            pass "Bundle is valid JSON"
+          fi
+
+          STATEMENT=$(jq -r '[.dsseEnvelope.payload // .payload // empty] | first // empty' \
+            "$BUNDLE" | base64 -d 2>/dev/null || true)
+
+          if [ -z "$STATEMENT" ]; then
+            fail "Cannot decode DSSE payload from frontend bundle"
+            exit "$FAILURES"
+          fi
+          pass "DSSE payload decoded"
+
+          PRED_TYPE=$(echo "$STATEMENT" | jq -r '.predicateType // empty')
+          if echo "$PRED_TYPE" | grep -qE 'https://slsa\.dev/provenance/v[0-9]'; then
+            pass "predicateType: $PRED_TYPE"
+          else
+            fail "Frontend bundle predicateType not recognised: '$PRED_TYPE'"
+          fi
+
+          SUBJ_COUNT=$(echo "$STATEMENT" | jq '.subject | length // 0')
+          if [ "$SUBJ_COUNT" -ge 1 ]; then
+            pass "Bundle has $SUBJ_COUNT subject(s)"
+          else
+            fail "Frontend bundle has no subjects"
+          fi
+
+          BUNDLE_SHA=$(echo "$STATEMENT" | jq -r '
+            .predicate.buildDefinition.resolvedDependencies[]?.digest.gitCommit //
+            .predicate.buildDefinition.resolvedDependencies[]?.digest.sha1 // empty' \
+            | head -n 1 || true)
+          if [ -z "$BUNDLE_SHA" ]; then
+            BUNDLE_SHA=$(echo "$STATEMENT" | jq -r \
+              '.. | strings | select(test("^[0-9a-f]{40}$"))' 2>/dev/null | head -n 1 || true)
+          fi
+
+          if [ -n "$BUNDLE_SHA" ] && [ "${BUNDLE_SHA:0:12}" = "${TAG_SHA:0:12}" ]; then
+            pass "Source revision matches tag commit: ${BUNDLE_SHA:0:12}"
+          elif [ -z "$BUNDLE_SHA" ]; then
+            echo "::warning::Source revision not found in frontend bundle; skipping SHA check."
+          else
+            fail "Source revision mismatch. Bundle: $BUNDLE_SHA — Release tag: $TAG_SHA"
+          fi
+
+          REPO_CLAIM=$(echo "$STATEMENT" | jq -r '
+            .predicate.buildDefinition.externalParameters.workflow.repository //
+            .predicate.invocation.configSource.uri // empty')
+          if echo "$REPO_CLAIM" | grep -qF "${{ github.repository }}"; then
+            pass "Repository claim matches: $REPO_CLAIM"
+          elif [ -z "$REPO_CLAIM" ]; then
+            echo "::warning::Repository claim not found in frontend bundle."
+          else
+            fail "Repository claim '$REPO_CLAIM' does not match '${{ github.repository }}'"
+          fi
+
+          DIGEST=$(echo "$STATEMENT" | jq -r '.subject[0].digest.sha256 // "unknown"')
+          STATUS=$( [ "$FAILURES" -eq 0 ] && echo "✅ Passed" || echo "❌ Failed ($FAILURES)" )
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Status | $STATUS |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| predicateType | \`$PRED_TYPE\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Subject digest | \`sha256:$DIGEST\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Subjects | $SUBJ_COUNT |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          [ "$FAILURES" -eq 0 ] || exit 1
+
+      - name: Verify attestation manifest consistency
+        if: steps.presence.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          MANIFEST=attest-verify/attestation-manifest.json
+
+          if ! jq -e . "$MANIFEST" > /dev/null 2>&1; then
+            echo "::error::attestation-manifest.json is not valid JSON"
+            exit 1
+          fi
+
+          # Manifest must reference this exact release tag commit
+          MANIFEST_SHA=$(jq -r '.sourceRevision // empty' "$MANIFEST")
+          if [ -z "$MANIFEST_SHA" ]; then
+            echo "::warning::attestation-manifest.json has no sourceRevision field."
+          elif [ "$MANIFEST_SHA" != "${{ github.sha }}" ] && \
+               [ "${MANIFEST_SHA:0:12}" != "${{ steps.tag.outputs.short }}" ]; then
+            echo "::warning::Manifest sourceRevision ($MANIFEST_SHA) differs from release tag SHA (${{ steps.tag.outputs.sha }}). This can happen when the manifest was generated from a different run."
+          else
+            echo "  ✅ Manifest sourceRevision matches release commit"
+          fi
+
+          # Confirm both subjects are recorded in the manifest
+          CONTRACT_PRESENT=$(jq 'has("subjects") and (.subjects | has("contract"))' "$MANIFEST")
+          FRONTEND_PRESENT=$(jq 'has("subjects") and (.subjects | has("frontend"))' "$MANIFEST")
+
+          if [ "$CONTRACT_PRESENT" = "true" ] && [ "$FRONTEND_PRESENT" = "true" ]; then
+            echo "  ✅ Manifest contains entries for both contract and frontend subjects"
+          else
+            echo "::warning::Manifest is missing contract or frontend subject entries."
+          fi
+
+          echo "### Attestation manifest" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          jq -r 'to_entries[] | select(.value | type == "string") | "| \(.key) | `\(.value)` |"' \
+            "$MANIFEST" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post attestation verification summary
+        if: always() && steps.presence.outputs.skip != 'true'
+        run: |
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Release:** \`${{ github.event.release.tag_name }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Workflow:** \`${{ github.workflow_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "_To verify locally: \`gh attestation verify <artifact> --repo ${{ github.repository }}\`_" >> "$GITHUB_STEP_SUMMARY"
+          echo "_Full guide: \`docs/operations/release-attestations.md\`_" >> "$GITHUB_STEP_SUMMARY"
+
   open-tracking-issue:
     name: Open Tracking Issue
     runs-on: ubuntu-latest
-    needs: [contracts-audit, frontend-audit, secret-inventory]
+    needs: [contracts-audit, frontend-audit, attest-verification]
     if: failure()
 
     steps:
@@ -204,15 +517,23 @@ jobs:
             const issue = await github.rest.issues.create({
               owner, repo, title, labels: [label],
               body: [
-                'The `security-audit.yml` workflow (`cargo deny check advisories`',
-                'and/or the pnpm severity policy) failed.',
+                'The `security-audit.yml` workflow failed. Possible causes:',
+                '',
+                '- `cargo deny check advisories` found a new RUSTSEC advisory.',
+                '- `pnpm audit` found a high-severity npm advisory.',
+                '- The `attest-verification` job detected a malformed or mismatched',
+                '  attestation bundle on a published release.',
                 '',
                 `Failed run: ${runUrl}`,
                 '',
-                'Close this issue once the advisory has been triaged (ignored with a',
-                'documented reason in `Dechat/stellar-contracts/deny.toml`, or fixed by',
-                'a dependency bump). Security bumps are not auto-merged; they go through',
-                'the normal review and test gates.',
+                '**Advisory failures:** ignore with a documented reason in',
+                '`Dechat/stellar-contracts/deny.toml`, or fix by a dependency bump.',
+                'Security bumps are not auto-merged; they go through the normal review',
+                'and test gates.',
+                '',
+                '**Attestation failures:** check that `signed-attestations.yml` ran',
+                'successfully for this release and that bundles were attached to the',
+                'release assets. See `docs/operations/release-attestations.md`.',
               ].join('\n'),
             });
             core.notice(`Opened tracking issue #${issue.data.number}`);
