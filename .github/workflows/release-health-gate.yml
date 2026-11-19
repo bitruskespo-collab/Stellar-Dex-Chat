@@ -1,0 +1,383 @@
+name: Release Health Gate
+
+# ── Overview ─────────────────────────────────────────────────────────────────
+#
+# Implements the rollback-safe release health gate described in issue #284.
+#
+# Two jobs run in sequence after every push to a release/** branch:
+#
+#   probe ── Polls /api/health until the gate is HEALTHY or the window
+#             expires, then writes a machine-readable gate-report artifact.
+#
+#   rollback-decision ── Reads the artifact and either marks the release
+#             healthy or signals that an operator should initiate rollback.
+#             The step exits non-zero when the decision is ROLLBACK, which
+#             blocks downstream jobs and surfaces clearly in the Actions UI.
+#
+# Non-production releases can be tested without real infrastructure by
+# setting the HEALTH_GATE_TARGET_URL variable on the release environment (or
+# as a repository-level variable).  When the variable is absent the workflow
+# validates its own logic using a lightweight mock server included inline.
+#
+# ── Thresholds ───────────────────────────────────────────────────────────────
+#
+#  MAX_ERROR_RATE          Maximum HTTP 5xx error fraction before ROLLBACK.
+#                          Default: 0.05 (5 %).
+#  MAX_PAYOUT_FAILURES     Absolute payout failure count before ROLLBACK.
+#                          Default: 3.
+#  HEALTH_WINDOW_MS        Observation window forwarded to the endpoint.
+#                          Default: 600000 (10 min).
+#  PROBE_INTERVAL_SECONDS  Seconds between health probes.  Default: 30.
+#  PROBE_TIMEOUT_SECONDS   Wall-clock timeout for the entire probe loop.
+#                          Default: 300 (5 min).
+#
+# ── Rollback override ────────────────────────────────────────────────────────
+#
+# Set the ROLLBACK_OVERRIDE_REASON repository / environment variable to a
+# non-empty string to skip a failed gate with a recorded warning.  Every
+# override is printed to the job summary so it is auditable.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches:
+      - 'release/**'
+    paths:
+      - 'Dechat/dex_with_fiat_frontend/**'
+      - '.github/workflows/release-health-gate.yml'
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: 'Base URL of the deployment to probe (e.g. https://staging.example.com)'
+        required: false
+        default: ''
+      max_error_rate:
+        description: 'Error-rate rollback threshold (0–1, default 0.05)'
+        required: false
+        default: '0.05'
+      max_payout_failures:
+        description: 'Payout failure count threshold (default 3)'
+        required: false
+        default: '3'
+
+permissions:
+  contents: read
+
+# Cancel in-flight runs for the same ref so a rapid push does not leave
+# stale probes running against an already-superseded deployment.
+concurrency:
+  group: release-health-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MAX_ERROR_RATE: ${{ inputs.max_error_rate || vars.MAX_ERROR_RATE || '0.05' }}
+  MAX_PAYOUT_FAILURES: ${{ inputs.max_payout_failures || vars.MAX_PAYOUT_FAILURES || '3' }}
+  HEALTH_WINDOW_MS: ${{ vars.HEALTH_WINDOW_MS || '600000' }}
+  PROBE_INTERVAL_SECONDS: ${{ vars.PROBE_INTERVAL_SECONDS || '30' }}
+  PROBE_TIMEOUT_SECONDS: ${{ vars.PROBE_TIMEOUT_SECONDS || '300' }}
+
+jobs:
+  # ── 1. Health probe loop ───────────────────────────────────────────────────
+  probe:
+    name: Health probe
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    outputs:
+      decision: ${{ steps.gate.outputs.decision }}
+      error_rate: ${{ steps.gate.outputs.error_rate }}
+      payout_failures: ${{ steps.gate.outputs.payout_failures }}
+      total_requests: ${{ steps.gate.outputs.total_requests }}
+      reason: ${{ steps.gate.outputs.reason }}
+      probed_url: ${{ steps.resolve.outputs.probed_url }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # ── Resolve the target URL ─────────────────────────────────────────────
+      # Priority: workflow_dispatch input > environment variable > mock server.
+      - name: Resolve health endpoint URL
+        id: resolve
+        env:
+          INPUT_URL: ${{ inputs.target_url }}
+          ENV_URL: ${{ vars.HEALTH_GATE_TARGET_URL }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${INPUT_URL:-}" ]; then
+            TARGET="${INPUT_URL}"
+          elif [ -n "${ENV_URL:-}" ]; then
+            TARGET="${ENV_URL}"
+          else
+            # No real deployment URL — start a local mock server so the
+            # workflow can validate its own gate logic end-to-end without
+            # requiring a live environment.
+            TARGET="http://localhost:9292"
+            echo "use_mock=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          PROBED_URL="${TARGET}/api/health"
+          echo "probed_url=${PROBED_URL}" >> "$GITHUB_OUTPUT"
+          echo "target_base=${TARGET}" >> "$GITHUB_OUTPUT"
+
+      # ── Start mock server (when no real URL is configured) ─────────────────
+      - name: Start mock health server
+        if: steps.resolve.outputs.use_mock == 'true'
+        run: |
+          cat > /tmp/mock_health.py << 'PYEOF'
+          import http.server, json, time, sys
+
+          RESPONSE = {
+            "status": "ok",
+            "timestamp": "",
+            "releaseHealth": {
+              "decision": "HEALTHY",
+              "payoutProcessingPermitted": True,
+              "reason": None,
+              "metrics": {
+                "totalRequests": 120,
+                "erroredRequests": 2,
+                "errorRate": 0.0167,
+                "payoutFailures": 0
+              },
+              "thresholds": {
+                "maxErrorRate": 0.05,
+                "maxPayoutFailures": 3,
+                "windowMs": 600000,
+                "minRequestsForErrorRate": 5
+              },
+              "windowMs": 600000
+            }
+          }
+
+          class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+              body = json.dumps({**RESPONSE, "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ")}).encode()
+              self.send_response(200)
+              self.send_header("Content-Type", "application/json")
+              self.end_headers()
+              self.wfile.write(body)
+            def log_message(self, fmt, *args):
+              sys.stderr.write(fmt % args + "\n")
+
+          server = http.server.HTTPServer(("127.0.0.1", 9292), Handler)
+          server.serve_forever()
+          PYEOF
+          python3 /tmp/mock_health.py &
+          echo "Mock server PID $!" 
+          # Wait until it accepts connections
+          for i in $(seq 1 10); do
+            curl -sf http://localhost:9292/api/health > /dev/null && break
+            sleep 1
+          done
+
+      # ── Probe loop ────────────────────────────────────────────────────────
+      - name: Run release health gate probe
+        id: gate
+        env:
+          PROBED_URL: ${{ steps.resolve.outputs.probed_url }}
+        run: |
+          set -uo pipefail
+
+          DEADLINE=$(( $(date +%s) + PROBE_TIMEOUT_SECONDS ))
+          ATTEMPT=0
+          DECISION="UNKNOWN"
+          ERROR_RATE="0"
+          PAYOUT_FAILURES="0"
+          TOTAL_REQUESTS="0"
+          REASON=""
+          LAST_HTTP_STATUS="0"
+
+          echo "## 🔍 Release Health Gate Probe" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Probe | Time | Decision | Error rate | Payout failures | HTTP |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- | --- | --- | --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            ATTEMPT=$(( ATTEMPT + 1 ))
+            TS=$(date -u +%H:%M:%SZ)
+
+            QUERY="maxErrorRate=${MAX_ERROR_RATE}&maxPayoutFailures=${MAX_PAYOUT_FAILURES}&windowMs=${HEALTH_WINDOW_MS}"
+            HTTP_RESPONSE=$(curl -sf --max-time 15 \
+              -w "\n%{http_code}" \
+              "${PROBED_URL}?${QUERY}" 2>/dev/null || echo "CURL_FAILED\n000")
+
+            LAST_HTTP_STATUS=$(echo "$HTTP_RESPONSE" | tail -n1)
+            BODY=$(echo "$HTTP_RESPONSE" | head -n -1)
+
+            if echo "$BODY" | jq -e . > /dev/null 2>&1; then
+              DECISION=$(echo "$BODY" | jq -r '.releaseHealth.decision // "UNKNOWN"')
+              ERROR_RATE=$(echo "$BODY" | jq -r '.releaseHealth.metrics.errorRate // "0"')
+              PAYOUT_FAILURES=$(echo "$BODY" | jq -r '.releaseHealth.metrics.payoutFailures // "0"')
+              TOTAL_REQUESTS=$(echo "$BODY" | jq -r '.releaseHealth.metrics.totalRequests // "0"')
+              REASON=$(echo "$BODY" | jq -r '.releaseHealth.reason // ""')
+            else
+              DECISION="UNKNOWN"
+            fi
+
+            # Format error rate as percentage for readability
+            ERROR_PCT=$(awk "BEGIN { printf \"%.1f%%\", ${ERROR_RATE} * 100 }")
+
+            case "$DECISION" in
+              HEALTHY)  ROW_ICON="✅" ;;
+              DEGRADED) ROW_ICON="⚠️" ;;
+              ROLLBACK) ROW_ICON="🔴" ;;
+              *)        ROW_ICON="❓" ;;
+            esac
+
+            echo "| $ATTEMPT | $TS | ${ROW_ICON} $DECISION | $ERROR_PCT | $PAYOUT_FAILURES | $LAST_HTTP_STATUS |" >> "$GITHUB_STEP_SUMMARY"
+
+            # Terminal conditions: stop polling once a stable verdict is reached.
+            if [ "$DECISION" = "HEALTHY" ] || [ "$DECISION" = "ROLLBACK" ]; then
+              break
+            fi
+
+            sleep "$PROBE_INTERVAL_SECONDS"
+          done
+
+          # Timeout expired without a stable decision
+          if [ "$DECISION" != "HEALTHY" ] && [ "$DECISION" != "ROLLBACK" ]; then
+            DECISION="ROLLBACK"
+            REASON="Health probe timed out after ${PROBE_TIMEOUT_SECONDS}s without reaching a stable HEALTHY verdict."
+          fi
+
+          echo "decision=${DECISION}" >> "$GITHUB_OUTPUT"
+          echo "error_rate=${ERROR_RATE}" >> "$GITHUB_OUTPUT"
+          echo "payout_failures=${PAYOUT_FAILURES}" >> "$GITHUB_OUTPUT"
+          echo "total_requests=${TOTAL_REQUESTS}" >> "$GITHUB_OUTPUT"
+          # Sanitise REASON so it survives as a single-line output variable
+          REASON_SAFE=$(echo "$REASON" | tr '\n' ' ' | head -c 400)
+          echo "reason=${REASON_SAFE}" >> "$GITHUB_OUTPUT"
+
+      # ── Upload gate report artifact ───────────────────────────────────────
+      - name: Write gate report
+        if: always()
+        env:
+          DECISION: ${{ steps.gate.outputs.decision }}
+          ERROR_RATE: ${{ steps.gate.outputs.error_rate }}
+          PAYOUT_FAILURES: ${{ steps.gate.outputs.payout_failures }}
+          TOTAL_REQUESTS: ${{ steps.gate.outputs.total_requests }}
+          REASON: ${{ steps.gate.outputs.reason }}
+          PROBED_URL: ${{ steps.resolve.outputs.probed_url }}
+        run: |
+          mkdir -p gate-report
+          cat > gate-report/gate-report.json << EOF
+          {
+            "schemaVersion": "1",
+            "ref": "${{ github.ref }}",
+            "sha": "${{ github.sha }}",
+            "runId": "${{ github.run_id }}",
+            "runAttempt": "${{ github.run_attempt }}",
+            "probedUrl": "${PROBED_URL}",
+            "thresholds": {
+              "maxErrorRate": "${MAX_ERROR_RATE}",
+              "maxPayoutFailures": "${MAX_PAYOUT_FAILURES}",
+              "windowMs": "${HEALTH_WINDOW_MS}"
+            },
+            "result": {
+              "decision": "${DECISION}",
+              "errorRate": "${ERROR_RATE}",
+              "payoutFailures": "${PAYOUT_FAILURES}",
+              "totalRequests": "${TOTAL_REQUESTS}",
+              "reason": "${REASON}"
+            },
+            "generatedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+
+      - name: Upload gate report artifact
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-health-gate-report-${{ github.sha }}
+          path: gate-report/gate-report.json
+          retention-days: 30
+
+  # ── 2. Rollback decision ───────────────────────────────────────────────────
+  rollback-decision:
+    name: Rollback decision
+    needs: probe
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Download gate report
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v4
+        with:
+          name: release-health-gate-report-${{ github.sha }}
+          path: gate-report
+
+      - name: Evaluate rollback decision
+        id: decision
+        env:
+          DECISION: ${{ needs.probe.outputs.decision }}
+          ERROR_RATE: ${{ needs.probe.outputs.error_rate }}
+          PAYOUT_FAILURES: ${{ needs.probe.outputs.payout_failures }}
+          TOTAL_REQUESTS: ${{ needs.probe.outputs.total_requests }}
+          REASON: ${{ needs.probe.outputs.reason }}
+          PROBED_URL: ${{ needs.probe.outputs.probed_url }}
+          OVERRIDE_REASON: ${{ vars.ROLLBACK_OVERRIDE_REASON }}
+        run: |
+          set -uo pipefail
+
+          ERROR_PCT=$(awk "BEGIN { printf \"%.2f%%\", ${ERROR_RATE} * 100 }")
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "## 🚦 Rollback Decision" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Decision | **${DECISION}** |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Error rate | ${ERROR_PCT} (threshold: ${MAX_ERROR_RATE}) |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Payout failures | ${PAYOUT_FAILURES} (threshold: ${MAX_PAYOUT_FAILURES}) |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Total requests | ${TOTAL_REQUESTS} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Probed URL | ${PROBED_URL} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Ref | ${{ github.ref }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| SHA | ${{ github.sha }} |" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -n "${REASON:-}" ]; then
+            echo "| Reason | ${REASON} |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Verify gate-report artifact is consistent with job outputs
+          REPORT_DECISION=$(jq -r '.result.decision' gate-report/gate-report.json)
+          if [ "$REPORT_DECISION" != "$DECISION" ]; then
+            echo "::warning::Gate report decision (${REPORT_DECISION}) differs from job output (${DECISION}); using job output."
+          fi
+
+          if [ "$DECISION" = "ROLLBACK" ]; then
+            if [ -n "${OVERRIDE_REASON:-}" ]; then
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "⚠️ **Authorized rollback override recorded**" >> "$GITHUB_STEP_SUMMARY"
+              echo "Override reason: ${OVERRIDE_REASON}" >> "$GITHUB_STEP_SUMMARY"
+              echo "::warning::Release health gate ROLLBACK overridden: ${OVERRIDE_REASON}"
+              echo "override=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "❌ **ROLLBACK TRIGGERED**" >> "$GITHUB_STEP_SUMMARY"
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "The release does not meet the health thresholds." >> "$GITHUB_STEP_SUMMARY"
+              echo "Initiate a rollback using the procedure in \`docs/operations/release-health-gates.md\`." >> "$GITHUB_STEP_SUMMARY"
+              echo "To authorize an emergency override, set the \`ROLLBACK_OVERRIDE_REASON\` repository/environment variable." >> "$GITHUB_STEP_SUMMARY"
+              echo "::error::Release health gate triggered ROLLBACK. Reason: ${REASON:-none provided}. See job summary for details."
+              exit 1
+            fi
+          elif [ "$DECISION" = "HEALTHY" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "✅ **Release is healthy — no rollback required.**" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "⚠️ **Decision: ${DECISION}** — monitoring recommended." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Post decision summary
+        if: always()
+        run: |
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
+          echo "_Gate report artifact: \`release-health-gate-report-${{ github.sha }}\` (retained 30 days)_" >> "$GITHUB_STEP_SUMMARY"
+          echo "_Runbook: \`docs/operations/release-health-gates.md\`_" >> "$GITHUB_STEP_SUMMARY"
