@@ -4,6 +4,34 @@ Thanks for contributing to Dechat. This document covers the workflow for
 changes that touch the Soroban smart contract interface and its generated
 TypeScript client bindings.
 
+## Pinned build toolchain
+
+The Rust and Stellar build toolchain is pinned in a single canonical place so
+that CI, the devcontainer, and local setups all use identical versions. Do not
+install floating or `latest` tool versions.
+
+- `rust-toolchain.toml` — the Rust toolchain channel, the `wasm32-unknown-unknown`
+target, and the `rustfmt` and `clippy` components.
+- `toolchain-versions.toml` — the exact Stellar CLI and Soroban SDK versions
+used to build and test the contract.
+
+Before building, verify that your installed tools match the pinned manifest:
+
+```sh
+# from the repository root
+make verify-toolchain
+```
+
+The verification step compares the installed `rustc`, `cargo`, `rustfmt`,
+`cargo-clippy`, `stellar`, and Soroban SDK versions against the pinned
+manifest. On a mismatch it exits non-zero and prints the expected and installed
+versions so you can correct your environment. CI runs the same check, so a
+version drift fails the build with the same message.
+
+To update a pinned version, change the manifest (and `rust-toolchain.toml` for
+Rust components) in a dedicated pull request and regenerate the bindings as
+described below.
+
 ## Contract bindings and ABI compatibility
 
 The TypeScript bindings under `Dechat/dex_with_fiat_frontend/src/contracts/`
@@ -58,6 +86,7 @@ policy was applied.
 
 ## Pull request checklist
 
+- [ ] Installed toolchain matches the pinned manifest (`make verify-toolchain`).
 - [ ] Contract interface changes include regenerated bindings.
 - [ ] The CI drift check passes with no ABI diff.
 - [ ] Breaking changes are documented and versioned as described above.

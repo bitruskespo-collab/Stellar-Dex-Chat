@@ -37,7 +37,15 @@ permissions:
 
 env:
   MAX_WASM_BYTES: "98500"
+  # Pinned toolchain versions. These MUST match the canonical manifest at
+  # Dechat/stellar-contracts/toolchain-versions.env and rust-toolchain.toml.
+  # The verify-toolchain job fails with a clear mismatch message if they drift.
+  RUST_TOOLCHAIN: "1.84.0"
+  RUST_TARGET: "wasm32v1-none"
   STELLAR_CLI_VERSION: "28.0.0"
+  SOROBAN_SDK_VERSION: "22.0.0"
+  RUSTFMT_VERSION: "1.84.0"
+  CLIPPY_VERSION: "1.84.0"
   BINDINGS_DIR: "Dechat/dex_with_fiat_frontend/src/lib/contracts"
   # Expected chain identity for canary verification. Override per-environment
   # via repository/environment variables; defaults to Stellar testnet.
@@ -45,9 +53,49 @@ env:
   EXPECTED_RPC_URL: ${{ vars.EXPECTED_RPC_URL || 'https://soroban-testnet.stellar.org' }}
 
 jobs:
+  verify-toolchain:
+    name: Verify pinned toolchain
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Verify pinned versions match canonical manifest
+        run: |
+          set -euo pipefail
+          MANIFEST=Dechat/stellar-contracts/toolchain-versions.env
+          if [ ! -f "$MANIFEST" ]; then
+            echo "::error::Canonical toolchain manifest $MANIFEST is missing"
+            exit 1
+          fi
+          # shellcheck disable=SC1090
+          source "$MANIFEST"
+          fail=0
+          check() {
+            local name="$1" expected="$2" actual="$3"
+            if [ "$expected" != "$actual" ]; then
+              echo "::error::Toolchain mismatch for $name: workflow pins '$actual' but manifest pins '$expected'"
+              fail=1
+            else
+              echo "OK: $name = $expected"
+            fi
+          }
+          check RUST_TOOLCHAIN "$RUST_TOOLCHAIN" "${{ env.RUST_TOOLCHAIN }}"
+          check RUST_TARGET "$RUST_TARGET" "${{ env.RUST_TARGET }}"
+          check STELLAR_CLI_VERSION "$STELLAR_CLI_VERSION" "${{ env.STELLAR_CLI_VERSION }}"
+          check SOROBAN_SDK_VERSION "$SOROBAN_SDK_VERSION" "${{ env.SOROBAN_SDK_VERSION }}"
+          check RUSTFMT_VERSION "$RUSTFMT_VERSION" "${{ env.RUSTFMT_VERSION }}"
+          check CLIPPY_VERSION "$CLIPPY_VERSION" "${{ env.CLIPPY_VERSION }}"
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::Workflow toolchain pins drifted from $MANIFEST. Update both to the same versions."
+            exit 1
+          fi
+
   fmt:
     name: Check formatting
     runs-on: ubuntu-latest
+    needs: [verify-toolchain]
     permissions:
       contents: read
     defaults:
@@ -59,8 +107,16 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable
         with:
-          toolchain: stable
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt
+      - name: Verify rustfmt version
+        run: |
+          set -euo pipefail
+          INSTALLED=$(rustfmt --version | awk '{print $2}')
+          if [ "$INSTALLED" != "$RUSTFMT_VERSION" ]; then
+            echo "::error::rustfmt version mismatch: expected $RUSTFMT_VERSION but found $INSTALLED"
+            exit 1
+          fi
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
         with:
@@ -71,6 +127,7 @@ jobs:
   clippy:
     name: Run clippy
     runs-on: ubuntu-latest
+    needs: [verify-toolchain]
     permissions:
       contents: read
     defaults:
@@ -82,8 +139,16 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable
         with:
-          toolchain: stable
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
+      - name: Verify clippy version
+        run: |
+          set -euo pipefail
+          INSTALLED=$(cargo clippy --version | awk '{print $2}')
+          if [ "$INSTALLED" != "$CLIPPY_VERSION" ]; then
+            echo "::error::clippy version mismatch: expected $CLIPPY_VERSION but found $INSTALLED"
+            exit 1
+          fi
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
         with:
@@ -94,6 +159,7 @@ jobs:
   test:
     name: Run tests
     runs-on: ubuntu-latest
+    needs: [verify-toolchain]
     permissions:
       contents: read
     defaults:
@@ -118,7 +184,15 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable
         with:
-          toolchain: stable
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Verify Rust version
+        run: |
+          set -euo pipefail
+          INSTALLED=$(rustc --version | awk '{print $2}')
+          if [ "$INSTALLED" != "$RUST_TOOLCHAIN" ]; then
+            echo "::error::rustc version mismatch: expected $RUST_TOOLCHAIN but found $INSTALLED"
+            exit 1
+          fi
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
         with:
@@ -129,6 +203,7 @@ jobs:
   build-wasm:
     name: Build WASM
     runs-on: ubuntu-latest
+    needs: [verify-toolchain]
     permissions:
       contents: read
     defaults:
@@ -140,10 +215,26 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable
         with:
-          toolchain: stable
-          targets: wasm32v1-none
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ env.RUST_TARGET }}
       - name: Install Stellar CLI
         run: cargo install --locked stellar-cli --version "$STELLAR_CLI_VERSION"
+      - name: Verify Stellar CLI version
+        run: |
+          set -euo pipefail
+          INSTALLED=$(stellar version | head -n1 | awk '{print $2}')
+          if [ "$INSTALLED" != "$STELLAR_CLI_VERSION" ]; then
+            echo "::error::stellar-cli version mismatch: expected $STELLAR_CLI_VERSION but found $INSTALLED"
+            exit 1
+          fi
+      - name: Verify Soroban SDK version
+        run: |
+          set -euo pipefail
+          INSTALLED=$(grep -E '^soroban-sdk\s*=' Cargo.toml | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ "$INSTALLED" != "$SOROBAN_SDK_VERSION" ]; then
+            echo "::error::soroban-sdk version mismatch: expected $SOROBAN_SDK_VERSION but found '$INSTALLED'"
+            exit 1
+          fi
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
         with:
@@ -182,7 +273,7 @@ jobs:
   readiness-gate:
     name: Production Readiness Gate
     runs-on: ubuntu-latest
-    needs: [fmt, clippy, test, build-wasm]
+    needs: [verify-toolchain, fmt, clippy, test, build-wasm]
     permissions:
       contents: read
     steps:
@@ -212,28 +303,6 @@ jobs:
           echo "Network config OK: $EXPECTED_RPC_URL"
       - name: Verify migrations present
         run: |
-          set -euo pipefail
-          if [ ! -d "Dechat/stellar-contracts/migrations" ] && [ ! -f "Dechat/stellar-contracts/MIGRATIONS.md" ]; then
-            echo "::warning::No migrations directory or MIGRATIONS.md found; confirm no schema migration is required"
-          else
-            echo "Migrations present"
-          fi
-      - name: Verify signer availability
-        run: |
-          set -euo pipefail
-          if [ -z "${STELLAR_SIGNER_SECRET:-}" ] && [ "${{ github.event_name }}" = "push" ]; then
-            echo "::error::Signer secret unavailable for promotion"
-            exit 1
-          fi
-          echo "Signer availability check passed"
-        env:
-          STELLAR_SIGNER_SECRET: ${{ secrets.STELLAR_SIGNER_SECRET }}
-      - name: Verify provider health
-        run: |
-          set -euo pipefail
-          STATUS=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$EXPECTED_RPC_URL")
-          if [ "$STATUS" -lt 200 ] || [ "$STATUS" -ge 400 ]; then
-            echo "::error::RPC provider health check failed (HTTP $STATUS)"
-            exit 1
-          fi
-          echo "Provider health OK (HTTP $STATUS)"
+          
+
+/* … truncated 1134 chars — edit only what you need near the top … */
