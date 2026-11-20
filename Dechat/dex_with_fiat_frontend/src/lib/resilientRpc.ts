@@ -319,3 +319,145 @@ export function getPinnedNetworkPassphrase(network: string): string {
   }
   return Networks.TESTNET;
 }
+
+export interface RpcThrottleOptions {
+  /** Minimum interval between successive calls, in milliseconds. */
+  minIntervalMs?: number;
+  /** Optional cancellation signal; aborts waiting and rejects with an AbortError. */
+  signal?: AbortSignal;
+}
+
+const DEFAULT_THROTTLE_INTERVAL_MS = 250;
+
+/** Per-key timestamp of the last completed throttled call. */
+const throttleLastCallAt = new Map<string, number>();
+
+export function resetRpcThrottleForTesting(key?: string): void {
+  if (key) {
+    throttleLastCallAt.delete(key);
+  } else {
+    throttleLastCallAt.clear();
+  }
+}
+
+function abortError(): Error {
+  const err = new Error('RPC throttle wait aborted');
+  err.name = 'AbortError';
+  return err;
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortError());
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/**
+ * Executes `fn` while enforcing a minimum interval between calls for the given
+ * throttle key. Supports cancellation via `signal`. The interval is measured
+ * from the completion of the previous call so bursts cannot exceed the budget.
+ */
+export async function withRpcThrottle<T>(
+  key: string,
+  fn: () => Promise<T>,
+  options: RpcThrottleOptions = {},
+): Promise<T> {
+  const minIntervalMs = options.minIntervalMs ?? DEFAULT_THROTTLE_INTERVAL_MS;
+  const { signal } = options;
+
+  if (signal?.aborted) {
+    throw abortError();
+  }
+
+  const last = throttleLastCallAt.get(key);
+  if (last !== undefined) {
+    const waitMs = last + minIntervalMs - Date.now();
+    if (waitMs > 0) {
+      await sleep(waitMs, signal);
+    }
+  }
+
+  if (signal?.aborted) {
+    throw abortError();
+  }
+
+  try {
+    return await fn();
+  } finally {
+    throttleLastCallAt.set(key, Date.now());
+  }
+}
+
+export interface LedgerHashInfo {
+  sequence: number;
+  hash: string;
+}
+
+export interface GetLedgerHashesOptions extends ResilientReadOptions {
+  /** Cancellation signal forwarded to the throttle/read layer. */
+  signal?: AbortSignal;
+  /** Minimum interval between RPC calls for this network. */
+  minIntervalMs?: number;
+}
+
+/**
+ * Fetches authoritative ledger hashes for a bounded range of ledger sequences
+ * from the active allowlisted RPC endpoint (with failover). Used to detect forks
+ * or reorganizations by comparing stored hashes against canonical RPC data.
+ *
+ * Ledgers are fetched in ascending sequence order. Missing ledgers are omitted
+ * from the result so callers can distinguish "not yet available" from a mismatch.
+ */
+export async function getLedgerHashes(
+  network: string,
+  fromSequence: number,
+  toSequence: number,
+  options: GetLedgerHashesOptions = {},
+): Promise<LedgerHashInfo[]> {
+  if (!Number.isInteger(fromSequence) || !Number.isInteger(toSequence)) {
+    throw new Error('Ledger sequence bounds must be integers');
+  }
+  if (fromSequence < 1 || toSequence < fromSequence) {
+    throw new Error(
+      `Invalid ledger range: fromSequence=${fromSequence} toSequence=${toSequence}`,
+    );
+  }
+
+  const normNetwork = network.toUpperCase();
+  const results: LedgerHashInfo[] = [];
+
+  for (let seq = fromSequence; seq <= toSequence; seq++) {
+    if (options.signal?.aborted) {
+      throw abortError();
+    }
+
+    const ledger = await withRpcThrottle(
+      `ledger-hashes:${normNetwork}`,
+      () =>
+        withResilientRpcRead(
+          normNetwork,
+          (server) => server.getLedger(seq),
+          { timeoutMs: options.timeoutMs, retries: options.retries },
+        ),
+      { minIntervalMs: options.minIntervalMs, signal: options.signal },
+    );
+
+    if (ledger && typeof ledger.hash === 'string' && ledger.hash.length > 0) {
+      results.push({ sequence: seq, hash: ledger.hash });
+    }
+  }
+
+  return results;
+}

@@ -8,7 +8,14 @@ export interface AuditEntry {
   id: string;
   timestamp: Date;
   adminAddress: string;
-  actionType: 'deposit' | 'payout' | 'reconciliation' | 'user_update' | 'settings_change';
+  actionType:
+    | 'deposit'
+    | 'payout'
+    | 'reconciliation'
+    | 'user_update'
+    | 'settings_change'
+    | 'indexer_reorg'
+    | 'indexer_backfill';
   actionDescription: string;
   txHash?: string;
   metadata: Record<string, unknown>;
@@ -136,6 +143,169 @@ class AuditLogService {
       }
       return true;
     });
+  }
+
+  /**
+   * Record detection of a fork/reorganization in indexed ledger data.
+   * Captures the invalidated range and the trusted checkpoint used for repair.
+   */
+  static recordReorgDetected(
+    adminAddress: string,
+    details: {
+      fromLedger: number;
+      toLedger: number;
+      trustedCheckpointLedger: number;
+      trustedCheckpointHash: string;
+      detectedHash?: string;
+      authoritativeHash?: string;
+      reason?: string;
+    },
+    status: AuditEntry['status'] = 'success',
+  ): AuditEntry {
+    return this.recordAction(
+      adminAddress,
+      'indexer_reorg',
+      `Reorg detected in ledgers ${details.fromLedger}-${details.toLedger}`,
+      {
+        event: 'reorg_detected',
+        fromLedger: details.fromLedger,
+        toLedger: details.toLedger,
+        trustedCheckpointLedger: details.trustedCheckpointLedger,
+        trustedCheckpointHash: details.trustedCheckpointHash,
+        detectedHash: details.detectedHash,
+        authoritativeHash: details.authoritativeHash,
+        reason: details.reason,
+      },
+      undefined,
+      status,
+    );
+  }
+
+  /**
+   * Record completion (or failure) of a reorg repair rebuild.
+   */
+  static recordReorgRepair(
+    adminAddress: string,
+    details: {
+      fromLedger: number;
+      toLedger: number;
+      trustedCheckpointLedger: number;
+      trustedCheckpointHash: string;
+      rebuiltLedgers?: number;
+      reason?: string;
+    },
+    status: AuditEntry['status'] = 'success',
+  ): AuditEntry {
+    return this.recordAction(
+      adminAddress,
+      'indexer_reorg',
+      `Reorg repair rebuilt ledgers ${details.fromLedger}-${details.toLedger}`,
+      {
+        event: 'reorg_repair',
+        fromLedger: details.fromLedger,
+        toLedger: details.toLedger,
+        trustedCheckpointLedger: details.trustedCheckpointLedger,
+        trustedCheckpointHash: details.trustedCheckpointHash,
+        rebuiltLedgers: details.rebuiltLedgers,
+        reason: details.reason,
+      },
+      undefined,
+      status,
+    );
+  }
+
+  /**
+   * Record the start of a bounded, resumable indexer backfill job.
+   */
+  static recordBackfillStarted(
+    adminAddress: string,
+    details: {
+      jobId: string;
+      fromLedger: number;
+      toLedger: number;
+      cursorLedger?: number;
+      reason?: string;
+    },
+    status: AuditEntry['status'] = 'pending',
+  ): AuditEntry {
+    return this.recordAction(
+      adminAddress,
+      'indexer_backfill',
+      `Backfill job ${details.jobId} started for ledgers ${details.fromLedger}-${details.toLedger}`,
+      {
+        event: 'backfill_started',
+        jobId: details.jobId,
+        fromLedger: details.fromLedger,
+        toLedger: details.toLedger,
+        cursorLedger: details.cursorLedger ?? details.fromLedger,
+        reason: details.reason,
+      },
+      undefined,
+      status,
+    );
+  }
+
+  /**
+   * Record cancellation of an in-flight indexer backfill job.
+   */
+  static recordBackfillCancelled(
+    adminAddress: string,
+    details: {
+      jobId: string;
+      fromLedger: number;
+      toLedger: number;
+      cursorLedger: number;
+      reason?: string;
+    },
+  ): AuditEntry {
+    return this.recordAction(
+      adminAddress,
+      'indexer_backfill',
+      `Backfill job ${details.jobId} cancelled at ledger ${details.cursorLedger}`,
+      {
+        event: 'backfill_cancelled',
+        jobId: details.jobId,
+        fromLedger: details.fromLedger,
+        toLedger: details.toLedger,
+        cursorLedger: details.cursorLedger,
+        reason: details.reason,
+      },
+      undefined,
+      'failed',
+    );
+  }
+
+  /**
+   * Record completion of an indexer backfill job.
+   */
+  static recordBackfillCompleted(
+    adminAddress: string,
+    details: {
+      jobId: string;
+      fromLedger: number;
+      toLedger: number;
+      cursorLedger: number;
+      processedLedgers?: number;
+      reason?: string;
+    },
+    status: AuditEntry['status'] = 'success',
+  ): AuditEntry {
+    return this.recordAction(
+      adminAddress,
+      'indexer_backfill',
+      `Backfill job ${details.jobId} completed through ledger ${details.cursorLedger}`,
+      {
+        event: 'backfill_completed',
+        jobId: details.jobId,
+        fromLedger: details.fromLedger,
+        toLedger: details.toLedger,
+        cursorLedger: details.cursorLedger,
+        processedLedgers: details.processedLedgers,
+        reason: details.reason,
+      },
+      undefined,
+      status,
+    );
   }
 
   /**

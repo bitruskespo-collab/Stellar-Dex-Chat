@@ -1,6 +1,14 @@
 import { rpc, scValToNative } from '@stellar/stellar-sdk';
 import fs from 'fs';
 import path from 'path';
+import {
+  TransactionalIndexer,
+  FileCheckpointStore,
+  FileEventStore,
+  RpcThrottle,
+  BackfillManager,
+  type RawContractEvent,
+} from '../lib/indexer';
 
 // Minimal interfaces to avoid import issues in script context
 interface ContractEvent {
@@ -30,7 +38,15 @@ const server = new rpc.Server(RPC_URL);
 const DATA_DIR = path.join(process.cwd(), 'data');
 const EVENTS_FILE = path.join(DATA_DIR, 'contract-events.json');
 const STATE_FILE = path.join(DATA_DIR, 'indexer-state.json');
+const BACKFILL_FILE = path.join(DATA_DIR, 'indexer-backfill.json');
 const ALERTS_FILE = path.join(DATA_DIR, 'observability-alerts.json');
+
+// Bounded ingestion batches and RPC throttling (issues #242 / #244).
+const INGEST_BATCH_SIZE = num(process.env.INDEXER_BATCH_SIZE, 100);
+const RPC_MIN_INTERVAL_MS = num(process.env.INDEXER_RPC_MIN_INTERVAL_MS, 250);
+const RPC_MAX_RETRIES = num(process.env.INDEXER_RPC_MAX_RETRIES, 5);
+const FRESH_START_LOOKBACK = num(process.env.INDEXER_FRESH_LOOKBACK_LEDGERS, 10000);
+const BACKFILL_MAX_LEDGERS = num(process.env.INDEXER_BACKFILL_MAX_LEDGERS, 5000);
 
 // Ensure data directory exists
 if (!fs.existsSync(DATA_DIR)) {
@@ -200,87 +216,122 @@ async function getLatestLedger() {
   return latestLedgerResp.sequence;
 }
 
+// Map a raw Soroban event into the canonical ContractEvent shape.
+// Topic 0: Version (u32), Topic 1: Symbol (deposit/withdraw),
+// Topic 2: Address (actor), Value: i128 (amount).
+function mapEvent(event: RawContractEvent): ContractEvent | null {
+  const topics = event.topic.map((t) => scValToNative(t));
+  const value = scValToNative(event.value);
+
+  const typeStr = topics[1] as string;
+  const actor = topics[2] as string;
+  const eventType: 'deposit' | 'withdraw' = typeStr === 'withdraw' ? 'withdraw' : 'deposit';
+  const contractId =
+    typeof event.contractId === 'string'
+      ? event.contractId
+      : (event.contractId as any)?.id || CONTRACT_ID;
+
+  if (eventType !== 'deposit' && eventType !== 'withdraw') return null;
+
+  return {
+    id: event.id,
+    type: eventType,
+    contractId: String(contractId),
+    ledger: event.ledger,
+    ledgerClosedAt: event.ledgerClosedAt,
+    txHash: event.txHash,
+    actor,
+    amount: String(value),
+    version: Number(topics[0]) || 1,
+  };
+}
+
 async function indexEvents() {
   console.log('Starting event indexing for contract:', CONTRACT_ID);
 
-  let state: IndexerState = {
-    lastPagingToken: '0',
-    lastLedger: 0,
-    updatedAt: new Date().toISOString()
+  // Durable checkpoint + event store. The checkpoint is the single source of
+  // truth for resume position; events and cursor advance atomically together.
+  const checkpointStore = new FileCheckpointStore(STATE_FILE);
+  const eventStore = new FileEventStore(EVENTS_FILE);
+  const throttle = new RpcThrottle({ minIntervalMs: RPC_MIN_INTERVAL_MS, maxRetries: RPC_MAX_RETRIES });
+
+  const indexer = new TransactionalIndexer({
+    contractId: CONTRACT_ID,
+    checkpointStore,
+    eventStore,
+    fetchEvents: async ({ startLedger, limit }) => {
+      const response = await throttle.run(() =>
+        server.getEvents({
+          startLedger,
+          filters: [{ type: 'contract', contractIds: [CONTRACT_ID] }],
+          limit,
+        })
+      );
+      return {
+        events: response.events as unknown as RawContractEvent[],
+        latestLedger: response.latestLedger,
+      };
+    },
+    mapEvent,
+    batchSize: INGEST_BATCH_SIZE,
+    onCommit: (info) => {
+      console.log(
+        `[checkpoint] committed ${info.eventCount} events; cursor ledger=${info.lastLedger} pagingToken=${info.lastPagingToken}`
+      );
+    },
+  });
+
+  const backfill = new BackfillManager({
+    indexer,
+    checkpointStore,
+    progressFile: BACKFILL_FILE,
+    maxLedgersPerRun: BACKFILL_MAX_LEDGERS,
+    throttle,
+    onProgress: (p) => {
+      console.log(
+        `[backfill] ${p.status} ${p.processedLedgers}/${p.totalLedgers} ledgers (cursor=${p.lastLedger})`
+      );
+    },
+  });
+
+  // Honor SIGINT/SIGTERM: stop scheduling new batches and let the in-flight
+  // batch commit atomically so we never leave a torn checkpoint.
+  let cancelled = false;
+  const requestCancel = (signal: string) => {
+    if (cancelled) return;
+    cancelled = true;
+    console.log(`[indexer] received ${signal}; cancelling after current batch`);
+    backfill.cancel();
+    indexer.cancel();
   };
+  process.on('SIGINT', () => requestCancel('SIGINT'));
+  process.on('SIGTERM', () => requestCancel('SIGTERM'));
 
-  if (fs.existsSync(STATE_FILE)) {
-    state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-  }
-
+  const checkpoint = await checkpointStore.load();
   const latestLedger = await getLatestLedger();
-  const startLedger = state.lastLedger || (latestLedger - 10000); // Index last 10k ledgers if fresh start
+  const startLedger = checkpoint?.lastLedger || latestLedger - FRESH_START_LOOKBACK;
 
+  console.log(
+    `Resuming from checkpoint ledger=${checkpoint?.lastLedger ?? 'none'} pagingToken=${checkpoint?.lastPagingToken ?? 'none'}`
+  );
   console.log(`Polling events from ledger ${startLedger} to ${latestLedger}`);
 
   try {
-    const response = await server.getEvents({
-      startLedger: startLedger,
-      filters: [
-        {
-          type: 'contract',
-          contractIds: [CONTRACT_ID],
-        },
-      ],
-      limit: 100,
-    });
-
-    const newEvents: ContractEvent[] = response.events.map((event) => {
-      // Soroban events have topics and value
-      // Topic 0: Version (u32)
-      // Topic 1: Symbol (deposit/withdraw)
-      // Topic 2: Address (actor)
-      // Value: i128 (amount)
-      
-      const topics = event.topic.map(t => scValToNative(t));
-      const value = scValToNative(event.value);
-      
-      const typeStr = topics[1] as string;
-      const actor = topics[2] as string;
-      const eventType: 'deposit' | 'withdraw' = typeStr === 'withdraw' ? 'withdraw' : 'deposit';
-      const contractId = typeof event.contractId === 'string' ? event.contractId : (event.contractId as any)?.id || CONTRACT_ID;
-      
-      return {
-        id: event.id,
-        type: eventType,
-        contractId: String(contractId),
-        ledger: event.ledger,
-        ledgerClosedAt: event.ledgerClosedAt,
-        txHash: event.txHash,
-        actor: actor,
-        amount: String(value),
-        version: Number(topics[0]) || 1
-      };
-    }).filter(e => e.type === 'deposit' || e.type === 'withdraw');
-
-    if (newEvents.length > 0) {
-      console.log(`Found ${newEvents.length} new events.`);
-      
-      let existingEvents: ContractEvent[] = [];
-      if (fs.existsSync(EVENTS_FILE)) {
-        existingEvents = JSON.parse(fs.readFileSync(EVENTS_FILE, 'utf8'));
-      }
-
-      // Merge and deduplicate by ID
-      const eventMap = new Map();
-      existingEvents.forEach(e => eventMap.set(e.id, e));
-      newEvents.forEach(e => eventMap.set(e.id, e));
-      
-      const mergedEvents = Array.from(eventMap.values())
-        .sort((a, b) => b.ledger - a.ledger); // Newest first
-
-      fs.writeFileSync(EVENTS_FILE, JSON.stringify(mergedEvents, null, 2));
+    // Bounded, resumable backfill for any gap between the checkpoint and the
+    // live tip. Backfill never overwrites newer canonical events.
+    if (latestLedger - startLedger > 0) {
+      await backfill.run({ fromLedger: startLedger, toLedger: latestLedger });
     }
 
-    // Update state
-    state.lastLedger = latestLedger;
-    state.updatedAt = new Date().toISOString();
-    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+    if (!cancelled) {
+      await indexer.ingestOnce();
+    }
+
+    const state = (await checkpointStore.load()) ?? {
+      lastPagingToken: '0',
+      lastLedger: 0,
+      updatedAt: new Date().toISOString(),
+    };
 
     // -----------------------------------------------------------------------
     // Evaluate observability conditions and reconcile alerts (issue #121).
@@ -373,9 +424,10 @@ async function indexEvents() {
     reconcileAlerts(alertState, conditions);
     saveAlertState(alertState);
 
-    console.log('Indexing complete.');
+    console.log(cancelled ? 'Indexing cancelled cleanly.' : 'Indexing complete.');
   } catch (error) {
     console.error('Error indexing events:', error);
+    process.exitCode = 1;
   }
 }
 
@@ -402,4 +454,7 @@ function readAgeFile(file: string): number {
 }
 
 // Run indexing
-indexEvents().catch(console.error);
+indexEvents().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

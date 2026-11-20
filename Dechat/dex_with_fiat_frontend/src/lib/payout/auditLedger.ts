@@ -14,7 +14,10 @@ export type PayoutAuditAction =
   | 'retry_exhausted'
   | 'dead_letter_moved'
   | 'dead_letter_replayed'
-  | 'operator_intervention';
+  | 'operator_intervention'
+  | 'indexer_reorg_detected'
+  | 'indexer_reorg_repaired'
+  | 'indexer_backfill_event';
 
 export interface PayoutAuditEntry {
   id: string;

@@ -4,11 +4,84 @@ import { useState, useEffect, useCallback } from 'react';
 import { ReconciliationRecord } from '../../../types';
 import AdminGuard from '@/components/AdminGuard';
 
+interface ReconciliationTotals {
+  unresolvedCount: number;
+  amountAtRisk: number;
+  currency: string;
+}
+
+interface ReconciliationResponse {
+  records: ReconciliationRecord[];
+  totals?: ReconciliationTotals;
+  verifiedTotals?: ReconciliationTotals;
+}
+
+const RUNBOOK_BASE_URL = '/docs/runbooks/reconciliation';
+
+function getRunbookUrl(status: string): string {
+  switch (status) {
+    case 'unmatched':
+      return `${RUNBOOK_BASE_URL}#unmatched-payout`;
+    case 'error':
+      return `${RUNBOOK_BASE_URL}#payout-error`;
+    default:
+      return `${RUNBOOK_BASE_URL}#overview`;
+  }
+}
+
+function getNextAction(record: ReconciliationRecord): string {
+  if (record.status === 'matched') {
+    return 'No action required';
+  }
+  if (record.status === 'error') {
+    return 'Investigate payout error and retry or refund';
+  }
+  if (!record.payoutId) {
+    return 'Initiate payout for unmatched deposit';
+  }
+  return 'Reconcile deposit against payout';
+}
+
+function getAgeInHours(date: string): number {
+  const parsed = new Date(date).getTime();
+  if (Number.isNaN(parsed)) {
+    return 0;
+  }
+  return Math.max(0, (Date.now() - parsed) / (1000 * 60 * 60));
+}
+
+function formatAge(hours: number): string {
+  if (hours < 1) {
+    return `${Math.round(hours * 60)}m`;
+  }
+  if (hours < 48) {
+    return `${Math.round(hours)}h`;
+  }
+  return `${Math.round(hours / 24)}d`;
+}
+
+function totalsMismatch(
+  displayed: ReconciliationTotals | undefined,
+  verified: ReconciliationTotals | undefined,
+): boolean {
+  if (!displayed || !verified) {
+    return false;
+  }
+  return (
+    displayed.unresolvedCount !== verified.unresolvedCount ||
+    Math.abs(displayed.amountAtRisk - verified.amountAtRisk) > 0.000001
+  );
+}
+
 export default function ReconciliationDashboard() {
   const [records, setRecords] = useState<ReconciliationRecord[]>([]);
   const [filteredRecords, setFilteredRecords] = useState<
     ReconciliationRecord[]
   >([]);
+  const [totals, setTotals] = useState<ReconciliationTotals | undefined>();
+  const [verifiedTotals, setVerifiedTotals] = useState<
+    ReconciliationTotals | undefined
+  >();
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [startDate, setStartDate] = useState<string>('');
   const [endDate, setEndDate] = useState<string>('');
@@ -32,8 +105,17 @@ export default function ReconciliationDashboard() {
       }
       
       if (response.ok) {
-        const data = await response.json();
-        setRecords(data);
+        const data: ReconciliationResponse | ReconciliationRecord[] =
+          await response.json();
+        if (Array.isArray(data)) {
+          setRecords(data);
+          setTotals(undefined);
+          setVerifiedTotals(undefined);
+        } else {
+          setRecords(data.records ?? []);
+          setTotals(data.totals);
+          setVerifiedTotals(data.verifiedTotals);
+        }
       } else {
         console.error('Failed to fetch data');
       }
@@ -83,6 +165,11 @@ export default function ReconciliationDashboard() {
       'Payout Status',
       'Payout Date',
       'Status',
+      'Age (hours)',
+      'Amount At Risk',
+      'Next Action',
+      'Source Evidence',
+      'Runbook URL',
     ];
 
     const csvContent = [
@@ -100,6 +187,11 @@ export default function ReconciliationDashboard() {
           record.payoutStatus,
           record.payoutDate,
           record.status,
+          getAgeInHours(record.depositDate).toFixed(2),
+          record.status === 'matched' ? 0 : record.depositAmount,
+          `"${getNextAction(record)}"`,
+          `"${record.sourceEvidence ?? record.depositTxHash}"`,
+          getRunbookUrl(record.status),
         ].join(','),
       ),
     ].join('\n');
@@ -140,6 +232,59 @@ export default function ReconciliationDashboard() {
         <h1 className="text-3xl font-bold text-gray-900 dark:text-white mb-8">
           Admin Reconciliation Dashboard
         </h1>
+
+        {totalsMismatch(totals, verifiedTotals) && (
+          <div
+            role="alert"
+            className="mb-8 rounded-lg border border-red-300 bg-red-50 p-4 text-sm text-red-800 dark:border-red-700 dark:bg-red-900/40 dark:text-red-200"
+          >
+            <p className="font-semibold">
+              Displayed totals do not match database-verified totals.
+            </p>
+            <p className="mt-1">
+              Displayed: {totals?.unresolvedCount ?? 0} unresolved /{' '}
+              {totals?.amountAtRisk ?? 0} {totals?.currency ?? 'XLM'} at risk.
+              Verified: {verifiedTotals?.unresolvedCount ?? 0} unresolved /{' '}
+              {verifiedTotals?.amountAtRisk ?? 0}{' '}
+              {verifiedTotals?.currency ?? 'XLM'} at risk.
+            </p>
+            <a
+              href={`${RUNBOOK_BASE_URL}#totals-mismatch`}
+              className="mt-2 inline-block font-medium underline"
+            >
+              Follow the totals mismatch runbook
+            </a>
+          </div>
+        )}
+
+        {/* SLO Summary */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+            <div className="text-sm font-medium text-gray-500 dark:text-gray-400">
+              Unresolved Payouts
+            </div>
+            <div className="mt-1 text-2xl font-bold text-gray-900 dark:text-white">
+              {totals?.unresolvedCount ?? 0}
+            </div>
+          </div>
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+            <div className="text-sm font-medium text-gray-500 dark:text-gray-400">
+              Amount At Risk
+            </div>
+            <div className="mt-1 text-2xl font-bold text-gray-900 dark:text-white">
+              {totals?.amountAtRisk ?? 0} {totals?.currency ?? 'XLM'}
+            </div>
+          </div>
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+            <div className="text-sm font-medium text-gray-500 dark:text-gray-400">
+              DB-Verified Amount At Risk
+            </div>
+            <div className="mt-1 text-2xl font-bold text-gray-900 dark:text-white">
+              {verifiedTotals?.amountAtRisk ?? 0}{' '}
+              {verifiedTotals?.currency ?? 'XLM'}
+            </div>
+          </div>
+        </div>
 
         {/* Filters */}
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 mb-8">
@@ -222,6 +367,18 @@ export default function ReconciliationDashboard() {
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
                     Status
                   </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                    Age
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                    Amount At Risk
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                    Next Action
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                    Source Evidence
+                  </th>
                 </tr>
               </thead>
               <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
@@ -292,6 +449,31 @@ export default function ReconciliationDashboard() {
                           </span>
                         </div>
                       )}
+                      {record.status !== 'matched' && (
+                        <div className="mt-1">
+                          <a
+                            href={getRunbookUrl(record.status)}
+                            className="text-xs font-medium text-blue-600 underline dark:text-blue-400"
+                          >
+                            Runbook
+                          </a>
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
+                      {formatAge(getAgeInHours(record.depositDate))}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
+                      {record.status === 'matched' ? 0 : record.depositAmount}{' '}
+                      XLM
+                    </td>
+                    <td className="px-6 py-4 text-sm text-gray-900 dark:text-white">
+                      {getNextAction(record)}
+                    </td>
+                    <td className="px-6 py-4 text-sm text-gray-500 dark:text-gray-400">
+                      <div className="font-mono break-all">
+                        {record.sourceEvidence ?? record.depositTxHash}
+                      </div>
                     </td>
                   </tr>
                 ))}
