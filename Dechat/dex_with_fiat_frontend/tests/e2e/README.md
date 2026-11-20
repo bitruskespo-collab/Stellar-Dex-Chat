@@ -68,10 +68,54 @@ The tests use mocked Freighter wallet API to simulate:
 - Network detection
 - Error scenarios
 
+## Deterministic full-stack fixture (issue #268)
+
+A seed-driven fixture harness provides reproducible contract state, ledger
+events, provider responses, and wallet identities for every E2E run.
+
+**How it works:**
+
+```
+E2E_FIXTURE_SEED=my-seed pnpm test:e2e
+```
+
+Playwright's `globalSetup` (`tests/e2e/fixtures/global-setup.ts`) generates
+the fixture before any test runs and writes it to a temp file.  Individual
+specs import it via `loadFixture()`.  `globalTeardown` removes the temp file
+even when tests fail.
+
+**Key fixture helpers:**
+
+```ts
+import { loadFixture } from './fixtures/global-setup';
+import { generateFixture, defaultFixture } from './fixtures/generator';
+
+const f = loadFixture();              // fixture for the current run
+const custom = generateFixture('my-seed'); // new fixture from explicit seed
+```
+
+The fixture carries:
+- `wallets` — five deterministic Stellar `G…` addresses (no secret keys)
+- `ledgerHistory` — 18 ledgers covering all golden_events families + boundary cases
+- `contractState` — accounting snapshot with escrow invariants
+- `provider` — normal-path + 6 failure-scenario Paystack mock responses
+- `rpc` — Soroban RPC mock responses
+
+See [`tests/e2e/fixtures/README.md`](./fixtures/README.md) for the full reference.
+
+**Reproducing a failure:**
+
+If a test fails, the seed is printed in the setup log:
+```
+[e2e-setup] Fixture generated (seed="ci-run", ...)
+```
+Re-run with `E2E_FIXTURE_SEED=ci-run pnpm test:e2e` to reproduce it exactly.
+
 ## Acceptance Criteria Met
 
 ✅ **Add e2e test for connect wallet UI path**
 ✅ **Add e2e test for deposit modal validation and success state**
 ✅ **Add e2e test for payout form and mocked transfer initiation**
+✅ **Deterministic full-stack fixture with seeded ledger history (issue #268)**
 
 All tests provide clear validation output and cover both success and error scenarios for each feature.
