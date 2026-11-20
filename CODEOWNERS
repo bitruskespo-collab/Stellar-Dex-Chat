@@ -4,3 +4,5 @@
 # protection's "require review from Code Owners" setting (see
 # docs/branch-protection.md) routes reviews to the right people.
 * @leojay-net
+.github/secret-scan-exceptions.json @leojay-net
+.github/secret-scan-exceptions.schema.json @leojay-net

@@ -56,9 +56,36 @@ Breaking changes must be called out explicitly in the pull request description,
 including the old and new signatures, so reviewers can confirm the versioning
 policy was applied.
 
+## Secret scanning
+
+A zero-disclosure secret scan runs on every pull request, weekly security audit,
+and published release. Run it locally before pushing:
+
+```sh
+make secret-scan-test
+make secret-scan
+make secret-scan-staged
+```
+
+Add only synthetic credentials to tests, and construct them at runtime (for
+example, by concatenating characters) so no complete credential-like string is
+committed. Never add real credentials or real user data to fixtures.
+
+Verified false positives may be suppressed through
+`.github/secret-scan-exceptions.json` using the reported SHA-256 fingerprint.
+Each exception must name an approver from `allowedOwners`, include approval and
+expiry dates within `maxExpiryDays` (90 days by default), and explain why the
+match is safe. The exception policy and its schema are CODEOWNERS-protected, and
+expired exceptions fail CI.
+
+Scan reports never contain detected values. See
+[`docs/operations/secret-scanning.md`](docs/operations/secret-scanning.md) and
+`SECURITY.md` for the full policy and leak response steps.
+
 ## Pull request checklist
 
 - [ ] Contract interface changes include regenerated bindings.
 - [ ] The CI drift check passes with no ABI diff.
 - [ ] Breaking changes are documented and versioned as described above.
 - [ ] Regeneration left unrelated files unchanged.
+- [ ] Secret scan passes and no real credentials were added to fixtures.

@@ -8,4 +8,5 @@ if [ -n "$FILES" ]; then
   done
 fi
 
+python3 tools/secret_scanner.py --staged || exit 1
 npx lint-staged

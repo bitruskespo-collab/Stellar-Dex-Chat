@@ -102,3 +102,9 @@ Run after every restore, in the isolated environment:
   owner and due date. Open remediation items are reviewed at the start of each
   subsequent drill; a drill is not considered closed until prior action items
   are resolved or explicitly re-scoped.
+
+## Secret scanning
+
+Release-time secret detection, exception handling, and leak response steps are
+documented in [secret-scanning.md](secret-scanning.md). The scan runs on pull
+requests, weekly security audits, and published releases.

@@ -86,6 +86,39 @@ Security upgrades follow the normal review and test gates. Dependency bumps are 
 - Follow the principle of least privilege
 - Audit smart contracts before deployment
 
+## Secret Scanning & Leak Response
+
+Secret detection runs on pull requests, weekly security audits, and published
+releases. It covers the committed tree, environment example files, added lines
+in PR commits, and release assets such as SBOMs, provenance records, and
+archives.
+
+Scan output contains rule ids, locations, SHA-256 fingerprints, and redacted
+value lengths only. Detected values are discarded after fingerprinting and are
+never printed to stdout, stderr, JSON reports, or CI logs.
+
+False positives require an owner-approved, expiring exception in
+`.github/secret-scan-exceptions.json`. Exceptions store fingerprints, an
+approver from `allowedOwners`, approval and expiry dates, and a justification;
+they never store plaintext values. Exceptions expire after at most 90 days by
+default, and expired exceptions fail the scan. Changes to the exception policy
+require CODEOWNERS review.
+
+If a genuine credential is found:
+
+1. **Contain** — revoke it at the provider immediately; do not rely on history
+   rewriting.
+2. **Rotate** — issue a least-privilege replacement and update secret storage.
+3. **Verify** — confirm the old credential is inactive and review provider logs
+   for the exposure window.
+4. **Document** — record the incident without pasting the value into issues or
+   PRs.
+5. **Recover** — only verified false positives may be added as fingerprint-based
+   exceptions with an expiry date.
+
+Full CLI usage, exception rules, and incident procedures are in
+[`docs/operations/secret-scanning.md`](docs/operations/secret-scanning.md).
+
 ### Acknowledgments
 
 We appreciate responsible disclosure and will acknowledge security researchers who help improve the security of this project (with their permission).
