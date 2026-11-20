@@ -1,0 +1,400 @@
+name: Staged Contract Deployment
+
+# ── Overview ──────────────────────────────────────────────────────────────────
+#
+# Issue #283 — Staged contract deployment with preflight and post-deploy
+# verification.  Automates:
+#
+#   preflight        — network/config checks, WASM digest pin, signer quorum,
+#                      admin/oracle identity reads.  Fails fast on any error.
+#   deploy           — stellar contract deploy (skipped when re-verify mode is
+#                      used or dry-run input is set).
+#   post-deploy      — read-only canary probes (admin, oracle, pause state,
+#                      circuit breaker).  Fails fast on any error.
+#   write-gate       — sets the `write_enabled` output consumed by downstream
+#                      deployment jobs.  Fails the run if either stage failed.
+#
+# Triggering:
+#   push to release/** — automatic staged deployment
+#   workflow_dispatch  — manual with full option surface
+#   workflow_call      — reusable by deploy-futurenet.yml and future pipelines
+#
+# ── Financial-safety note ─────────────────────────────────────────────────────
+#
+# This workflow only issues READ-ONLY Stellar CLI calls after the deploy step.
+# No state-changing contract method is invoked by the verification stages.
+# The write-enable gate is a local exit-code signal; it never mutates contract
+# state to enable or disable writes.
+
+on:
+  push:
+    branches:
+      - 'release/**'
+    paths:
+      - 'Dechat/stellar-contracts/**'
+      - '.github/workflows/staged-deploy.yml'
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'Target network profile (local | testnet | futurenet | production)'
+        required: false
+        default: 'testnet'
+      dry_run:
+        description: 'Dry-run: run all checks but do not submit the deploy transaction'
+        required: false
+        default: 'true'
+        type: choice
+        options: ['true', 'false']
+      expected_wasm_digest:
+        description: 'Expected sha256 hex digest of the WASM artifact (leave blank to skip pin check)'
+        required: false
+        default: ''
+      expected_admin:
+        description: 'Expected on-chain admin address (leave blank to skip identity check)'
+        required: false
+        default: ''
+      expected_oracle:
+        description: 'Expected on-chain oracle address (leave blank to skip oracle check)'
+        required: false
+        default: ''
+      contract_id:
+        description: 'Existing contract ID for re-verification (skips deploy step)'
+        required: false
+        default: ''
+      override_reason:
+        description: 'Override reason (downgrades failures to warnings — audited in job summary)'
+        required: false
+        default: ''
+  workflow_call:
+    inputs:
+      profile:
+        description: 'Target network profile'
+        required: false
+        default: 'testnet'
+        type: string
+      dry_run:
+        required: false
+        default: 'false'
+        type: string
+      expected_wasm_digest:
+        required: false
+        default: ''
+        type: string
+      expected_admin:
+        required: false
+        default: ''
+        type: string
+      expected_oracle:
+        required: false
+        default: ''
+        type: string
+      contract_id:
+        required: false
+        default: ''
+        type: string
+      override_reason:
+        required: false
+        default: ''
+        type: string
+    outputs:
+      contract_id:
+        description: 'Deployed contract ID (empty on dry-run or error)'
+        value: ${{ jobs.deploy.outputs.contract_id }}
+      wasm_digest:
+        description: 'SHA-256 digest of the deployed WASM'
+        value: ${{ jobs.preflight.outputs.wasm_digest }}
+      write_enabled:
+        description: 'true when all preflight and post-deploy checks passed'
+        value: ${{ jobs.write-gate.outputs.write_enabled }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staged-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PROFILE: ${{ inputs.profile || 'testnet' }}
+
+# ── Job 1: Preflight ───────────────────────────────────────────────────────────
+jobs:
+  preflight:
+    name: Preflight checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    outputs:
+      wasm_digest:  ${{ steps.build.outputs.wasm_digest }}
+      wasm_path:    ${{ steps.build.outputs.wasm_path }}
+      checks_pass:  ${{ steps.run-preflight.outputs.checks_pass }}
+
+    defaults:
+      run:
+        working-directory: Dechat/stellar-contracts
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable
+        with:
+          toolchain: stable
+          targets: wasm32v1-none
+
+      - name: Cache Cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            Dechat/stellar-contracts/target
+          key: ${{ runner.os }}-cargo-staged-${{ hashFiles('Dechat/stellar-contracts/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-staged-
+
+      - name: Install Stellar CLI
+        run: cargo install --locked stellar-cli --version 28.0.0
+
+      - name: Build optimised WASM
+        id: build
+        run: |
+          set -euo pipefail
+          stellar contract build
+          WASM_PATH=$(find target -name '*.optimized.wasm' -path '*release*' | head -n 1)
+          if [ -z "$WASM_PATH" ]; then
+            WASM_PATH=$(find target -name '*.wasm' -path '*release*' | head -n 1)
+          fi
+          if [ -z "$WASM_PATH" ] || [ ! -s "$WASM_PATH" ]; then
+            echo "::error::No release WASM found after build"
+            exit 1
+          fi
+          DIGEST=$(sha256sum "$WASM_PATH" | awk '{print $1}')
+          echo "wasm_path=$WASM_PATH"             >> "$GITHUB_OUTPUT"
+          echo "wasm_digest=sha256:${DIGEST}"     >> "$GITHUB_OUTPUT"
+          echo "## 🔧 WASM Build" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Artifact | \`$(basename "$WASM_PATH")\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| SHA-256 | \`${DIGEST}\` |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wasm-staged-${{ github.sha }}
+          path: Dechat/stellar-contracts/${{ steps.build.outputs.wasm_path }}
+          retention-days: 30
+
+      - name: Run staged preflight checks
+        id: run-preflight
+        env:
+          STELLAR_ADMIN_SECRET_KEY: ${{ secrets.STELLAR_ADMIN_SECRET_KEY }}
+          EXPECTED_DIGEST:  ${{ inputs.expected_wasm_digest || '' }}
+          EXPECTED_ADMIN:   ${{ inputs.expected_admin || '' }}
+          EXPECTED_ORACLE:  ${{ inputs.expected_oracle || '' }}
+          OVERRIDE_REASON:  ${{ inputs.override_reason || '' }}
+          DRY_RUN:          ${{ inputs.dry_run || 'true' }}
+        run: |
+          set -euo pipefail
+          DIGEST_ARG=""
+          [ -n "$EXPECTED_DIGEST" ] && DIGEST_ARG="--expected-digest $EXPECTED_DIGEST"
+          ADMIN_ARG=""
+          [ -n "$EXPECTED_ADMIN" ]  && ADMIN_ARG="--admin $EXPECTED_ADMIN"
+          ORACLE_ARG=""
+          [ -n "$EXPECTED_ORACLE" ] && ORACLE_ARG="--oracle $EXPECTED_ORACLE"
+          OVERRIDE_ARG=""
+          [ -n "$OVERRIDE_REASON" ] && OVERRIDE_ARG="--override-reason '$OVERRIDE_REASON'"
+
+          bash scripts/staged_deploy.sh \
+            --profile   "${{ env.PROFILE }}" \
+            --wasm      "${{ steps.build.outputs.wasm_path }}" \
+            --dry-run \
+            --skip-post-deploy \
+            $DIGEST_ARG $ADMIN_ARG $ORACLE_ARG $OVERRIDE_ARG \
+            && echo "checks_pass=true" >> "$GITHUB_OUTPUT" \
+            || { echo "checks_pass=false" >> "$GITHUB_OUTPUT"; exit 1; }
+
+  # ── Job 2: Deploy ────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy contract
+    runs-on: ubuntu-latest
+    needs: preflight
+    permissions:
+      contents: read
+
+    outputs:
+      contract_id: ${{ steps.deploy-or-skip.outputs.contract_id }}
+
+    defaults:
+      run:
+        working-directory: Dechat/stellar-contracts
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download WASM artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v4
+        with:
+          name: wasm-staged-${{ github.sha }}
+          path: Dechat/stellar-contracts/target/release
+
+      - name: Install Stellar CLI
+        run: |
+          # Already cached in preflight job via cargo; install quickly
+          cargo install --locked stellar-cli --version 28.0.0 2>/dev/null || true
+          stellar --version
+
+      - name: Deploy or use existing contract ID
+        id: deploy-or-skip
+        env:
+          STELLAR_ADMIN_SECRET_KEY: ${{ secrets.STELLAR_ADMIN_SECRET_KEY }}
+          EXISTING_CONTRACT_ID:     ${{ inputs.contract_id || '' }}
+          DRY_RUN:                  ${{ inputs.dry_run || 'true' }}
+          OVERRIDE_REASON:          ${{ inputs.override_reason || '' }}
+        run: |
+          set -euo pipefail
+
+          WASM_FILE=$(find target/release -name '*.wasm' | head -n 1)
+
+          if [ -n "$EXISTING_CONTRACT_ID" ]; then
+            echo "Re-verify mode: using existing contract $EXISTING_CONTRACT_ID"
+            echo "contract_id=$EXISTING_CONTRACT_ID" >> "$GITHUB_OUTPUT"
+          elif [ "$DRY_RUN" = "true" ]; then
+            echo "Dry-run: skipping deploy transaction."
+            echo "contract_id=" >> "$GITHUB_OUTPUT"
+          else
+            OVERRIDE_ARG=""
+            [ -n "$OVERRIDE_REASON" ] && OVERRIDE_ARG="--override-reason '$OVERRIDE_REASON'"
+
+            bash scripts/staged_deploy.sh \
+              --profile   "${{ env.PROFILE }}" \
+              --wasm      "$WASM_FILE" \
+              --skip-post-deploy \
+              $OVERRIDE_ARG
+
+            # Read the contract ID written by staged_deploy.sh
+            CID=$(cat "contract_id_${{ env.PROFILE }}.txt" 2>/dev/null || true)
+            echo "contract_id=$CID" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ -n "$(cat 'contract_id_${{ env.PROFILE }}.txt' 2>/dev/null || true)" ]; then
+            echo "## 🚀 Deployed Contract" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Contract ID | \`$(cat 'contract_id_${{ env.PROFILE }}.txt')\` |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # ── Job 3: Post-deploy verification ───────────────────────────────────────────
+  post-deploy:
+    name: Post-deploy verification
+    runs-on: ubuntu-latest
+    needs: [preflight, deploy]
+    permissions:
+      contents: read
+
+    outputs:
+      post_checks_pass: ${{ steps.run-post-deploy.outputs.post_checks_pass }}
+      config_hash:      ${{ steps.run-post-deploy.outputs.config_hash }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Stellar CLI
+        working-directory: Dechat/stellar-contracts
+        run: |
+          cargo install --locked stellar-cli --version 28.0.0 2>/dev/null || true
+          stellar --version
+
+      - name: Run post-deploy read-only verification probes
+        id: run-post-deploy
+        working-directory: Dechat/stellar-contracts
+        env:
+          STELLAR_ADMIN_SECRET_KEY: ${{ secrets.STELLAR_ADMIN_SECRET_KEY }}
+          CONTRACT_ID:              ${{ needs.deploy.outputs.contract_id }}
+          EXPECTED_ADMIN:           ${{ inputs.expected_admin || '' }}
+          EXPECTED_ORACLE:          ${{ inputs.expected_oracle || '' }}
+          OVERRIDE_REASON:          ${{ inputs.override_reason || '' }}
+          WASM_DIGEST:              ${{ needs.preflight.outputs.wasm_digest }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$CONTRACT_ID" ]; then
+            echo "No contract ID available (dry-run or deploy skipped). Skipping post-deploy probes."
+            echo "post_checks_pass=skip" >> "$GITHUB_OUTPUT"
+            echo "⚠️ Post-deploy probes skipped (no contract ID)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          ADMIN_ARG=""
+          [ -n "$EXPECTED_ADMIN" ]  && ADMIN_ARG="--admin $EXPECTED_ADMIN"
+          ORACLE_ARG=""
+          [ -n "$EXPECTED_ORACLE" ] && ORACLE_ARG="--oracle $EXPECTED_ORACLE"
+          OVERRIDE_ARG=""
+          [ -n "$OVERRIDE_REASON" ] && OVERRIDE_ARG="--override-reason '$OVERRIDE_REASON'"
+
+          bash scripts/staged_deploy.sh \
+            --profile     "${{ env.PROFILE }}" \
+            --contract-id "$CONTRACT_ID" \
+            $ADMIN_ARG $ORACLE_ARG $OVERRIDE_ARG \
+            && echo "post_checks_pass=true"  >> "$GITHUB_OUTPUT" \
+            || { echo "post_checks_pass=false" >> "$GITHUB_OUTPUT"; exit 1; }
+
+  # ── Job 4: Write-enable gate ──────────────────────────────────────────────────
+  write-gate:
+    name: Write-enable gate
+    runs-on: ubuntu-latest
+    needs: [preflight, deploy, post-deploy]
+    if: always()
+    permissions:
+      contents: read
+
+    outputs:
+      write_enabled: ${{ steps.gate.outputs.write_enabled }}
+
+    steps:
+      - name: Evaluate write-enable gate
+        id: gate
+        env:
+          PREFLIGHT_PASS:   ${{ needs.preflight.outputs.checks_pass }}
+          POST_DEPLOY_PASS: ${{ needs.post-deploy.outputs.post_checks_pass }}
+          CONTRACT_ID:      ${{ needs.deploy.outputs.contract_id }}
+          WASM_DIGEST:      ${{ needs.preflight.outputs.wasm_digest }}
+          PROFILE:          ${{ env.PROFILE }}
+          OVERRIDE_REASON:  ${{ inputs.override_reason || '' }}
+        run: |
+          set -euo pipefail
+
+          WRITE_ENABLED=false
+
+          if [ "$PREFLIGHT_PASS" = "true" ] && \
+             ( [ "$POST_DEPLOY_PASS" = "true" ] || [ "$POST_DEPLOY_PASS" = "skip" ] ); then
+            WRITE_ENABLED=true
+          fi
+
+          echo "write_enabled=$WRITE_ENABLED" >> "$GITHUB_OUTPUT"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "## 🚦 Write-Enable Gate" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Profile | \`$PROFILE\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Contract ID | \`${CONTRACT_ID:-none}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| WASM digest | \`${WASM_DIGEST:-unknown}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Preflight | ${PREFLIGHT_PASS} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Post-deploy | ${POST_DEPLOY_PASS} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Write enabled** | **${WRITE_ENABLED}** |" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$OVERRIDE_REASON" ]; then
+            echo "| Override reason | \`${OVERRIDE_REASON}\` |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "$WRITE_ENABLED" = "true" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "✅ **Write gate OPEN — frontend writes are enabled.**" >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice::Staged deployment passed. Frontend writes are enabled for contract ${CONTRACT_ID:-unknown} on ${PROFILE}."
+          else
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "❌ **Write gate CLOSED — frontend writes are BLOCKED.**" >> "$GITHUB_STEP_SUMMARY"
+            echo "_See \`docs/operations/staged-deployment.md\` for the recovery runbook._" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Staged deployment write gate is CLOSED. See job summary for details."
+            exit 1
+          fi
