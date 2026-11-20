@@ -22,6 +22,158 @@ interface IndexerState {
   updatedAt: string;
 }
 
+// ---------------------------------------------------------------------------
+// Projection schema versioning + safe rebuilds (issue #245)
+//
+// The active projection file is only ever replaced atomically, after a shadow
+// projection has been fully written, versioned, checksummed and validated. A
+// failed validation leaves the active file untouched so consumers never observe
+// a partially rebuilt event index.
+// ---------------------------------------------------------------------------
+const PROJECTION_SCHEMA_VERSION = 1;
+
+interface ProjectionFile {
+  schemaVersion: number;
+  checksum: string;
+  count: number;
+  generatedAt: string;
+  events: ContractEvent[];
+}
+
+// Deterministic checksum over the projection payload (schema version + events).
+// Uses a stable key ordering so the same logical projection always hashes the
+// same regardless of insertion order.
+function computeProjectionChecksum(schemaVersion: number, events: ContractEvent[]): string {
+  const canonical = JSON.stringify({
+    schemaVersion,
+    events: events.map(e => ({
+      id: e.id,
+      type: e.type,
+      contractId: e.contractId,
+      ledger: e.ledger,
+      ledgerClosedAt: e.ledgerClosedAt,
+      txHash: e.txHash,
+      actor: e.actor,
+      amount: e.amount,
+      token: e.token ?? null,
+      version: e.version,
+    })),
+  });
+  // FNV-1a 32-bit, hex encoded. Sufficient for corruption/partial-write detection.
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < canonical.length; i++) {
+    hash ^= canonical.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, '0');
+}
+
+// Reads the active projection, tolerating both the legacy bare-array format and
+// the versioned envelope. Returns null when the file is absent or unreadable.
+function readProjection(file: string): { events: ContractEvent[]; schemaVersion: number | null } | null {
+  if (!fs.existsSync(file)) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (Array.isArray(parsed)) {
+      return { events: parsed as ContractEvent[], schemaVersion: null };
+    }
+    if (parsed && Array.isArray(parsed.events)) {
+      return { events: parsed.events as ContractEvent[], schemaVersion: Number(parsed.schemaVersion) || null };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function buildProjection(events: ContractEvent[]): ProjectionFile {
+  return {
+    schemaVersion: PROJECTION_SCHEMA_VERSION,
+    checksum: computeProjectionChecksum(PROJECTION_SCHEMA_VERSION, events),
+    count: events.length,
+    generatedAt: new Date().toISOString(),
+    events,
+  };
+}
+
+// Validates a freshly built shadow projection against the previous active
+// projection. Rejects partial writes, checksum mismatches, and rebuilds that
+// would silently drop previously indexed events.
+function validateShadowProjection(
+  shadow: ProjectionFile,
+  previous: { events: ContractEvent[]; schemaVersion: number | null } | null
+): { ok: true } | { ok: false; reason: string } {
+  if (shadow.schemaVersion !== PROJECTION_SCHEMA_VERSION) {
+    return { ok: false, reason: `schema version mismatch: ${shadow.schemaVersion} != ${PROJECTION_SCHEMA_VERSION}` };
+  }
+  if (shadow.count !== shadow.events.length) {
+    return { ok: false, reason: `count mismatch: header ${shadow.count} != events ${shadow.events.length}` };
+  }
+  const expected = computeProjectionChecksum(shadow.schemaVersion, shadow.events);
+  if (shadow.checksum !== expected) {
+    return { ok: false, reason: `checksum mismatch: ${shadow.checksum} != ${expected}` };
+  }
+  const ids = new Set<string>();
+  for (const e of shadow.events) {
+    if (!e || typeof e.id !== 'string' || !e.id) {
+      return { ok: false, reason: 'event missing id' };
+    }
+    if (ids.has(e.id)) {
+      return { ok: false, reason: `duplicate event id ${e.id}` };
+    }
+    ids.add(e.id);
+  }
+  if (previous) {
+    for (const prev of previous.events) {
+      if (!ids.has(prev.id)) {
+        return { ok: false, reason: `rebuild would drop previously indexed event ${prev.id}` };
+      }
+    }
+  }
+  return { ok: true };
+}
+
+// Writes the shadow projection, validates it, and only then atomically renames
+// it over the active file. On any failure the active file is left untouched.
+function commitProjectionAtomically(events: ContractEvent[]): boolean {
+  const shadowFile = path.join(DATA_DIR, 'contract-events.shadow.json');
+  const previous = readProjection(EVENTS_FILE);
+  const shadow = buildProjection(events);
+
+  try {
+    // Write the shadow file fully before any validation/rename.
+    fs.writeFileSync(shadowFile, JSON.stringify(shadow, null, 2));
+
+    // Re-read from disk to catch truncated/partial writes.
+    const onDisk = readProjection(shadowFile);
+    if (!onDisk || onDisk.schemaVersion !== PROJECTION_SCHEMA_VERSION) {
+      throw new Error('shadow projection unreadable after write');
+    }
+    const validation = validateShadowProjection(
+      { ...shadow, events: onDisk.events },
+      previous
+    );
+    if (!validation.ok) {
+      throw new Error(`shadow projection validation failed: ${validation.reason}`);
+    }
+
+    // Atomic swap: rename is atomic on the same filesystem, so consumers either
+    // see the old complete file or the new complete file, never a partial one.
+    fs.renameSync(shadowFile, EVENTS_FILE);
+    return true;
+  } catch (error) {
+    console.error('[projection] rebuild failed, keeping active projection:', error);
+    // Clean up the shadow file so a failed rebuild does not linger.
+    try {
+      if (fs.existsSync(shadowFile)) fs.unlinkSync(shadowFile);
+    } catch {
+      // best effort cleanup
+    }
+    return false;
+  }
+}
+=======
+
 // Config from env or defaults
 const RPC_URL = process.env.NEXT_PUBLIC_STELLAR_RPC_URL || 'https://soroban-testnet.stellar.org';
 const CONTRACT_ID = process.env.NEXT_PUBLIC_FIAT_BRIDGE_CONTRACT || 'CAWYXBN4PSVXD7NIYEWVFFIIIEUCC6PUN3IMG3J2WHKDB4NVIISMXBPR';
@@ -260,21 +412,24 @@ async function indexEvents() {
 
     if (newEvents.length > 0) {
       console.log(`Found ${newEvents.length} new events.`);
-      
-      let existingEvents: ContractEvent[] = [];
-      if (fs.existsSync(EVENTS_FILE)) {
-        existingEvents = JSON.parse(fs.readFileSync(EVENTS_FILE, 'utf8'));
-      }
+
+      const existing = readProjection(EVENTS_FILE);
+      const existingEvents: ContractEvent[] = existing ? existing.events : [];
 
       // Merge and deduplicate by ID
-      const eventMap = new Map();
+      const eventMap = new Map<string, ContractEvent>();
       existingEvents.forEach(e => eventMap.set(e.id, e));
       newEvents.forEach(e => eventMap.set(e.id, e));
-      
+
       const mergedEvents = Array.from(eventMap.values())
         .sort((a, b) => b.ledger - a.ledger); // Newest first
 
-      fs.writeFileSync(EVENTS_FILE, JSON.stringify(mergedEvents, null, 2));
+      // Build a versioned shadow projection, validate it, then atomically swap.
+      // On failure the active projection is preserved unchanged.
+      if (!commitProjectionAtomically(mergedEvents)) {
+        console.error('[projection] indexing aborted: active projection not updated');
+        return;
+      }
     }
 
     // Update state
@@ -294,9 +449,9 @@ async function indexEvents() {
     // Withdrawal queue: derived from indexed withdraw events that have not yet
     // been reconciled. Safe refs use event ids / tx hashes only.
     const withdrawals: WithdrawalRecord[] = [];
-    if (fs.existsSync(EVENTS_FILE)) {
-      const all: ContractEvent[] = JSON.parse(fs.readFileSync(EVENTS_FILE, 'utf8'));
-      for (const e of all) {
+    const activeProjection = readProjection(EVENTS_FILE);
+    if (activeProjection) {
+      for (const e of activeProjection.events) {
         if (e.type !== 'withdraw') continue;
         withdrawals.push({
           id: e.id,

@@ -63,10 +63,45 @@ export interface PaginatedPayoutAuditResult {
   hasMore: boolean;
 }
 
+/**
+ * Manifest describing a sealed archive partition. The manifest captures the
+ * sequence/hash boundary of the archived segment so that the hash chain can be
+ * verified across the hot/archive boundary even after the hot partition is
+ * trimmed.
+ */
+export interface PayoutAuditArchiveManifest {
+  archiveId: string;
+  partition: 'archive';
+  firstSequenceNumber: number;
+  lastSequenceNumber: number;
+  entryCount: number;
+  firstPreviousHash: string;
+  lastHash: string;
+  archivedAt: string;
+  fileName: string;
+}
+
+export interface ArchiveOptions {
+  /** Archive entries with sequenceNumber <= this value. */
+  upToSequenceNumber: number;
+  /** Override the archival timestamp (useful for deterministic tests). */
+  archivedAt?: string;
+}
+
+export interface ArchiveResult {
+  manifest: PayoutAuditArchiveManifest;
+  archivedCount: number;
+}
+
+const ARCHIVE_MANIFEST_FILE = 'payout_audit_archive_manifest.json';
+const ARCHIVE_DIR_NAME = 'archive';
+
 export class PayoutAuditLedger {
   private entries: PayoutAuditEntry[] = [];
   private storageFilePath: string | null = null;
+  private storageDir: string | null = null;
   private lastHash = '0'.repeat(64);
+  private archiveManifests: PayoutAuditArchiveManifest[] = [];
 
   constructor(storageDir?: string) {
     if (storageDir) {
@@ -81,8 +116,10 @@ export class PayoutAuditLedger {
       if (!fs.existsSync(storageDir)) {
         fs.mkdirSync(storageDir, { recursive: true });
       }
+      this.storageDir = storageDir;
       this.storageFilePath = path.join(storageDir, 'payout_audit_ledger.jsonl');
       this.loadFromFile();
+      this.loadArchiveManifests();
     } catch (err) {
       console.warn('Failed to initialize audit ledger storage:', err);
     }
@@ -116,6 +153,88 @@ export class PayoutAuditLedger {
     } catch (err) {
       console.warn('Failed to load audit ledger from file:', err);
     }
+  }
+
+  private getArchiveDir(): string | null {
+    if (!this.storageDir) return null;
+    return path.join(this.storageDir, ARCHIVE_DIR_NAME);
+  }
+
+  private getArchiveManifestPath(): string | null {
+    if (!this.storageDir) return null;
+    return path.join(this.storageDir, ARCHIVE_MANIFEST_FILE);
+  }
+
+  private loadArchiveManifests(): void {
+    const manifestPath = this.getArchiveManifestPath();
+    if (!manifestPath || !fs.existsSync(manifestPath)) {
+      return;
+    }
+
+    try {
+      const raw = fs.readFileSync(manifestPath, 'utf8');
+      const parsed = JSON.parse(raw) as PayoutAuditArchiveManifest[];
+      if (Array.isArray(parsed)) {
+        this.archiveManifests = parsed;
+      }
+    } catch (err) {
+      console.warn('Failed to load audit archive manifests:', err);
+    }
+  }
+
+  private persistArchiveManifests(): void {
+    const manifestPath = this.getArchiveManifestPath();
+    if (!manifestPath) return;
+
+    try {
+      fs.writeFileSync(
+        manifestPath,
+        JSON.stringify(this.archiveManifests, null, 2),
+        'utf8',
+      );
+    } catch (err) {
+      console.error('Failed to persist audit archive manifests:', err);
+    }
+  }
+
+  private readArchiveEntries(
+    manifest: PayoutAuditArchiveManifest,
+  ): PayoutAuditEntry[] {
+    const archiveDir = this.getArchiveDir();
+    if (!archiveDir) return [];
+
+    const filePath = path.join(archiveDir, manifest.fileName);
+    if (!fs.existsSync(filePath)) return [];
+
+    try {
+      const fileData = fs.readFileSync(filePath, 'utf8');
+      const loaded: PayoutAuditEntry[] = [];
+      for (const line of fileData.split('\n')) {
+        if (line.trim().length === 0) continue;
+        try {
+          loaded.push(JSON.parse(line) as PayoutAuditEntry);
+        } catch {
+          // Skip corrupted line
+        }
+      }
+      return loaded;
+    } catch (err) {
+      console.warn('Failed to read archived audit partition:', err);
+      return [];
+    }
+  }
+
+  /**
+   * All entries visible to queries: archived partitions (oldest first) followed
+   * by the hot partition. Sequence numbers remain contiguous across the
+   * boundary because archival never renumbers entries.
+   */
+  private getAllEntries(): PayoutAuditEntry[] {
+    const archived: PayoutAuditEntry[] = [];
+    for (const manifest of this.archiveManifests) {
+      archived.push(...this.readArchiveEntries(manifest));
+    }
+    return [...archived, ...this.entries];
   }
 
   private appendToFile(entry: PayoutAuditEntry): void {
@@ -192,13 +311,15 @@ export class PayoutAuditLedger {
   }
 
   /**
-   * Filter and paginate audit entries. Read-only.
+   * Filter and paginate audit entries across hot and archived partitions.
+   * Read-only. Cursor semantics (page/limit) are preserved across archival
+   * because the merged view keeps the original sequence ordering.
    */
   public getEntries(
     filter?: PayoutAuditFilter,
     pagination?: PaginationOptions,
   ): PaginatedPayoutAuditResult {
-    let filtered = [...this.entries];
+    let filtered = this.getAllEntries();
 
     if (filter) {
       if (filter.payoutId) {
@@ -295,13 +416,15 @@ export class PayoutAuditLedger {
   }
 
   /**
-   * Verify cryptographic integrity of the append-only ledger.
+   * Verify cryptographic integrity of the append-only ledger, including across
+   * archival boundaries. Archived entries are verified first, then the hot
+   * partition continues the chain from the last archived hash.
    */
   public verifyIntegrity(): { valid: boolean; invalidEntries: string[] } {
     let expectedPrevious = '0'.repeat(64);
     const invalidEntries: string[] = [];
 
-    for (const entry of this.entries) {
+    for (const entry of this.getAllEntries()) {
       if (entry.previousHash !== expectedPrevious) {
         invalidEntries.push(entry.id);
       }
@@ -332,6 +455,150 @@ export class PayoutAuditLedger {
   }
 
   /**
+   * Verify that every archive manifest is internally consistent and that the
+   * archived segments chain together and into the hot partition.
+   */
+  public verifyArchiveManifests(): {
+    valid: boolean;
+    invalidArchives: string[];
+  } {
+    const invalidArchives: string[] = [];
+    let expectedPrevious = '0'.repeat(64);
+
+    for (const manifest of this.archiveManifests) {
+      const entries = this.readArchiveEntries(manifest);
+
+      if (entries.length !== manifest.entryCount) {
+        invalidArchives.push(manifest.archiveId);
+        continue;
+      }
+
+      if (entries.length === 0) {
+        if (
+          manifest.firstSequenceNumber !== manifest.lastSequenceNumber ||
+          manifest.firstPreviousHash !== expectedPrevious
+        ) {
+          invalidArchives.push(manifest.archiveId);
+        }
+        expectedPrevious = manifest.lastHash;
+        continue;
+      }
+
+      const first = entries[0];
+      const last = entries[entries.length - 1];
+
+      if (
+        first.sequenceNumber !== manifest.firstSequenceNumber ||
+        last.sequenceNumber !== manifest.lastSequenceNumber ||
+        first.previousHash !== manifest.firstPreviousHash ||
+        last.hash !== manifest.lastHash ||
+        first.previousHash !== expectedPrevious
+      ) {
+        invalidArchives.push(manifest.archiveId);
+      }
+
+      expectedPrevious = manifest.lastHash;
+    }
+
+    // The hot partition must continue the chain from the last archive.
+    if (this.entries.length > 0) {
+      if (this.entries[0].previousHash !== expectedPrevious) {
+        invalidArchives.push('hot_partition');
+      }
+    }
+
+    return {
+      valid: invalidArchives.length === 0,
+      invalidArchives,
+    };
+  }
+
+  /**
+   * Return the archive manifest references for audit evidence verification.
+   */
+  public getArchiveManifests(): PayoutAuditArchiveManifest[] {
+    return this.archiveManifests.map((m) => ({ ...m }));
+  }
+
+  /**
+   * Seal entries up to (and including) `upToSequenceNumber` into an archive
+   * partition and trim them from the hot partition. The hash chain is
+   * preserved: archived entries keep their original sequence numbers and
+   * hashes, and the hot partition's first entry still references the last
+   * archived hash.
+   */
+  public archiveUpTo(options: ArchiveOptions): ArchiveResult {
+    const { upToSequenceNumber } = options;
+    const archivedAt = options.archivedAt || new Date().toISOString();
+
+    const toArchive = this.entries.filter(
+      (e) => e.sequenceNumber <= upToSequenceNumber,
+    );
+    const remaining = this.entries.filter(
+      (e) => e.sequenceNumber > upToSequenceNumber,
+    );
+
+    const first = toArchive[0];
+    const last = toArchive[toArchive.length - 1];
+
+    const archiveId = `archive_${Date.now()}_${crypto
+      .randomBytes(4)
+      .toString('hex')}`;
+    const fileName = `${archiveId}.jsonl`;
+
+    const manifest: PayoutAuditArchiveManifest = {
+      archiveId,
+      partition: 'archive',
+      firstSequenceNumber: first ? first.sequenceNumber : 0,
+      lastSequenceNumber: last ? last.sequenceNumber : 0,
+      entryCount: toArchive.length,
+      firstPreviousHash: first ? first.previousHash : this.lastHash,
+      lastHash: last ? last.hash : this.lastHash,
+      archivedAt,
+      fileName,
+    };
+
+    const archiveDir = this.getArchiveDir();
+    if (archiveDir && toArchive.length > 0) {
+      try {
+        if (!fs.existsSync(archiveDir)) {
+          fs.mkdirSync(archiveDir, { recursive: true });
+        }
+        const payload = toArchive
+          .map((e) => JSON.stringify(e))
+          .join('\n');
+        fs.writeFileSync(
+          path.join(archiveDir, fileName),
+          payload + '\n',
+          'utf8',
+        );
+      } catch (err) {
+        console.error('Failed to write audit archive partition:', err);
+        throw err;
+      }
+    }
+
+    this.archiveManifests.push(manifest);
+    this.persistArchiveManifests();
+
+    this.entries = remaining;
+    if (this.storageFilePath) {
+      try {
+        const payload = remaining.map((e) => JSON.stringify(e)).join('\n');
+        fs.writeFileSync(
+          this.storageFilePath,
+          remaining.length > 0 ? payload + '\n' : '',
+          'utf8',
+        );
+      } catch (err) {
+        console.error('Failed to rewrite hot audit partition:', err);
+      }
+    }
+
+    return { manifest, archivedCount: toArchive.length };
+  }
+
+  /**
    * Explicitly prevent modification of historical records.
    */
   public update(): never {
@@ -353,6 +620,8 @@ export class PayoutAuditLedger {
     this.entries = [];
     this.lastHash = '0'.repeat(64);
     this.storageFilePath = null;
+    this.storageDir = null;
+    this.archiveManifests = [];
     if (newDir) {
       this.initStorage(newDir);
     }

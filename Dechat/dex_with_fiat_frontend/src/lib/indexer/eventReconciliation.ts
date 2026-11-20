@@ -4,7 +4,13 @@
  * with bounded contract views without mutating source data.
  */
 
-export type DiscrepancyType = 'MISSING_IN_INDEX' | 'DUPLICATE_IN_INDEX' | 'MALFORMED_RECORD' | 'AMOUNT_CONFLICT';
+export type DiscrepancyType =
+  | 'MISSING_IN_INDEX'
+  | 'DUPLICATE_IN_INDEX'
+  | 'MALFORMED_RECORD'
+  | 'AMOUNT_CONFLICT'
+  | 'PROJECTION_VERSION_MISMATCH'
+  | 'PROJECTION_CHECKSUM_DRIFT';
 
 export interface DiscrepancyReport {
   recordId: string;
@@ -15,6 +21,20 @@ export interface DiscrepancyReport {
   suggestedBackfillRange?: { fromLedger: number; toLedger: number };
 }
 
+/**
+ * Describes the projection schema version and checksum the index is expected
+ * to be serving. `activeChecksum` is the checksum of the currently served
+ * projection; `shadowChecksum` (when present) is the checksum of a parallel
+ * rebuild that is being validated before swap.
+ */
+export interface ProjectionVersionExpectation {
+  expectedVersion: number;
+  activeVersion?: number;
+  activeChecksum?: string;
+  shadowVersion?: number;
+  shadowChecksum?: string;
+}
+
 export interface ReconciliationSummary {
   contractId: string;
   fromLedger: number;
@@ -22,6 +42,7 @@ export interface ReconciliationSummary {
   discrepancies: DiscrepancyReport[];
   isConsistent: boolean;
   evaluatedAt: string;
+  projectionVersion?: number;
 }
 
 export class EventReconciliationEngine {
@@ -33,9 +54,44 @@ export class EventReconciliationEngine {
     fromLedger: number,
     toLedger: number,
     authoritativeEvents: Map<string, Record<string, unknown>>,
-    indexedEvents: Map<string, Record<string, unknown>>
+    indexedEvents: Map<string, Record<string, unknown>>,
+    projection?: ProjectionVersionExpectation
   ): ReconciliationSummary {
     const discrepancies: DiscrepancyReport[] = [];
+
+    // Projection version / checksum checks (read-only, no mutation of source data)
+    if (projection) {
+      const activeVersion = projection.activeVersion;
+      if (activeVersion !== undefined && activeVersion !== projection.expectedVersion) {
+        discrepancies.push({
+          recordId: `projection:${contractId}`,
+          type: 'PROJECTION_VERSION_MISMATCH',
+          ledger: fromLedger,
+          indexedState: {
+            expectedVersion: projection.expectedVersion,
+            activeVersion,
+            shadowVersion: projection.shadowVersion,
+          },
+        });
+      }
+
+      if (
+        projection.activeChecksum !== undefined &&
+        projection.shadowChecksum !== undefined &&
+        projection.activeChecksum !== projection.shadowChecksum
+      ) {
+        discrepancies.push({
+          recordId: `projection:${contractId}`,
+          type: 'PROJECTION_CHECKSUM_DRIFT',
+          ledger: fromLedger,
+          indexedState: {
+            activeChecksum: projection.activeChecksum,
+            shadowChecksum: projection.shadowChecksum,
+            shadowVersion: projection.shadowVersion,
+          },
+        });
+      }
+    }
 
     // Check for events present on-chain but missing or conflicting in index
     for (const [id, authRecord] of authoritativeEvents.entries()) {
@@ -69,6 +125,7 @@ export class EventReconciliationEngine {
       discrepancies,
       isConsistent: discrepancies.length === 0,
       evaluatedAt: new Date().toISOString(),
+      projectionVersion: projection?.activeVersion ?? projection?.expectedVersion,
     };
   }
 }

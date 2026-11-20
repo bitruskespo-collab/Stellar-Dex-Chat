@@ -9,10 +9,16 @@ export interface ContractEvent {
   amount: string;
   token?: string;
   version: number;
+  projectionVersion: number;
+  projectionChecksum: string;
+  activeProjectionId: string;
 }
 
 export interface IndexerState {
   lastPagingToken: string;
   lastLedger: number;
   updatedAt: string;
+  projectionVersion: number;
+  projectionChecksum: string;
+  activeProjectionId: string;
 }

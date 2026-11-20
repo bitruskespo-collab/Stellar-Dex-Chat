@@ -7,7 +7,90 @@ import { eventsQuerySchema } from '@/lib/apiSchemas';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const EVENTS_FILE = path.join(DATA_DIR, 'contract-events.json');
+const ACTIVE_PROJECTION_FILE = path.join(DATA_DIR, 'contract-events.active.json');
 const RATE_LIMIT = { maxRequests: 30, windowMs: 60_000 };
+
+interface ActiveProjectionPointer {
+  version: number;
+  checksum: string;
+  file: string;
+  rebuiltAt?: string;
+}
+
+interface ResolvedProjection {
+  events: ContractEvent[];
+  projectionVersion: number | null;
+  projectionChecksum: string | null;
+  rebuildInProgress: boolean;
+}
+
+function readActivePointer(): ActiveProjectionPointer | null {
+  try {
+    if (!fs.existsSync(ACTIVE_PROJECTION_FILE)) return null;
+    const raw = fs.readFileSync(ACTIVE_PROJECTION_FILE, 'utf8');
+    const parsed = JSON.parse(raw) as Partial<ActiveProjectionPointer>;
+    if (
+      typeof parsed.version !== 'number' ||
+      typeof parsed.checksum !== 'string' ||
+      typeof parsed.file !== 'string'
+    ) {
+      return null;
+    }
+    return {
+      version: parsed.version,
+      checksum: parsed.checksum,
+      file: parsed.file,
+      rebuiltAt: parsed.rebuiltAt,
+    };
+  } catch (error) {
+    console.error('Error reading active projection pointer:', error);
+    return null;
+  }
+}
+
+function resolveProjection(): ResolvedProjection {
+  const pointer = readActivePointer();
+
+  if (pointer) {
+    // Resolve the pointer's file relative to DATA_DIR and refuse path escapes.
+    const resolved = path.resolve(DATA_DIR, pointer.file);
+    const relative = path.relative(DATA_DIR, resolved);
+    const isInsideDataDir = relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+
+    if (isInsideDataDir && fs.existsSync(resolved)) {
+      try {
+        const events = JSON.parse(fs.readFileSync(resolved, 'utf8')) as ContractEvent[];
+        return {
+          events,
+          projectionVersion: pointer.version,
+          projectionChecksum: pointer.checksum,
+          rebuildInProgress: false,
+        };
+      } catch (error) {
+        console.error('Error reading active projection file:', error);
+      }
+    }
+  }
+
+  // Fallback: legacy single-file projection (no version metadata available).
+  if (!fs.existsSync(EVENTS_FILE)) {
+    return {
+      events: [],
+      projectionVersion: pointer?.version ?? null,
+      projectionChecksum: pointer?.checksum ?? null,
+      rebuildInProgress: pointer !== null,
+    };
+  }
+
+  const events = JSON.parse(fs.readFileSync(EVENTS_FILE, 'utf8')) as ContractEvent[];
+  return {
+    events,
+    projectionVersion: pointer?.version ?? null,
+    projectionChecksum: pointer?.checksum ?? null,
+    // A pointer exists but its target was unreadable: a rebuild is likely in flight.
+    rebuildInProgress: pointer !== null,
+  };
+}
 
 export async function GET(request: NextRequest) {
   const ip = getClientIp(request);
@@ -35,13 +118,9 @@ export async function GET(request: NextRequest) {
 
     const { limit, offset } = validationResult.data;
 
-    if (!fs.existsSync(EVENTS_FILE)) {
-      return NextResponse.json({ events: [], total: 0 });
-    }
+    const { events, projectionVersion, projectionChecksum, rebuildInProgress } =
+      resolveProjection();
 
-    const fileContent = fs.readFileSync(EVENTS_FILE, 'utf8');
-    const events: ContractEvent[] = JSON.parse(fileContent);
-    
     // Paginate and return
     const paginatedEvents = events.slice(offset, offset + limit);
 
@@ -49,7 +128,10 @@ export async function GET(request: NextRequest) {
       events: paginatedEvents,
       total: events.length,
       limit,
-      offset
+      offset,
+      projectionVersion,
+      projectionChecksum,
+      rebuildInProgress,
     });
   } catch (error) {
     console.error('Error fetching indexed events:', error);

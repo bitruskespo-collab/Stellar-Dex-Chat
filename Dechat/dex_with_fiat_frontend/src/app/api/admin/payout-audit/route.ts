@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAdminAuth } from '../_utils/requireAdminAuth';
 import { payoutAuditLedger, PayoutAuditAction } from '@/lib/payout/auditLedger';
+import {
+  payoutAuditArchive,
+  PayoutAuditArchiveManifest,
+} from '@/lib/payout/auditArchive';
 
 export async function GET(request: NextRequest) {
   const authError = requireAdminAuth(request);
@@ -19,6 +23,13 @@ export async function GET(request: NextRequest) {
       searchParams.get('providerReference') || undefined;
     const startDate = searchParams.get('startDate') || undefined;
     const endDate = searchParams.get('endDate') || undefined;
+    // Optional: restrict the query to a single retention partition
+    // ('hot' | 'archive'). Omitted means query across both partitions.
+    const partitionParam = searchParams.get('partition');
+    const partition =
+      partitionParam === 'hot' || partitionParam === 'archive'
+        ? partitionParam
+        : undefined;
 
     const filter = {
       payoutId,
@@ -29,8 +40,11 @@ export async function GET(request: NextRequest) {
       endDate,
     };
 
+    const manifest: PayoutAuditArchiveManifest =
+      payoutAuditArchive.getManifest();
+
     if (format === 'csv') {
-      const csvData = payoutAuditLedger.exportCsv(filter);
+      const csvData = payoutAuditLedger.exportCsv(filter, { partition });
       return new NextResponse(csvData, {
         status: 200,
         headers: {
@@ -38,6 +52,9 @@ export async function GET(request: NextRequest) {
           'Content-Disposition':
             'attachment; filename="payout-audit-ledger.csv"',
           'Cache-Control': 'no-store, no-cache, must-revalidate',
+          'X-Audit-Archive-Version': manifest.version,
+          'X-Audit-Archive-Hot-Count': String(manifest.hotCount),
+          'X-Audit-Archive-Archived-Count': String(manifest.archivedCount),
         },
       });
     }
@@ -48,14 +65,25 @@ export async function GET(request: NextRequest) {
       100,
     );
 
-    const result = payoutAuditLedger.getEntries(filter, { page, limit });
-
-    return NextResponse.json(result, {
-      status: 200,
-      headers: {
-        'Cache-Control': 'no-store, no-cache, must-revalidate',
-      },
+    // Pagination is computed over the merged hot+archive view so cursors stay
+    // stable across the archival boundary. The manifest version is surfaced so
+    // clients can detect when a new archival run has shifted the boundary.
+    const result = payoutAuditLedger.getEntries(filter, {
+      page,
+      limit,
+      partition,
     });
+
+    return NextResponse.json(
+      { ...result, archiveManifest: manifest },
+      {
+        status: 200,
+        headers: {
+          'Cache-Control': 'no-store, no-cache, must-revalidate',
+          'X-Audit-Archive-Version': manifest.version,
+        },
+      },
+    );
   } catch (err: unknown) {
     console.error('Error in /api/admin/payout-audit:', err);
     return NextResponse.json(

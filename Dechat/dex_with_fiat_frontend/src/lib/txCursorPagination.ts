@@ -18,6 +18,12 @@ export interface PaginateTxOptions<T extends TransactionHistoryEntry = Transacti
   cursor?: string | null;
   limit?: number;
   filters?: TxCursorFilters;
+  /**
+   * Optional archived entries (retention horizon). They are merged with `entries`
+   * before sorting/filtering so cursors resolve identically regardless of which
+   * storage tier (hot vs archive) an entry currently lives in.
+   */
+  archivedEntries?: T[];
 }
 
 export interface PaginatedTxResult<T extends TransactionHistoryEntry = TransactionHistoryEntry> {
@@ -142,20 +148,56 @@ export function matchesTxFilters(entry: TransactionHistoryEntry, filters?: TxCur
 }
 
 /**
+ * Merges hot and archived entries into a single deduplicated list.
+ * Entries are deduplicated by ID (hot tier wins) so an entry that is in the
+ * process of being archived (present in both tiers) is never returned twice.
+ */
+export function mergeTxTiers<T extends TransactionHistoryEntry = TransactionHistoryEntry>(
+  hot: T[],
+  archived?: T[],
+): T[] {
+  if (!archived || archived.length === 0) {
+    return [...hot];
+  }
+
+  const seen = new Set<string>();
+  const merged: T[] = [];
+
+  for (const entry of hot) {
+    if (!seen.has(entry.id)) {
+      seen.add(entry.id);
+      merged.push(entry);
+    }
+  }
+
+  for (const entry of archived) {
+    if (!seen.has(entry.id)) {
+      seen.add(entry.id);
+      merged.push(entry);
+    }
+  }
+
+  return merged;
+}
+
+/**
  * Paginates a list of transaction history entries using stable cursors.
  *
  * Guarantees:
  * - Deterministic ordering by (createdAt DESC, id DESC).
  * - Stable slicing: passing a cursor returns items strictly after that cursor,
  *   so newly prepended items do not alter subsequent pages or cause duplicate/skipped items.
+ * - Storage-tier agnostic: hot and archived entries are merged (and deduplicated)
+ *   before slicing, so a cursor keeps resolving correctly when entries cross the
+ *   retention horizon between page requests.
  */
 export function paginateTxEntries<T extends TransactionHistoryEntry = TransactionHistoryEntry>(
   options: PaginateTxOptions<T>,
 ): PaginatedTxResult<T> {
-  const { entries, cursor, limit = 10, filters } = options;
+  const { entries, cursor, limit = 10, filters, archivedEntries } = options;
 
-  // 1. Sort all entries deterministically
-  const sorted = [...entries].sort(compareTxEntriesDesc);
+  // 1. Merge hot + archived tiers and sort all entries deterministically
+  const sorted = mergeTxTiers(entries, archivedEntries).sort(compareTxEntriesDesc);
 
   // 2. Filter entries
   const filtered = sorted.filter((entry) => matchesTxFilters(entry, filters));

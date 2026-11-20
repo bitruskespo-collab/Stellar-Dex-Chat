@@ -163,6 +163,182 @@ export const RETENTION_PERIODS_MS: Record<PayoutStatus, number> = {
   pending: Number.POSITIVE_INFINITY,   // Active transfers must never be auto-deleted
 };
 
+/**
+ * Retention horizons for high-volume audit and event data.
+ * Each horizon defines how long rows remain in the hot (queryable) partition
+ * before being moved to archive storage. Audit evidence is never destroyed.
+ */
+export type RetentionHorizon = 'HOT' | 'WARM' | 'ARCHIVE';
+
+export interface RetentionHorizonPolicy {
+  horizon: RetentionHorizon;
+  /** Maximum age (ms) of rows kept in this horizon. */
+  maxAgeMs: number;
+  /** Whether rows in this horizon are still served by default queries. */
+  queryable: boolean;
+  description: string;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Declarative retention horizon registry for audit/event tables.
+ * - HOT: last 30 days, fully queryable.
+ * - WARM: 30-180 days, queryable with explicit horizon selection.
+ * - ARCHIVE: older than 180 days, retrievable only via archive lookups.
+ */
+export const RETENTION_HORIZONS: Record<RetentionHorizon, RetentionHorizonPolicy> = {
+  HOT: {
+    horizon: 'HOT',
+    maxAgeMs: 30 * DAY_MS,
+    queryable: true,
+    description: 'Recent audit/event rows served by default queries',
+  },
+  WARM: {
+    horizon: 'WARM',
+    maxAgeMs: 180 * DAY_MS,
+    queryable: true,
+    description: 'Aged rows queryable only with explicit horizon selection',
+  },
+  ARCHIVE: {
+    horizon: 'ARCHIVE',
+    maxAgeMs: Number.POSITIVE_INFINITY,
+    queryable: false,
+    description: 'Archived audit evidence retrievable via archive lookups only',
+  },
+};
+
+/**
+ * Resolves the retention horizon for a row based on its age relative to `now`.
+ * Boundary semantics: a row exactly at a horizon boundary belongs to the
+ * *older* horizon (age >= maxAgeMs moves it out of the current horizon).
+ */
+export function resolveRetentionHorizon(
+  timestamp: number,
+  now: number = Date.now(),
+): RetentionHorizon {
+  const age = now - timestamp;
+  if (age < RETENTION_HORIZONS.HOT.maxAgeMs) {
+    return 'HOT';
+  }
+  if (age < RETENTION_HORIZONS.WARM.maxAgeMs) {
+    return 'WARM';
+  }
+  return 'ARCHIVE';
+}
+
+export interface PartitionBoundary {
+  horizon: RetentionHorizon;
+  /** Inclusive lower bound (epoch ms) of rows in this partition. */
+  fromMs: number;
+  /** Exclusive upper bound (epoch ms) of rows in this partition. */
+  toMs: number;
+}
+
+/**
+ * Computes time-based partition boundaries for the given reference time.
+ * Partitions are contiguous and non-overlapping: [fromMs, toMs).
+ */
+export function computePartitionBoundaries(
+  now: number = Date.now(),
+): PartitionBoundary[] {
+  return [
+    {
+      horizon: 'HOT',
+      fromMs: now - RETENTION_HORIZONS.HOT.maxAgeMs,
+      toMs: now,
+    },
+    {
+      horizon: 'WARM',
+      fromMs: now - RETENTION_HORIZONS.WARM.maxAgeMs,
+      toMs: now - RETENTION_HORIZONS.HOT.maxAgeMs,
+    },
+    {
+      horizon: 'ARCHIVE',
+      fromMs: Number.NEGATIVE_INFINITY,
+      toMs: now - RETENTION_HORIZONS.WARM.maxAgeMs,
+    },
+  ];
+}
+
+/**
+ * A single audit/event row subject to retention partitioning.
+ */
+export interface AuditEventRow {
+  id: string;
+  reference: string;
+  eventType: string;
+  occurredAt: number;
+  payload: Record<string, unknown>;
+}
+
+export interface ArchivedRow extends AuditEventRow {
+  archivedAt: string;
+  horizon: RetentionHorizon;
+}
+
+export interface ArchiveManifestEntry {
+  id: string;
+  reference: string;
+  occurredAt: number;
+  rowHash: string;
+}
+
+export interface ArchiveManifest {
+  manifestId: string;
+  createdAt: string;
+  cutoffMs: number;
+  rowCount: number;
+  entries: ArchiveManifestEntry[];
+  /** SHA-256 over the canonical manifest content for integrity verification. */
+  integrityHash: string;
+}
+
+/**
+ * Computes a deterministic SHA-256 hash of an audit row's canonical content.
+ */
+export function hashAuditRow(row: AuditEventRow): string {
+  const canonical = JSON.stringify({
+    id: row.id,
+    reference: row.reference,
+    eventType: row.eventType,
+    occurredAt: row.occurredAt,
+    payload: row.payload,
+  });
+  return crypto.createHash('sha256').update(canonical).digest('hex');
+}
+
+/**
+ * Computes the integrity hash of an archive manifest from its entries.
+ */
+export function computeManifestIntegrityHash(
+  manifestId: string,
+  createdAt: string,
+  cutoffMs: number,
+  entries: ArchiveManifestEntry[],
+): string {
+  const canonical = JSON.stringify({
+    manifestId,
+    createdAt,
+    cutoffMs,
+    entries,
+  });
+  return crypto.createHash('sha256').update(canonical).digest('hex');
+}
+
+/**
+ * Verifies that a manifest's integrity hash matches its entries.
+ */
+export function verifyArchiveManifest(manifest: ArchiveManifest): boolean {
+  const expected = computeManifestIntegrityHash(
+    manifest.manifestId,
+    manifest.createdAt,
+    manifest.cutoffMs,
+    manifest.entries,
+  );
+  return expected === manifest.integrityHash;
+}
+
 export interface EncryptedPayload {
   ciphertext: string;
   iv: string;
@@ -588,5 +764,169 @@ export class PayoutRetentionService {
   public clear(): void {
     this.records.clear();
     this.deletionProofs.clear();
+  }
+}
+
+/**
+ * Online partition/archive service for high-volume audit and event tables.
+ *
+ * Rows are partitioned by retention horizon based on `occurredAt`. The archive
+ * job moves rows that have crossed the WARM boundary into archive storage,
+ * emitting a manifest with per-row and aggregate integrity hashes. Archived
+ * audit evidence remains retrievable via `getArchivedRow` / `queryArchive`.
+ */
+export class AuditArchiveService {
+  private hotRows = new Map<string, AuditEventRow>();
+  private archivedRows = new Map<string, ArchivedRow>();
+  private manifests = new Map<string, ArchiveManifest>();
+
+  /**
+   * Ingests an audit/event row into the hot partition.
+   */
+  public ingest(row: AuditEventRow): void {
+    if (this.archivedRows.has(row.id)) {
+      throw new Error(
+        `Cannot re-ingest archived audit row ${row.id}; archive evidence is immutable.`,
+      );
+    }
+    this.hotRows.set(row.id, row);
+  }
+
+  /**
+   * Returns the retention horizon currently applicable to a row.
+   */
+  public horizonFor(rowId: string, now: number = Date.now()): RetentionHorizon | null {
+    const hot = this.hotRows.get(rowId);
+    if (hot) {
+      return resolveRetentionHorizon(hot.occurredAt, now);
+    }
+    const archived = this.archivedRows.get(rowId);
+    if (archived) {
+      return 'ARCHIVE';
+    }
+    return null;
+  }
+
+  /**
+   * Queries live (non-archived) rows within an optional horizon filter.
+   * By default only HOT rows are returned; WARM requires explicit selection.
+   */
+  public queryLive(
+    options: { horizon?: RetentionHorizon; now?: number } = {},
+  ): AuditEventRow[] {
+    const now = options.now ?? Date.now();
+    const horizon = options.horizon ?? 'HOT';
+    if (horizon === 'ARCHIVE') {
+      return [];
+    }
+    const result: AuditEventRow[] = [];
+    for (const row of this.hotRows.values()) {
+      if (resolveRetentionHorizon(row.occurredAt, now) === horizon) {
+        result.push(row);
+      }
+    }
+    return result.sort((a, b) => a.occurredAt - b.occurredAt);
+  }
+
+  /**
+   * Online archive job: moves rows older than the WARM boundary into archive
+   * storage and produces a manifest with integrity hashes.
+   *
+   * Boundary semantics: rows with age >= WARM.maxAgeMs are archived.
+   * Returns an empty manifest (rowCount 0) when nothing is eligible.
+   */
+  public runArchiveJob(now: number = Date.now()): ArchiveManifest {
+    const cutoffMs = now - RETENTION_HORIZONS.WARM.maxAgeMs;
+    const eligible: AuditEventRow[] = [];
+
+    for (const [id, row] of this.hotRows.entries()) {
+      if (row.occurredAt <= cutoffMs) {
+        eligible.push(row);
+        this.hotRows.delete(id);
+      }
+    }
+
+    eligible.sort((a, b) => a.occurredAt - b.occurredAt);
+
+    const archivedAt = new Date(now).toISOString();
+    const entries: ArchiveManifestEntry[] = eligible.map((row) => {
+      const rowHash = hashAuditRow(row);
+      this.archivedRows.set(row.id, {
+        ...row,
+        archivedAt,
+        horizon: 'ARCHIVE',
+      });
+      return {
+        id: row.id,
+        reference: row.reference,
+        occurredAt: row.occurredAt,
+        rowHash,
+      };
+    });
+
+    const manifestId = `manifest_${crypto.randomBytes(8).toString('hex')}`;
+    const integrityHash = computeManifestIntegrityHash(
+      manifestId,
+      archivedAt,
+      cutoffMs,
+      entries,
+    );
+
+    const manifest: ArchiveManifest = {
+      manifestId,
+      createdAt: archivedAt,
+      cutoffMs,
+      rowCount: entries.length,
+      entries,
+      integrityHash,
+    };
+
+    this.manifests.set(manifestId, manifest);
+    return manifest;
+  }
+
+  /**
+   * Retrieves an archived audit row by id. Archived evidence is immutable.
+   */
+  public getArchivedRow(rowId: string): ArchivedRow | null {
+    return this.archivedRows.get(rowId) || null;
+  }
+
+  /**
+   * Queries archived rows by reference and/or time range (inclusive bounds).
+   */
+  public queryArchive(options: {
+    reference?: string;
+    fromMs?: number;
+    toMs?: number;
+  } = {}): ArchivedRow[] {
+    const result: ArchivedRow[] = [];
+    for (const row of this.archivedRows.values()) {
+      if (options.reference !== undefined && row.reference !== options.reference) {
+        continue;
+      }
+      if (options.fromMs !== undefined && row.occurredAt < options.fromMs) {
+        continue;
+      }
+      if (options.toMs !== undefined && row.occurredAt > options.toMs) {
+        continue;
+      }
+      result.push(row);
+    }
+    return result.sort((a, b) => a.occurredAt - b.occurredAt);
+  }
+
+  public getManifest(manifestId: string): ArchiveManifest | null {
+    return this.manifests.get(manifestId) || null;
+  }
+
+  public getAllManifests(): ArchiveManifest[] {
+    return Array.from(this.manifests.values());
+  }
+
+  public clear(): void {
+    this.hotRows.clear();
+    this.archivedRows.clear();
+    this.manifests.clear();
   }
 }

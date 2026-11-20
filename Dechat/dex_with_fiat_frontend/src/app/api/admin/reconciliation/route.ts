@@ -3,6 +3,49 @@ import { ReconciliationRecord } from '@/types';
 import { requireAdminAuth } from '../_utils/requireAdminAuth';
 import { enforceAdminIpAllowlist } from '@/lib/security';
 import { reconcileStalePayouts } from '@/lib/payout/reconciliation';
+import {
+  reconcileCrossSource,
+  type CrossSourceReconciliationResult,
+  type ReconciliationConfidence,
+} from '@/lib/payout/crossSourceReconciliation';
+
+const CONFIDENCE_STATES: ReconciliationConfidence[] = [
+  'matched',
+  'ambiguous',
+  'unmatched',
+  'conflict',
+];
+
+function countByConfidence(
+  result: CrossSourceReconciliationResult,
+): Record<ReconciliationConfidence, number> {
+  const counts: Record<ReconciliationConfidence, number> = {
+    matched: 0,
+    ambiguous: 0,
+    unmatched: 0,
+    conflict: 0,
+  };
+  for (const entry of result.entries) {
+    counts[entry.confidence] += 1;
+  }
+  return counts;
+}
+
+function buildReviewQueue(result: CrossSourceReconciliationResult) {
+  return result.entries
+    .filter((entry) => entry.confidence !== 'matched')
+    .map((entry) => ({
+      id: entry.id,
+      confidence: entry.confidence,
+      reason: entry.reason,
+      contractEventId: entry.contractEventId,
+      payoutRecordId: entry.payoutRecordId,
+      providerEvidenceId: entry.providerEvidenceId,
+      amountMinor: entry.amountMinor,
+      currency: entry.currency,
+      requiresReview: true,
+    }));
+}
 
 export async function GET(request: NextRequest) {
   try {
@@ -19,11 +62,37 @@ export async function GET(request: NextRequest) {
     const payouts = reconciliationStore.getPayouts();
     const report = reconcileRecords(deposits, payouts);
 
+    // Cross-source reconciliation (Issue #246): contract events, internal
+    // payout records, and provider evidence. Read-only; never settles.
+    const crossSource = reconcileCrossSource({
+      contractEvents: reconciliationStore.getContractEvents?.() ?? [],
+      payoutRecords: reconciliationStore.getPayoutRecords?.() ?? [],
+      providerEvidence: reconciliationStore.getProviderEvidence?.() ?? [],
+    });
+    const confidenceCounts = countByConfidence(crossSource);
+    const reviewQueue = buildReviewQueue(crossSource);
+
     // If caller requests structured report format
     const format = request.nextUrl.searchParams.get('format');
     if (format === 'report') {
-      return NextResponse.json(serializeReconciliationReport(report));
+      return NextResponse.json({
+        ...serializeReconciliationReport(report),
+        crossSource: {
+          confidenceCounts,
+          entries: crossSource.entries,
+          reviewQueue,
+        },
+      });
     }
+
+    // Review queue view for non-matched records
+    if (format === 'review') {
+      return NextResponse.json({
+        confidenceCounts,
+        reviewQueue,
+      });
+    }
+======
 
     // Default: map report to standard ReconciliationRecord[] for dashboard view
     const records: ReconciliationRecord[] = [];
@@ -122,6 +191,38 @@ export async function GET(request: NextRequest) {
       }
     }
 
+    // Surface cross-source confidence states. Only 'matched' entries are
+    // considered settled; ambiguous/unmatched/conflict entries are flagged
+    // for review and never auto-settled.
+    for (const entry of crossSource.entries) {
+      records.push({
+        id: String(counter++),
+        depositTxHash: entry.contractEventId || '',
+        depositAmount:
+          entry.amountMinor != null
+            ? fromMinorUnits(entry.amountMinor, entry.currency)
+            : '',
+        depositUser: entry.depositUser || '',
+        depositDate: entry.contractEventTimestamp || '',
+        payoutId: entry.payoutRecordId || '',
+        payoutAmount:
+          entry.amountMinor != null
+            ? fromMinorUnits(entry.amountMinor, entry.currency)
+            : '',
+        payoutRecipient: entry.payoutRecipient || '',
+        payoutStatus: entry.payoutStatus || 'pending',
+        payoutDate: entry.payoutDate || '',
+        status:
+          entry.confidence === 'matched'
+            ? 'matched'
+            : entry.confidence === 'conflict'
+              ? 'error'
+              : 'unmatched',
+        confidence: entry.confidence,
+        requiresReview: entry.confidence !== 'matched',
+      });
+    }
+
     return NextResponse.json(records);
   } catch (error) {
     console.error('Error fetching reconciliation data:', error);
@@ -159,9 +260,25 @@ export async function POST(request: NextRequest) {
       batchSize,
     });
 
+    // Cross-source reconciliation pass. This is classification only: it
+    // never settles ambiguous/unmatched/conflict entries. Callers must
+    // review the queue before any settlement action.
+    const crossSource = reconcileCrossSource({
+      contractEvents: reconciliationStore.getContractEvents?.() ?? [],
+      payoutRecords: reconciliationStore.getPayoutRecords?.() ?? [],
+      providerEvidence: reconciliationStore.getProviderEvidence?.() ?? [],
+    });
+    const confidenceCounts = countByConfidence(crossSource);
+    const reviewQueue = buildReviewQueue(crossSource);
+
     return NextResponse.json({
       success: true,
       data: summary,
+      crossSource: {
+        confidenceCounts,
+        reviewQueue,
+        autoSettled: false,
+      },
     });
   } catch (error) {
     console.error('Error running reconciliation:', error);
@@ -173,6 +290,7 @@ export async function POST(request: NextRequest) {
 }
 
 // Mock data - in production, this would come from a database
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 const mockReconciliationData: ReconciliationRecord[] = [
   {
     id: '1',
@@ -227,3 +345,6 @@ const mockReconciliationData: ReconciliationRecord[] = [
     status: 'error',
   },
 ];
+
+// Re-exported for consumers that need the confidence state list.
+export { CONFIDENCE_STATES };
