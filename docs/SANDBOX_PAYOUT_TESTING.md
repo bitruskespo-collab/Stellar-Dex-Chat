@@ -1,9 +1,11 @@
 # Sandbox End-to-End Payout Lifecycle Testing
 
 ## Overview
+
 This suite provides full-lifecycle validation for fiat payout provider integrations in sandbox mode without risking real funds or live-money transfers.
 
 ## Security Controls & Live Credential Refusal (Issue #106)
+
 1. **Live-Mode Refusal Guard**:
    The test runner and runtime invoke `assertSandboxSecretKey()`. If any live key (`sk_live_*` or containing `live`) is detected:
    - Execution immediately halts with `LiveCredentialsRefusedError`.
@@ -15,7 +17,9 @@ This suite provides full-lifecycle validation for fiat payout provider integrati
 ---
 
 ## Lifecycle Steps Tested
+
 The lifecycle suite (`src/lib/payout/__tests__/sandboxPayoutLifecycle.test.ts`) covers:
+
 1. **Live Credential Refusal**: Verifies that passing live credentials fails immediately with `LiveCredentialsRefusedError`.
 2. **Account Verification**: Tests resolving valid vs invalid bank codes and account numbers.
 3. **Recipient Creation**: Registers transfer recipients and returns recipient tokens.
@@ -26,3 +30,15 @@ The lifecycle suite (`src/lib/payout/__tests__/sandboxPayoutLifecycle.test.ts`) 
 8. **Credential Rotation during In-Flight Payout**: Rotates key from `v1` to `v2` during an active payout and proves that status reconciliation remains intact for the existing intent.
 9. **Authoritative Provider Verification**: Verifies final persisted state against authoritative provider status.
 10. **Sandbox Artifact Cleanup**: Cleans up mock/sandbox test artifacts from in-memory stores after completion.
+
+---
+
+## Stateful Saga Property Coverage
+
+`src/lib/payout/payoutSagaProperties.test.ts` complements the sandbox suite
+with deterministic, seeded event sequences that mix retries, duplicate
+callbacks, cancellation, reversal, reconciliation, stale callbacks, and
+unauthorized attempts. It asserts terminal-state monotonicity and
+exactly-once settlement/release invariants after every generated event. The
+fixtures use synthetic references only and contain no credentials or real user
+data.

@@ -70,6 +70,8 @@ export interface TransferStatusRecord {
   updatedAt: string;
   updatedAtMs?: number;
   clientSessionId?: string;
+  providerReference?: string;
+  history?: PayoutTransitionRecord[];
   reconciliationAttempts?: number;
   lastReconciledAt?: string;
   lastReconciliationResult?:
@@ -81,6 +83,18 @@ export interface TransferStatusRecord {
   nextRetryAt?: number;
 }
 
+export interface TransitionPayoutParams {
+  reference: string;
+  targetStatus: PayoutStatus;
+  actor: PayoutActor | string;
+  providerReference?: string;
+  reason?: string;
+  amount?: number;
+  clientSessionId?: string;
+  failureReason?: string;
+  timestamp?: string;
+}
+
 // Key is the transfer reference
 export const transferStore = new Map<string, TransferStatusRecord>();
 
@@ -90,11 +104,92 @@ export function getTransferStatus(
   return transferStore.get(reference);
 }
 
+export function transitionPayoutStatus({
+  reference,
+  targetStatus,
+  actor,
+  providerReference,
+  reason,
+  amount,
+  clientSessionId,
+  failureReason,
+  timestamp = new Date().toISOString(),
+}: TransitionPayoutParams): TransferStatusRecord {
+  const existing = transferStore.get(reference);
+  const currentStatus: PayoutStatus | 'none' = existing?.status ?? 'none';
+
+  if (existing && currentStatus === targetStatus) {
+    return existing;
+  }
+
+  validatePayoutTransition(currentStatus, targetStatus, reference);
+
+  const transitionRecord: PayoutTransitionRecord = {
+    fromStatus: currentStatus,
+    toStatus: targetStatus,
+    actor,
+    providerReference: providerReference ?? existing?.providerReference,
+    timestamp,
+    reason,
+  };
+
+  const history = existing?.history
+    ? [...existing.history, transitionRecord]
+    : [transitionRecord];
+  const parsedTimestamp = Date.parse(timestamp);
+  const updatedRecord: TransferStatusRecord = {
+    ...existing,
+    reference,
+    status: targetStatus,
+    amount: amount ?? existing?.amount ?? 0,
+    failureReason: failureReason ?? existing?.failureReason,
+    updatedAt: timestamp,
+    updatedAtMs: Number.isNaN(parsedTimestamp)
+      ? existing?.updatedAtMs
+      : parsedTimestamp,
+    clientSessionId: clientSessionId ?? existing?.clientSessionId,
+    providerReference: providerReference ?? existing?.providerReference,
+    history,
+  };
+
+  transferStore.set(reference, updatedRecord);
+  return updatedRecord;
+}
+
 export function setTransferStatus(
   record: TransferStatusRecord,
 ): TransferStatusRecord {
-  transferStore.set(record.reference, record);
-  return record;
+  const existing = transferStore.get(record.reference);
+  const currentStatus: PayoutStatus | 'none' = existing?.status ?? 'none';
+
+  if (currentStatus !== record.status) {
+    const transitioned = transitionPayoutStatus({
+      reference: record.reference,
+      targetStatus: record.status,
+      actor: 'system',
+      providerReference: record.providerReference,
+      reason: record.failureReason ?? 'Status update',
+      amount: record.amount,
+      clientSessionId: record.clientSessionId,
+      failureReason: record.failureReason,
+      timestamp: record.updatedAt,
+    });
+    const merged: TransferStatusRecord = {
+      ...transitioned,
+      ...record,
+      history: transitioned.history ?? record.history,
+    };
+    transferStore.set(record.reference, merged);
+    return merged;
+  }
+
+  const merged: TransferStatusRecord = {
+    ...existing,
+    ...record,
+    history: existing?.history ?? record.history,
+  };
+  transferStore.set(record.reference, merged);
+  return merged;
 }
 
 export function getAllTransfers(): TransferStatusRecord[] {
@@ -103,4 +198,5 @@ export function getAllTransfers(): TransferStatusRecord[] {
 
 export function clearTransferStore(): void {
   transferStore.clear();
+  replayCache.clear();
 }

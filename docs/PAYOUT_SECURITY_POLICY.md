@@ -1,6 +1,7 @@
 # Payout API Security Policy
 
 ## Overview
+
 This document specifies the threat model, enforcement strategy, and cross-origin security guarantees for all fiat payout API routes in the Stellar-Dex-Chat application.
 
 ---
@@ -8,6 +9,7 @@ This document specifies the threat model, enforcement strategy, and cross-origin
 ## 1. State-Changing Browser Routes
 
 ### Scope
+
 - `POST /api/create-recipient`
 - `POST /api/initiate-transfer`
 - `POST /api/verify-account`
@@ -39,6 +41,7 @@ This document specifies the threat model, enforcement strategy, and cross-origin
 ## 2. Wallet-Based and Programmatic Clients
 
 ### Policy
+
 - Wallet clients (e.g., Freighter, mobile wallets, automated integration scripts, or server-to-server API callers) do not execute in an ambient browser cookie context and do not transmit browser-specific `Origin` or `Sec-Fetch-*` headers.
 - **Safe Allowance**: Requests lacking `Origin`, `Referer`, and `Sec-Fetch-*` headers are classified as wallet/programmatic clients and are allowed to proceed to route handlers without blocking.
 - State-changing actions are authenticated via cryptographic signatures (e.g., Stellar account signature or Bearer tokens) and idempotency keys rather than browser CSRF cookies.
@@ -48,10 +51,12 @@ This document specifies the threat model, enforcement strategy, and cross-origin
 ## 3. Signed Provider Webhooks (`/api/webhook`)
 
 ### Separation from Browser Security
+
 - Inbound webhooks from payout providers (e.g., Paystack) originate from external provider servers (server-to-server callbacks) and do not have browser sessions, same-origin headers, or CSRF tokens.
 - Webhook routes are explicitly **exempt** from browser Origin, Fetch Metadata, and CSRF token requirements.
 
 ### Webhook Authentication Policy
+
 1. **Cryptographic HMAC Signature Verification**:
    - Inbound webhook payloads must carry a valid `x-paystack-signature` header.
    - The server verifies the signature using `crypto.createHmac('sha512', PAYSTACK_SECRET_KEY)`.
@@ -61,3 +66,32 @@ This document specifies the threat model, enforcement strategy, and cross-origin
 
 2. **Replay Protection**:
    - Webhook events are checked against a bounded replay cache with a 15-minute TTL to prevent duplicate processing of replayed callback payloads.
+
+---
+
+## 4. Payout Saga Transition Invariants
+
+The deterministic saga property suite (`src/lib/payout/payoutSagaProperties.test.ts`)
+generates seeded event sequences containing settlements, retries, duplicate
+callbacks, cancellations, reversals, reconciliation polls, stale callbacks, and
+unauthorized transition attempts.
+
+### Enforced invariants
+
+| Invariant                   | Guarantee                                                                                                                                                   |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Terminal-state monotonicity | Once a payout reaches `failed`, `cancelled`, or `reversed`, every later observation remains in that state.                                                  |
+| Exactly-once settlement     | At most one `pending -> success` transition is recorded per payout reference. Duplicate and retried settlement callbacks do not create a second settlement. |
+| Exactly-once release        | At most one release transition (`pending -> cancelled` or `success -> reversed`) is recorded per payout reference.                                          |
+| Authorization gate          | `attacker` actors cannot settle, cancel, or reverse a payout. Unauthorized events leave the transition history unchanged.                                   |
+| Retry bound                 | Repeated pending retries do not advance the lifecycle or produce side effects.                                                                              |
+
+`settle` and `release` are counted from persisted transition history, not from
+event deliveries, so retries and duplicate callbacks cannot inflate either
+counter. The generator is seeded and uses no credentials or real user data.
+
+`setTransferStatus` remains a compatibility wrapper, but real status changes now
+route through `transitionPayoutStatus` so terminal-state guards and transition
+history apply to every caller. Metadata-only updates preserve existing history.
+`clearTransferStore` also clears the replay cache so test isolation matches the
+lifecycle store.
