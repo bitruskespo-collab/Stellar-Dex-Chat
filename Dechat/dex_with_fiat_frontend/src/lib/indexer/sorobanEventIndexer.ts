@@ -23,10 +23,36 @@ export interface IndexerCursor {
   updatedAt: number;
 }
 
+/**
+ * Alert thresholds for indexer health diagnostics.
+ * Exported so operational tooling and alerting can reuse the same bounds.
+ */
+export const MAX_LEDGER_LAG = 100;
+export const MAX_RETRY_COUNT = 5;
+export const MAX_OLDEST_EVENT_AGE_SECONDS = 300;
+
+/** Upper bound applied to any numeric health field to keep labels bounded. */
+const MAX_BOUNDED_VALUE = 1_000_000_000;
+
+export interface IndexerHealthSnapshot {
+  cursor: { lastLedger: number; lastEventIndex: number };
+  ledgerLag: number;
+  retryCount: number;
+  oldestUnprocessedEvent: { ledger: number; ageSeconds: number } | null;
+}
+
+function clampNonNegative(value: number): number {
+  if (!Number.isFinite(value) || value < 0) return 0;
+  return Math.min(Math.floor(value), MAX_BOUNDED_VALUE);
+}
+
 export class SorobanEventIndexer {
   private events: Map<string, SorobanEventRecord> = new Map();
   private cursor: IndexerCursor = { lastLedger: 0, lastEventIndex: 0, updatedAt: 0 };
   private supportedSchemas: Set<number> = new Set([1]);
+  private retryCount = 0;
+  private oldestUnprocessedLedger: number | null = null;
+  private oldestUnprocessedAt: number | null = null;
 
   constructor(initialCursor?: IndexerCursor) {
     if (initialCursor) {
@@ -36,6 +62,42 @@ export class SorobanEventIndexer {
 
   public getCursor(): IndexerCursor {
     return { ...this.cursor };
+  }
+
+  /**
+   * Record a failed ingest attempt so health diagnostics can surface retries.
+   */
+  public recordIngestFailure(): void {
+    this.retryCount = clampNonNegative(this.retryCount + 1);
+  }
+
+  /**
+   * Bounded health snapshot with no customer identifiers.
+   * `chainTipLedger` is the current chain head used to compute ledger lag.
+   */
+  public getHealthSnapshot(chainTipLedger: number): IndexerHealthSnapshot {
+    const tip = clampNonNegative(chainTipLedger);
+    const lastLedger = clampNonNegative(this.cursor.lastLedger);
+    const ledgerLag = clampNonNegative(tip - lastLedger);
+
+    let oldestUnprocessedEvent: IndexerHealthSnapshot['oldestUnprocessedEvent'] = null;
+    if (this.oldestUnprocessedLedger !== null && this.oldestUnprocessedAt !== null) {
+      const ageSeconds = clampNonNegative((Date.now() - this.oldestUnprocessedAt) / 1000);
+      oldestUnprocessedEvent = {
+        ledger: clampNonNegative(this.oldestUnprocessedLedger),
+        ageSeconds,
+      };
+    }
+
+    return {
+      cursor: {
+        lastLedger,
+        lastEventIndex: clampNonNegative(this.cursor.lastEventIndex),
+      },
+      ledgerLag,
+      retryCount: clampNonNegative(this.retryCount),
+      oldestUnprocessedEvent,
+    };
   }
 
   /**
@@ -58,6 +120,12 @@ export class SorobanEventIndexer {
         continue;
       }
 
+      // Track the oldest event that has not yet been processed into the cursor.
+      if (this.oldestUnprocessedLedger === null || record.ledger < this.oldestUnprocessedLedger) {
+        this.oldestUnprocessedLedger = record.ledger;
+        this.oldestUnprocessedAt = Date.now();
+      }
+
       // Schema compatibility verification
       if (!this.supportedSchemas.has(record.schemaVersion)) {
         console.warn(`Encountered unsupported event schema version: ${record.schemaVersion}`);
@@ -74,6 +142,15 @@ export class SorobanEventIndexer {
           updatedAt: Date.now(),
         };
       }
+    }
+
+    // Clear the oldest-unprocessed marker once the cursor has caught up to it.
+    if (
+      this.oldestUnprocessedLedger !== null &&
+      this.oldestUnprocessedLedger <= this.cursor.lastLedger
+    ) {
+      this.oldestUnprocessedLedger = null;
+      this.oldestUnprocessedAt = null;
     }
 
     return { ingested, duplicatesSkipped };

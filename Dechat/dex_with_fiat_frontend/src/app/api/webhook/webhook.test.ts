@@ -13,6 +13,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import crypto from 'crypto';
 import { webhookDeduplicationService } from '@/lib/payout/webhookDeduplication';
 import { payoutReconciliationService } from '@/lib/payout/reconciliation';
+import { verifyWebhookSignature } from '@/lib/payout/webhookSignature';
+import { retryQueueService } from '@/lib/payout/retryQueue';
+import { requireAdminAuth } from '@/lib/adminAuth';
+import { auditLedger } from '@/lib/payout/auditLedger';
 
 // ---------------------------------------------------------------------------
 // We mock the env module so we can swap PAYSTACK_SECRET_KEY per test.
@@ -66,6 +70,14 @@ vi.mock('@/lib/paymentStatusEvents', () => ({
   publishPaymentStatus: vi.fn(),
 }));
 
+vi.mock('@/lib/adminAuth', () => ({
+  requireAdminAuth: vi.fn(() => ({ ok: true, actor: 'admin-test' })),
+}));
+
+vi.mock('@/lib/payout/auditLedger', () => ({
+  auditLedger: { record: vi.fn() },
+}));
+
 // Import route handler after mocks
 const { POST } = await import('@/app/api/webhook/route');
 
@@ -102,6 +114,8 @@ describe('POST /api/webhook', () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+    retryQueueService._resetForTest();
+    vi.mocked(requireAdminAuth).mockReturnValue({ ok: true, actor: 'admin-test' });
   });
 
   it('returns 400 when PAYSTACK_SECRET_KEY is not configured and performs NO writes', async () => {
@@ -206,5 +220,144 @@ describe('POST /api/webhook', () => {
     const body = (await res.json()) as { received: boolean; status?: string };
     expect(body.received).toBe(true);
     expect(body.status).toBe('ignored_out_of_order');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Threat-model regression tests (#256)
+//
+// These tests pin the trust boundaries documented in
+// docs/threat-model-webhook-reconciliation.md. All payloads and secrets are
+// synthetic; no real user data or credentials are used.
+// ---------------------------------------------------------------------------
+describe('Threat model: webhook signature verification', () => {
+  const secret = 'synthetic-test-secret';
+  const body = JSON.stringify({
+    event: 'transfer.success',
+    data: { reference: 'ref_tm', id: 'id-tm', amount: 1000 },
+  });
+
+  it('rejects a missing signature header', () => {
+    const result = verifyWebhookSignature({ rawBody: body, signature: null, secret });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('missing_signature');
+  });
+
+  it('rejects a malformed (non-hex / wrong length) signature', () => {
+    const result = verifyWebhookSignature({
+      rawBody: body,
+      signature: 'zzzz-not-hex',
+      secret,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('malformed_signature');
+  });
+
+  it('rejects a stale signature outside the replay window', () => {
+    const signature = hmac(body, secret);
+    const staleTimestamp = String(Date.now() - 60 * 60 * 1000);
+    const result = verifyWebhookSignature({
+      rawBody: body,
+      signature,
+      secret,
+      timestamp: staleTimestamp,
+      toleranceMs: 5 * 60 * 1000,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('stale_timestamp');
+  });
+
+  it('rejects a signature computed with the wrong secret', () => {
+    const result = verifyWebhookSignature({
+      rawBody: body,
+      signature: hmac(body, 'attacker-guessed-secret'),
+      secret,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('invalid_signature');
+  });
+
+  it('accepts a valid HMAC signature', () => {
+    const result = verifyWebhookSignature({
+      rawBody: body,
+      signature: hmac(body, secret),
+      secret,
+    });
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe('Threat model: webhook deduplication', () => {
+  beforeEach(() => {
+    webhookDeduplicationService._resetForTest();
+  });
+
+  it('rejects a duplicate event id', () => {
+    const first = webhookDeduplicationService.claim('evt-dup-1');
+    expect(first.claimed).toBe(true);
+    const second = webhookDeduplicationService.claim('evt-dup-1');
+    expect(second.claimed).toBe(false);
+    expect(second.duplicate).toBe(true);
+  });
+
+  it('releases the claim when the handler errors so retries can proceed', () => {
+    const first = webhookDeduplicationService.claim('evt-err-1');
+    expect(first.claimed).toBe(true);
+    webhookDeduplicationService.release('evt-err-1');
+    const retry = webhookDeduplicationService.claim('evt-err-1');
+    expect(retry.claimed).toBe(true);
+  });
+});
+
+describe('Threat model: admin retry replay', () => {
+  beforeEach(() => {
+    retryQueueService._resetForTest();
+  });
+
+  it('requires admin auth before replaying dead-letter jobs', () => {
+    vi.mocked(requireAdminAuth).mockReturnValue({ ok: false, status: 401 });
+    const result = retryQueueService.replayDeadLetter({ jobId: 'job-1' });
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe(401);
+    expect(retryQueueService.listDeadLetter()).toHaveLength(0);
+  });
+
+  it('only replays jobs that are in the dead-letter queue', () => {
+    const missing = retryQueueService.replayDeadLetter({ jobId: 'unknown-job' });
+    expect(missing.ok).toBe(false);
+    expect(missing.reason).toBe('not_dead_letter');
+
+    retryQueueService.enqueueDeadLetter({ jobId: 'job-2', attempts: 5 });
+    const replayed = retryQueueService.replayDeadLetter({ jobId: 'job-2' });
+    expect(replayed.ok).toBe(true);
+    expect(retryQueueService.listDeadLetter()).toHaveLength(0);
+  });
+});
+
+describe('Threat model: reconciliation ordering and audit', () => {
+  beforeEach(() => {
+    payoutReconciliationService._resetForTest();
+    vi.mocked(auditLedger.record).mockClear();
+  });
+
+  it('rejects an out-of-order transition and records it in the audit ledger', () => {
+    payoutReconciliationService.applyTransition({
+      reference: 'ref_audit',
+      status: 'reversed',
+      amount: 1000,
+    });
+    const rejected = payoutReconciliationService.applyTransition({
+      reference: 'ref_audit',
+      status: 'success',
+      amount: 1000,
+    });
+    expect(rejected.accepted).toBe(false);
+    expect(rejected.reason).toBe('out_of_order');
+    expect(auditLedger.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reference: 'ref_audit',
+        reason: 'out_of_order',
+      }),
+    );
   });
 });

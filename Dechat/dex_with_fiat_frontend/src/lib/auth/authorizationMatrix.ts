@@ -11,6 +11,8 @@ import { NextResponse } from 'next/server';
 import { requireAdminAuth } from '@/app/api/admin/_utils/requireAdminAuth';
 import { getTransferStatus, TransferStatusRecord } from '@/lib/transferStore';
 
+export type AdminRole = 'admin' | 'super_admin';
+
 export interface RouteAuthorizationRule {
   path: string;
   method: 'GET' | 'POST' | 'PUT' | 'DELETE';
@@ -18,7 +20,25 @@ export interface RouteAuthorizationRule {
   resourceOwner: 'public' | 'caller' | 'admin';
   allowedOperation: string;
   description: string;
+  /**
+   * Roles permitted to invoke the route. Empty for non-admin routes.
+   */
+  allowedRoles: AdminRole[];
+  /**
+   * Whether the caller must present a valid wallet signature challenge
+   * (admin auth nonce + signature) in addition to the session token.
+   */
+  requiresWalletSignature: boolean;
+  /**
+   * Ownership rule enforced on the addressed resource.
+   * - 'none': no resource ownership check (public/webhook routes)
+   * - 'caller': resource must belong to the caller session
+   * - 'admin': resource is system-wide, admin identity suffices
+   */
+  ownershipRule: 'none' | 'caller' | 'admin';
 }
+
+const ADMIN_ROLES: AdminRole[] = ['admin', 'super_admin'];
 
 export const ROUTE_AUTHORIZATION_MATRIX: RouteAuthorizationRule[] = [
   {
@@ -28,6 +48,9 @@ export const ROUTE_AUTHORIZATION_MATRIX: RouteAuthorizationRule[] = [
     resourceOwner: 'caller',
     allowedOperation: 'create',
     description: 'Initiate a fiat transfer intent owned by the caller session',
+    allowedRoles: [],
+    requiresWalletSignature: false,
+    ownershipRule: 'caller',
   },
   {
     path: '/api/verify-account',
@@ -36,6 +59,9 @@ export const ROUTE_AUTHORIZATION_MATRIX: RouteAuthorizationRule[] = [
     resourceOwner: 'caller',
     allowedOperation: 'read',
     description: 'Verify account number with bank code',
+    allowedRoles: [],
+    requiresWalletSignature: false,
+    ownershipRule: 'caller',
   },
   {
     path: '/api/create-recipient',
@@ -44,6 +70,9 @@ export const ROUTE_AUTHORIZATION_MATRIX: RouteAuthorizationRule[] = [
     resourceOwner: 'caller',
     allowedOperation: 'create',
     description: 'Create transfer recipient code for caller payout',
+    allowedRoles: [],
+    requiresWalletSignature: false,
+    ownershipRule: 'caller',
   },
   {
     path: '/api/transfer-status',
@@ -52,6 +81,9 @@ export const ROUTE_AUTHORIZATION_MATRIX: RouteAuthorizationRule[] = [
     resourceOwner: 'caller',
     allowedOperation: 'read',
     description: 'Check provider transfer status for caller-owned transfer',
+    allowedRoles: [],
+    requiresWalletSignature: false,
+    ownershipRule: 'caller',
   },
   {
     path: '/api/transfer-status/:reference',
@@ -60,6 +92,9 @@ export const ROUTE_AUTHORIZATION_MATRIX: RouteAuthorizationRule[] = [
     resourceOwner: 'caller',
     allowedOperation: 'read',
     description: 'Read transfer status for caller-owned transfer reference',
+    allowedRoles: [],
+    requiresWalletSignature: false,
+    ownershipRule: 'caller',
   },
   {
     path: '/api/transfer-status/:reference',
@@ -68,6 +103,9 @@ export const ROUTE_AUTHORIZATION_MATRIX: RouteAuthorizationRule[] = [
     resourceOwner: 'caller',
     allowedOperation: 'cancel',
     description: 'Request cancellation of caller-owned pending transfer',
+    allowedRoles: [],
+    requiresWalletSignature: false,
+    ownershipRule: 'caller',
   },
   {
     path: '/api/receipt/:reference',
@@ -76,6 +114,9 @@ export const ROUTE_AUTHORIZATION_MATRIX: RouteAuthorizationRule[] = [
     resourceOwner: 'caller',
     allowedOperation: 'export',
     description: 'Retrieve transaction receipt data for caller-owned transfer',
+    allowedRoles: [],
+    requiresWalletSignature: false,
+    ownershipRule: 'caller',
   },
   {
     path: '/api/payment-status/stream',
@@ -84,6 +125,9 @@ export const ROUTE_AUTHORIZATION_MATRIX: RouteAuthorizationRule[] = [
     resourceOwner: 'caller',
     allowedOperation: 'read',
     description: 'Subscribe to SSE stream for caller-owned session events',
+    allowedRoles: [],
+    requiresWalletSignature: false,
+    ownershipRule: 'caller',
   },
   {
     path: '/api/admin-audit',
@@ -92,6 +136,9 @@ export const ROUTE_AUTHORIZATION_MATRIX: RouteAuthorizationRule[] = [
     resourceOwner: 'admin',
     allowedOperation: 'admin_read',
     description: 'Retrieve system audit logs with pagination and filters',
+    allowedRoles: ADMIN_ROLES,
+    requiresWalletSignature: true,
+    ownershipRule: 'admin',
   },
   {
     path: '/api/admin/audit-log',
@@ -100,6 +147,21 @@ export const ROUTE_AUTHORIZATION_MATRIX: RouteAuthorizationRule[] = [
     resourceOwner: 'admin',
     allowedOperation: 'admin_read',
     description: 'Paginated admin audit logs (append-only)',
+    allowedRoles: ADMIN_ROLES,
+    requiresWalletSignature: true,
+    ownershipRule: 'admin',
+  },
+  {
+    path: '/api/admin/audit-log',
+    method: 'DELETE',
+    requiredIdentity: 'admin',
+    resourceOwner: 'admin',
+    allowedOperation: 'admin_delete',
+    description:
+      'Purge audit log entries (super admin only, wallet signature required)',
+    allowedRoles: ['super_admin'],
+    requiresWalletSignature: true,
+    ownershipRule: 'admin',
   },
   {
     path: '/api/admin/reconciliation',
@@ -109,6 +171,42 @@ export const ROUTE_AUTHORIZATION_MATRIX: RouteAuthorizationRule[] = [
     allowedOperation: 'admin_read',
     description:
       'Reconciliation records strictly separated from user-owned history',
+    allowedRoles: ADMIN_ROLES,
+    requiresWalletSignature: true,
+    ownershipRule: 'admin',
+  },
+  {
+    path: '/api/admin/reconciliation',
+    method: 'POST',
+    requiredIdentity: 'admin',
+    resourceOwner: 'admin',
+    allowedOperation: 'admin_reconcile',
+    description: 'Trigger reconciliation run over settlement records',
+    allowedRoles: ADMIN_ROLES,
+    requiresWalletSignature: true,
+    ownershipRule: 'admin',
+  },
+  {
+    path: '/api/admin/payout-retry',
+    method: 'POST',
+    requiredIdentity: 'admin',
+    resourceOwner: 'admin',
+    allowedOperation: 'admin_retry',
+    description: 'Retry a failed payout (admin mutation)',
+    allowedRoles: ADMIN_ROLES,
+    requiresWalletSignature: true,
+    ownershipRule: 'admin',
+  },
+  {
+    path: '/api/admin/payout-audit',
+    method: 'GET',
+    requiredIdentity: 'admin',
+    resourceOwner: 'admin',
+    allowedOperation: 'admin_read',
+    description: 'Read payout audit trail for admin reconciliation',
+    allowedRoles: ADMIN_ROLES,
+    requiresWalletSignature: true,
+    ownershipRule: 'admin',
   },
   {
     path: '/api/admin/auth/nonce',
@@ -118,6 +216,9 @@ export const ROUTE_AUTHORIZATION_MATRIX: RouteAuthorizationRule[] = [
     allowedOperation: 'read',
     description:
       'Generate cryptographic nonce for admin authentication challenge',
+    allowedRoles: [],
+    requiresWalletSignature: false,
+    ownershipRule: 'none',
   },
   {
     path: '/api/admin/auth/nonce',
@@ -126,6 +227,9 @@ export const ROUTE_AUTHORIZATION_MATRIX: RouteAuthorizationRule[] = [
     resourceOwner: 'public',
     allowedOperation: 'create',
     description: 'Verify signature and issue admin session token',
+    allowedRoles: [],
+    requiresWalletSignature: true,
+    ownershipRule: 'none',
   },
   {
     path: '/api/banks',
@@ -134,6 +238,9 @@ export const ROUTE_AUTHORIZATION_MATRIX: RouteAuthorizationRule[] = [
     resourceOwner: 'public',
     allowedOperation: 'read',
     description: 'Public listing of supported settlement banks',
+    allowedRoles: [],
+    requiresWalletSignature: false,
+    ownershipRule: 'none',
   },
   {
     path: '/api/webhook',
@@ -143,8 +250,43 @@ export const ROUTE_AUTHORIZATION_MATRIX: RouteAuthorizationRule[] = [
     allowedOperation: 'webhook_process',
     description:
       'Process provider settlement webhooks verified with HMAC signature',
+    allowedRoles: [],
+    requiresWalletSignature: false,
+    ownershipRule: 'admin',
   },
 ];
+
+/**
+ * Canonical list of every admin mutation route that must be covered by
+ * end-to-end authorization tests (Issue #255).
+ */
+export const ADMIN_MUTATION_ROUTES: ReadonlyArray<{
+  path: string;
+  method: RouteAuthorizationRule['method'];
+}> = [
+  { path: '/api/admin/payout-retry', method: 'POST' },
+  { path: '/api/admin/reconciliation', method: 'GET' },
+  { path: '/api/admin/reconciliation', method: 'POST' },
+  { path: '/api/admin/audit-log', method: 'GET' },
+  { path: '/api/admin/audit-log', method: 'DELETE' },
+  { path: '/api/admin/payout-audit', method: 'GET' },
+  { path: '/api/admin-audit', method: 'GET' },
+  { path: '/api/admin/auth/nonce', method: 'GET' },
+  { path: '/api/admin/auth/nonce', method: 'POST' },
+];
+
+/**
+ * Looks up the authorization rule for a route and method.
+ * Returns undefined when the route is not registered in the matrix.
+ */
+export function getAuthorizationRule(
+  path: string,
+  method: RouteAuthorizationRule['method'],
+): RouteAuthorizationRule | undefined {
+  return ROUTE_AUTHORIZATION_MATRIX.find(
+    (rule) => rule.path === path && rule.method === method,
+  );
+}
 
 /**
  * Extracts the client session ID from headers, query string, or cookies.

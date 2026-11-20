@@ -307,3 +307,131 @@ export class PayoutReconciliationService {
 }
 
 export const payoutReconciliationService = new PayoutReconciliationService();
+
+/*
+ * Threat-model coverage map (see docs/payout-threat-model.md):
+ *
+ * - TM-RECON-1 (out-of-order / replay regression): a provider event that would
+ *   regress a settled or reversed payout is rejected and persisted for
+ *   investigation. Covered by "rejects out-of-order transitions" tests.
+ * - TM-RECON-2 (duplicate delivery / idempotency): re-delivering the same
+ *   terminal event must be a no-op and must not mutate state. Covered by
+ *   "treats duplicate terminal events as idempotent no-ops".
+ * - TM-RECON-3 (unrecognized / spoofed event types): unknown event types are
+ *   never applied and never reach the audit ledger as domain actions. Covered
+ *   by "ignores unrecognized event types".
+ * - TM-RECON-4 (audit trail integrity): every rejected event is recorded in the
+ *   immutable audit ledger with the provider reference and reason so finance
+ *   can reconcile. Covered by "records rejected events in the audit ledger".
+ *
+ * All fixtures use synthetic payout references (e.g. "po_test_...") and never
+ * contain real user data or credentials.
+ */
+export interface ReconciliationThreatCase {
+  id: string;
+  description: string;
+  run: (service: PayoutReconciliationService) => void;
+}
+
+export function buildReconciliationThreatCases(): ReconciliationThreatCase[] {
+  return [
+    {
+      id: 'TM-RECON-1',
+      description:
+        'Out-of-order event attempting to regress a settled payout is rejected',
+      run: (service) => {
+        const decision = service.reconcileEvent({
+          eventId: 'evt_test_regress_001',
+          payoutReference: 'po_test_regress_001',
+          eventType: 'transfer.failed',
+          currentStatus: 'success',
+        });
+        if (decision.decision !== 'REJECTED_OUT_OF_ORDER') {
+          throw new Error(
+            `Expected REJECTED_OUT_OF_ORDER, got ${decision.decision}`,
+          );
+        }
+        if (decision.effectiveStatus !== 'success') {
+          throw new Error(
+            `Effective status must remain success, got ${decision.effectiveStatus}`,
+          );
+        }
+      },
+    },
+    {
+      id: 'TM-RECON-2',
+      description: 'Duplicate terminal event is an idempotent no-op',
+      run: (service) => {
+        const decision = service.reconcileEvent({
+          eventId: 'evt_test_dup_001',
+          payoutReference: 'po_test_dup_001',
+          eventType: 'transfer.success',
+          currentStatus: 'success',
+        });
+        if (decision.decision !== 'IDEMPOTENT_NOOP') {
+          throw new Error(
+            `Expected IDEMPOTENT_NOOP, got ${decision.decision}`,
+          );
+        }
+        if (decision.effectiveStatus !== 'success') {
+          throw new Error(
+            `Effective status must remain success, got ${decision.effectiveStatus}`,
+          );
+        }
+      },
+    },
+    {
+      id: 'TM-RECON-3',
+      description: 'Unrecognized event type is never applied',
+      run: (service) => {
+        const decision = service.reconcileEvent({
+          eventId: 'evt_test_unknown_001',
+          payoutReference: 'po_test_unknown_001',
+          eventType: 'transfer.spoofed',
+          currentStatus: 'pending',
+        });
+        if (decision.decision !== 'UNRECOGNIZED_EVENT') {
+          throw new Error(
+            `Expected UNRECOGNIZED_EVENT, got ${decision.decision}`,
+          );
+        }
+        if (decision.effectiveStatus !== 'pending') {
+          throw new Error(
+            `Effective status must remain pending, got ${decision.effectiveStatus}`,
+          );
+        }
+      },
+    },
+    {
+      id: 'TM-RECON-4',
+      description: 'Rejected events are persisted for audit investigation',
+      run: (service) => {
+        service.reconcileEvent({
+          eventId: 'evt_test_audit_001',
+          payoutReference: 'po_test_audit_001',
+          eventType: 'transfer.reversed',
+          currentStatus: 'reversed',
+        });
+        service.reconcileEvent({
+          eventId: 'evt_test_audit_002',
+          payoutReference: 'po_test_audit_001',
+          eventType: 'transfer.success',
+          currentStatus: 'reversed',
+        });
+        const rejected = service.getRejectedEvents({
+          payoutReference: 'po_test_audit_001',
+        });
+        if (rejected.length !== 1) {
+          throw new Error(
+            `Expected 1 rejected event, got ${rejected.length}`,
+          );
+        }
+        if (rejected[0].eventId !== 'evt_test_audit_002') {
+          throw new Error(
+            `Unexpected rejected event id ${rejected[0].eventId}`,
+          );
+        }
+      },
+    },
+  ];
+}

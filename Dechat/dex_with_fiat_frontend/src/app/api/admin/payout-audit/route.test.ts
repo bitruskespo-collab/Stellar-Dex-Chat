@@ -17,7 +17,7 @@ describe('/api/admin/payout-audit', () => {
     mockRequireAdminAuth.mockReturnValue(null); // Authorized by default
   });
 
-  it('rejects unauthorized requests', async () => {
+  it('rejects unauthorized GET requests with 401', async () => {
     mockRequireAdminAuth.mockReturnValue(
       new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 }),
     );
@@ -27,9 +27,23 @@ describe('/api/admin/payout-audit', () => {
     );
     const res = await GET(req);
     expect(res.status).toBe(401);
+    expect(mockRequireAdminAuth).toHaveBeenCalledTimes(1);
   });
 
-  it('returns paginated JSON audit entries', async () => {
+  it('rejects unauthorized CSV export requests with 401', async () => {
+    mockRequireAdminAuth.mockReturnValue(
+      new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 }),
+    );
+
+    const req = new NextRequest(
+      new Request('http://localhost/api/admin/payout-audit?format=csv'),
+    );
+    const res = await GET(req);
+    expect(res.status).toBe(401);
+    expect(res.headers.get('content-type')).not.toContain('text/csv');
+  });
+
+  it('returns paginated JSON audit entries for authorized admins', async () => {
     payoutAuditLedger.recordEvent({
       payoutId: 'PO-1',
       action: 'payout_initiated',
@@ -46,6 +60,7 @@ describe('/api/admin/payout-audit', () => {
     );
     const res = await GET(req);
     expect(res.status).toBe(200);
+    expect(mockRequireAdminAuth).toHaveBeenCalledTimes(1);
 
     const body = await res.json();
     expect(body.total).toBe(2);
@@ -76,6 +91,36 @@ describe('/api/admin/payout-audit', () => {
   });
 
   it('rejects POST, PUT, DELETE, and PATCH methods with 405 Method Not Allowed to preserve append-only ledger', async () => {
+    const postRes = await POST();
+    const putRes = await PUT();
+    const deleteRes = await DELETE();
+    const patchRes = await PATCH();
+
+    expect(postRes.status).toBe(405);
+    expect(putRes.status).toBe(405);
+    expect(deleteRes.status).toBe(405);
+    expect(patchRes.status).toBe(405);
+  });
+
+  it('rejects mutation methods with 405 even when the caller is an authorized admin', async () => {
+    mockRequireAdminAuth.mockReturnValue(null); // Authorized admin
+
+    const postRes = await POST();
+    const putRes = await PUT();
+    const deleteRes = await DELETE();
+    const patchRes = await PATCH();
+
+    expect(postRes.status).toBe(405);
+    expect(putRes.status).toBe(405);
+    expect(deleteRes.status).toBe(405);
+    expect(patchRes.status).toBe(405);
+  });
+
+  it('rejects mutation methods with 405 when the caller is unauthenticated', async () => {
+    mockRequireAdminAuth.mockReturnValue(
+      new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 }),
+    );
+
     const postRes = await POST();
     const putRes = await PUT();
     const deleteRes = await DELETE();

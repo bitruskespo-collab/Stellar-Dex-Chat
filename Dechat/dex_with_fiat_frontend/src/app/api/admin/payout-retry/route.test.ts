@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 import { payoutRetryQueue } from '@/lib/payout/retryQueue';
+import {
+  ADMIN_MUTATION_MATRIX,
+  findMatrixEntry,
+} from '@/lib/admin/__tests__/adminMutationMatrix';
 
 const mockRequireAdminAuth = vi.fn();
 
@@ -9,6 +13,8 @@ vi.mock('@/app/api/admin/_utils/requireAdminAuth', () => ({
 }));
 
 const { GET, POST } = await import('./route');
+
+const ROUTE = '/api/admin/payout-retry';
 
 describe('/api/admin/payout-retry', () => {
   beforeEach(() => {
@@ -85,5 +91,83 @@ describe('/api/admin/payout-retry', () => {
 
     const res = await POST(badReq);
     expect(res.status).toBe(400);
+  });
+
+  describe('authorization matrix (handler-level)', () => {
+    const entry = findMatrixEntry(ROUTE, 'POST');
+
+    const buildReplayRequest = () =>
+      new NextRequest(
+        new Request('http://localhost/api/admin/payout-retry', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ jobId: 'job-synthetic-1', action: 'replay' }),
+        }),
+      );
+
+    const seedDeadLetterJob = () => {
+      const job = payoutRetryQueue.enqueueJob({
+        payoutId: 'PO-MATRIX',
+        idempotencyKey: 'idem-matrix-1',
+        payload: { source: 'balance', amount: 1000, recipient: 'RCP-MATRIX' },
+      });
+      job.status = 'dead_letter';
+      return job;
+    };
+
+    it('is represented in the admin mutation matrix', () => {
+      expect(entry).toBeDefined();
+      expect(entry?.requiresAuth).toBe(true);
+      expect(entry?.requiresAdminRole).toBe(true);
+    });
+
+    it('denies unauthenticated requests with 401', async () => {
+      mockRequireAdminAuth.mockReturnValue(
+        new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 }),
+      );
+
+      const res = await POST(buildReplayRequest());
+      expect(res.status).toBe(401);
+    });
+
+    it('denies authenticated non-admin roles with 403', async () => {
+      mockRequireAdminAuth.mockReturnValue(
+        new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403 }),
+      );
+
+      const res = await POST(buildReplayRequest());
+      expect(res.status).toBe(403);
+    });
+
+    it('denies requests with an invalid wallet signature with 401', async () => {
+      mockRequireAdminAuth.mockReturnValue(
+        new Response(JSON.stringify({ error: 'Invalid signature' }), {
+          status: 401,
+        }),
+      );
+
+      const res = await POST(buildReplayRequest());
+      expect(res.status).toBe(401);
+    });
+
+    it('allows an authorized admin to replay a dead-letter job', async () => {
+      mockRequireAdminAuth.mockReturnValue(null);
+      const job = seedDeadLetterJob();
+
+      const req = new NextRequest(
+        new Request('http://localhost/api/admin/payout-retry', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ jobId: job.id, action: 'replay' }),
+        }),
+      );
+
+      const res = await POST(req);
+      expect(res.status).toBe(200);
+
+      const data = await res.json();
+      expect(data.success).toBe(true);
+      expect(data.job.status).toBe('pending');
+    });
   });
 });

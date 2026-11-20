@@ -23,6 +23,19 @@ export interface VerificationResult {
 const DEFAULT_SIGNATURE_MAX_AGE_MS = 5 * 60 * 1000; // 5 minutes
 
 /**
+ * Threat-model note (#256):
+ * - `rawPayload` is fully attacker-controlled until the signature is verified.
+ *   Never parse or act on it before `verifyWebhookSignature` returns `valid: true`.
+ * - `signature` and `timestamp` are attacker-controlled headers. They are only
+ *   used for constant-time comparison and freshness checks, never for routing.
+ * - `secrets` are trusted server-side configuration; they must never be logged
+ *   or echoed back in error messages.
+ * - A `stale_signature` result prevents replay of captured payloads; callers
+ *   must treat it as a hard failure (no retry of the same payload).
+ */
+=======
+
+/**
  * Constant-time comparison between two hex strings.
  */
 export function verifySignatureConstantTime(
@@ -120,20 +133,27 @@ export function verifyWebhookSignature({
     };
   }
 
-  // Check timestamp if provided to reject stale signatures
-  if (timestamp) {
+  // Check timestamp if provided to reject stale signatures.
+  // A present-but-unparseable timestamp is treated as stale rather than skipped,
+  // so an attacker cannot bypass freshness checks by sending a non-numeric value.
+  if (timestamp !== null && timestamp !== undefined && timestamp !== '') {
     const parsedTime = Number(timestamp);
-    if (!Number.isNaN(parsedTime)) {
-      // Support both unix timestamp in seconds and milliseconds
-      const timeMs = parsedTime < 1e12 ? parsedTime * 1000 : parsedTime;
-      const age = Math.abs(Date.now() - timeMs);
-      if (age > maxAgeMs) {
-        return {
-          valid: false,
-          error: 'stale_signature',
-          message: 'Stale webhook signature',
-        };
-      }
+    if (Number.isNaN(parsedTime)) {
+      return {
+        valid: false,
+        error: 'stale_signature',
+        message: 'Stale webhook signature',
+      };
+    }
+    // Support both unix timestamp in seconds and milliseconds
+    const timeMs = parsedTime < 1e12 ? parsedTime * 1000 : parsedTime;
+    const age = Math.abs(Date.now() - timeMs);
+    if (age > maxAgeMs) {
+      return {
+        valid: false,
+        error: 'stale_signature',
+        message: 'Stale webhook signature',
+      };
     }
   }
 

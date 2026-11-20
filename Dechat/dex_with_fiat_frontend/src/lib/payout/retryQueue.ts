@@ -357,3 +357,111 @@ export class PayoutRetryQueue {
 }
 
 export const payoutRetryQueue = new PayoutRetryQueue();
+
+if (process.env.NODE_ENV === 'test') {
+  // Regression tests for operator replay trust boundaries (#256).
+  // These run only under the test environment and never touch real data.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const assert = require('assert') as typeof import('assert');
+
+  const runReplayTests = async (): Promise<void> => {
+    const makeLedger = () => {
+      const events: any[] = [];
+      const ledger = {
+        recordEvent: (e: any) => {
+          events.push(e);
+          return e;
+        },
+      } as unknown as PayoutAuditLedger;
+      return { ledger, events };
+    };
+
+    const makeProvider = (calls: any[]) =>
+      ({
+        initiateTransfer: async (req: any) => {
+          calls.push(req);
+          return { status: 'success' };
+        },
+      }) as unknown as PayoutProvider;
+
+    // 1. Only dead-letter jobs can be replayed.
+    {
+      const { ledger } = makeLedger();
+      const queue = new PayoutRetryQueue(undefined, {}, ledger);
+      const job = queue.enqueueJob({
+        payoutId: 'po_1',
+        idempotencyKey: 'idem_1',
+        payload: { source: 'src', amount: 100, recipient: 'rcp' },
+      });
+      assert.throws(
+        () => queue.replayDeadLetterJob(job.id),
+        /Only dead-letter jobs can be replayed/,
+      );
+      assert.throws(
+        () => queue.replayDeadLetterJob('missing'),
+        /Retry job not found/,
+      );
+    }
+
+    // 2. Replay reuses the original idempotency key and records the actor.
+    {
+      const { ledger, events } = makeLedger();
+      const queue = new PayoutRetryQueue(
+        undefined,
+        { maxAttempts: 1, baseDelayMs: 0, jitterFactor: 0 },
+        ledger,
+      );
+      const job = queue.enqueueJob({
+        payoutId: 'po_2',
+        idempotencyKey: 'idem_2',
+        payload: { source: 'src', amount: 50, recipient: 'rcp' },
+      });
+      const provider = makeProvider([]);
+      await queue.processDueJobs(provider, Date.now() + 10_000);
+      assert.strictEqual(queue.getJob(job.id)!.status, 'dead_letter');
+
+      const replayed = queue.replayDeadLetterJob(job.id, 'operator:admin');
+      assert.strictEqual(replayed.status, 'pending');
+      assert.strictEqual(replayed.idempotencyKey, 'idem_2');
+      assert.strictEqual(replayed.payload.reference, 'idem_2');
+      assert.strictEqual(replayed.attempts, 0);
+
+      const replayEvent = events.find(
+        (e) => e.action === 'dead_letter_replayed',
+      );
+      assert.ok(replayEvent, 'replay audit event recorded');
+      assert.strictEqual(replayEvent.actor, 'operator:admin');
+      assert.strictEqual(replayEvent.providerReference, 'idem_2');
+    }
+
+    // 3. Replay does not create duplicate transfers: the provider always
+    //    receives the original idempotency key as the reference.
+    {
+      const { ledger } = makeLedger();
+      const queue = new PayoutRetryQueue(
+        undefined,
+        { maxAttempts: 1, baseDelayMs: 0, jitterFactor: 0 },
+        ledger,
+      );
+      const job = queue.enqueueJob({
+        payoutId: 'po_3',
+        idempotencyKey: 'idem_3',
+        payload: { source: 'src', amount: 75, recipient: 'rcp' },
+      });
+      const calls: any[] = [];
+      const provider = makeProvider(calls);
+      await queue.processDueJobs(provider, Date.now() + 10_000);
+      queue.replayDeadLetterJob(job.id);
+      await queue.processDueJobs(provider, Date.now() + 10_000);
+      assert.ok(calls.length >= 2);
+      for (const call of calls) {
+        assert.strictEqual(call.reference, 'idem_3');
+      }
+    }
+  };
+
+  // eslint-disable-next-line @typescript-eslint/no-floating-promises
+  runReplayTests().catch((err) => {
+    console.error('PayoutRetryQueue replay regression tests failed:', err);
+  });
+}

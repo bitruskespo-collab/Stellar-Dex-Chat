@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 import AuditLogService from '@/lib/auditLog';
+import { requireAdminAuth } from '@/lib/adminAuth';
 import type { AuditEntry } from '@/types';
 
 const mockEnv = { ADMIN_SECRET: 'test-admin-secret' };
@@ -16,6 +17,10 @@ vi.mock('@/lib/auditLog', () => ({
   },
 }));
 
+vi.mock('@/lib/adminAuth', () => ({
+  requireAdminAuth: vi.fn(() => null),
+}));
+
 const { GET } = await import('./route');
 
 function request(query = '') {
@@ -26,16 +31,26 @@ describe('GET /api/admin-audit', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockEnv.ADMIN_SECRET = 'test-admin-secret';
+    vi.mocked(requireAdminAuth).mockReturnValue(null);
   });
 
   it('returns 401 without authentication and does not read audit entries', async () => {
+    vi.mocked(requireAdminAuth).mockReturnValueOnce(
+      new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 }),
+    );
+
     const res = await GET(request());
 
     expect(res.status).toBe(401);
+    expect(requireAdminAuth).toHaveBeenCalledTimes(1);
     expect(AuditLogService.getAuditEntries).not.toHaveBeenCalled();
   });
 
   it('returns 401 with an invalid admin token', async () => {
+    vi.mocked(requireAdminAuth).mockReturnValueOnce(
+      new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 }),
+    );
+
     const res = await GET(
       new NextRequest('http://localhost/api/admin-audit', {
         headers: { 'x-admin-token': 'wrong-secret' },
@@ -43,7 +58,53 @@ describe('GET /api/admin-audit', () => {
     );
 
     expect(res.status).toBe(401);
+    expect(requireAdminAuth).toHaveBeenCalledTimes(1);
     expect(AuditLogService.getAuditEntries).not.toHaveBeenCalled();
+  });
+
+  it('returns 403 when the client IP is not allowlisted and does not read audit entries', async () => {
+    vi.mocked(requireAdminAuth).mockReturnValueOnce(
+      new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403 }),
+    );
+
+    const res = await GET(authenticatedRequest());
+    const body = await res.json();
+
+    expect(res.status).toBe(403);
+    expect(body).toEqual({ error: 'Forbidden' });
+    expect(requireAdminAuth).toHaveBeenCalledTimes(1);
+    expect(AuditLogService.getAuditEntries).not.toHaveBeenCalled();
+  });
+
+  it('checks authorization before validating query parameters', async () => {
+    vi.mocked(requireAdminAuth).mockReturnValueOnce(
+      new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 }),
+    );
+
+    const res = await GET(request('?startDate=not-a-date&sortKey=invalid'));
+
+    expect(res.status).toBe(401);
+    expect(AuditLogService.getAuditEntries).not.toHaveBeenCalled();
+  });
+
+  it('returns filtered entries for an authorized admin', async () => {
+    const mockEntries: AuditEntry[] = [
+      { id: '1', timestamp: new Date('2025-01-02T00:00:00Z'), actionType: 'deposit', status: 'success', adminAddress: 'addr1', actionDescription: '', metadata: {} },
+      { id: '2', timestamp: new Date('2025-01-03T00:00:00Z'), actionType: 'payout', status: 'failed', adminAddress: 'addr2', actionDescription: '', metadata: {} },
+    ];
+    vi.mocked(AuditLogService.getAuditEntries).mockReturnValueOnce(mockEntries);
+
+    const res = await GET(
+      authenticatedRequest('?actionType=deposit&status=success&limit=10&offset=0'),
+    );
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(requireAdminAuth).toHaveBeenCalledTimes(1);
+    expect(AuditLogService.getAuditEntries).toHaveBeenCalledTimes(1);
+    expect(body.entries).toHaveLength(1);
+    expect(body.entries[0].id).toBe('1');
+    expect(body.total).toBe(1);
   });
 
   it('returns 200 with a valid admin token and default pagination', async () => {
@@ -78,6 +139,7 @@ describe('GET /api/admin-audit', () => {
 
     expect(res.status).toBe(400);
     expect(body.error).toContain('startDate');
+    expect(AuditLogService.getAuditEntries).not.toHaveBeenCalled();
   });
 
   it('returns 400 for invalid endDate', async () => {
@@ -173,10 +235,11 @@ describe('GET /api/admin-audit', () => {
     expect(maxPage1).toBeLessThan(minPage2);
   });
 
-  it('returns 405 for POST', async () => {
+  it('returns 405 for POST without reading audit entries', async () => {
     const { POST } = await import('./route');
     const res = await POST();
     expect(res.status).toBe(405);
+    expect(AuditLogService.getAuditEntries).not.toHaveBeenCalled();
   });
 });
 

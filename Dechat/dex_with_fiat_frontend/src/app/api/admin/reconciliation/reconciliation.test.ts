@@ -10,28 +10,89 @@ vi.mock('@/lib/serverEnv', () => ({
   },
 }));
 
+const mockAllowlist = vi.hoisted(() => ({
+  enforceAdminIpAllowlist: vi.fn(() => null as Response | null),
+}));
+
 vi.mock('@/lib/security', () => ({
-  enforceAdminIpAllowlist: () => null,
+  enforceAdminIpAllowlist: mockAllowlist.enforceAdminIpAllowlist,
+}));
+
+const mockReconciliation = vi.hoisted(() => ({
+  reconcileStalePayouts: vi.fn(),
 }));
 
 vi.mock('@/lib/payout/reconciliation', () => ({
-  reconcileStalePayouts: vi.fn().mockResolvedValue({
-    processed: 2,
-    transitioned: 1,
-    noChange: 1,
-    providerUnavailable: 0,
-    errors: 0,
-    results: [],
-    timestamp: 123456789,
-  }),
+  reconcileStalePayouts: mockReconciliation.reconcileStalePayouts,
 }));
 
 import { GET, POST } from './route';
+
+const reconciliationSummary = {
+  processed: 2,
+  transitioned: 1,
+  noChange: 1,
+  providerUnavailable: 0,
+  errors: 0,
+  results: [],
+  timestamp: 123456789,
+};
 
 describe('Admin Reconciliation Route', () => {
   beforeEach(() => {
     mockEnv.ADMIN_SECRET = 'test-admin-secret';
     vi.clearAllMocks();
+    mockAllowlist.enforceAdminIpAllowlist.mockReturnValue(null);
+    mockReconciliation.reconcileStalePayouts.mockResolvedValue(reconciliationSummary);
+  });
+
+  describe('authorization matrix', () => {
+    it('denies unauthenticated GET with 401 and never reads reconciliation data', async () => {
+      const req = new NextRequest('http://localhost/api/admin/reconciliation');
+      const res = await GET(req);
+      expect(res.status).toBe(401);
+      expect(mockReconciliation.reconcileStalePayouts).not.toHaveBeenCalled();
+    });
+
+    it('denies unauthenticated POST with 401 and never triggers reconciliation', async () => {
+      const req = new NextRequest('http://localhost/api/admin/reconciliation', {
+        method: 'POST',
+      });
+      const res = await POST(req);
+      expect(res.status).toBe(401);
+      expect(mockReconciliation.reconcileStalePayouts).not.toHaveBeenCalled();
+    });
+
+    it('denies non-admin session (no admin token) with 401', async () => {
+      const req = new NextRequest('http://localhost/api/admin/reconciliation', {
+        headers: { cookie: 'session=regular-user-session' },
+      });
+      const res = await GET(req);
+      expect([401, 403]).toContain(res.status);
+      expect(mockReconciliation.reconcileStalePayouts).not.toHaveBeenCalled();
+    });
+
+    it('denies requests rejected by the IP allowlist with 403', async () => {
+      mockAllowlist.enforceAdminIpAllowlist.mockReturnValue(
+        new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403 }),
+      );
+      const req = new NextRequest('http://localhost/api/admin/reconciliation', {
+        headers: { 'x-admin-token': 'test-admin-secret' },
+      });
+      const res = await GET(req);
+      expect(res.status).toBe(403);
+      expect(mockReconciliation.reconcileStalePayouts).not.toHaveBeenCalled();
+    });
+
+    it('allows an authorized admin to receive the reconciliation report', async () => {
+      const req = new NextRequest('http://localhost/api/admin/reconciliation', {
+        headers: { 'x-admin-token': 'test-admin-secret' },
+      });
+      const res = await GET(req);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(Array.isArray(body)).toBe(true);
+    });
   });
 
   describe('GET /api/admin/reconciliation', () => {
