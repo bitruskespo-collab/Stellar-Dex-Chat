@@ -5,6 +5,10 @@ import {
   authorizeTransferAccess,
   uniformNotFoundResponse,
 } from '@/lib/auth/authorizationMatrix';
+import {
+  buildFreshnessEnvelope,
+  DEFAULT_FRESHNESS_THRESHOLD_MS,
+} from '@/lib/readModelFreshness';
 
 const RATE_LIMIT = { maxRequests: 5, windowMs: 60_000 };
 
@@ -151,8 +155,15 @@ export async function GET(
 
     const transferRecord = auth.record;
 
+    // Read-model freshness metadata: expose the database update time backing this
+    // projection so clients never present a stale record as confirmed settlement.
+    const freshness = buildFreshnessEnvelope({
+      dbUpdatedAt: transferRecord?.updatedAt,
+      thresholdMs: DEFAULT_FRESHNESS_THRESHOLD_MS,
+    });
+
     if (cancelledTransfers.has(reference)) {
-      return NextResponse.json({
+      const response = NextResponse.json({
         success: true,
         data: {
           reference,
@@ -160,12 +171,16 @@ export async function GET(
           amount: transferRecord?.amount ?? 0,
           message: 'Transfer cancellation requested successfully',
         },
+        freshness,
       });
+      response.headers.set('X-Correlation-Id', correlationId);
+      return response;
     }
 
-    return NextResponse.json({
+    const response = NextResponse.json({
       success: true,
       data: transferRecord,
+      freshness,
     });
     response.headers.set('X-Correlation-Id', correlationId);
     return response;

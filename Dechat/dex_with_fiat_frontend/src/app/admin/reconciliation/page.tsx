@@ -4,6 +4,12 @@ import { useState, useEffect, useCallback } from 'react';
 import { ReconciliationRecord } from '../../../types';
 import AdminGuard from '@/components/AdminGuard';
 
+export interface ReadModelFreshness {
+  isStale: boolean;
+  sourceLedgerCursor?: string | number | null;
+  dbUpdatedAt?: string | null;
+}
+
 export default function ReconciliationDashboard() {
   const [records, setRecords] = useState<ReconciliationRecord[]>([]);
   const [filteredRecords, setFilteredRecords] = useState<
@@ -14,6 +20,7 @@ export default function ReconciliationDashboard() {
   const [endDate, setEndDate] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [showReauthPrompt, setShowReauthPrompt] = useState(false);
+  const [freshness, setFreshness] = useState<ReadModelFreshness | null>(null);
 
   useEffect(() => {
     fetchReconciliationData();
@@ -33,7 +40,19 @@ export default function ReconciliationDashboard() {
       
       if (response.ok) {
         const data = await response.json();
-        setRecords(data);
+        // Support both the legacy bare-array payload and the freshness-aware
+        // envelope { records, isStale, sourceLedgerCursor, dbUpdatedAt }.
+        if (Array.isArray(data)) {
+          setRecords(data);
+          setFreshness(null);
+        } else {
+          setRecords(data.records ?? []);
+          setFreshness({
+            isStale: Boolean(data.isStale),
+            sourceLedgerCursor: data.sourceLedgerCursor ?? null,
+            dbUpdatedAt: data.dbUpdatedAt ?? null,
+          });
+        }
       } else {
         console.error('Failed to fetch data');
       }
@@ -140,6 +159,41 @@ export default function ReconciliationDashboard() {
         <h1 className="text-3xl font-bold text-gray-900 dark:text-white mb-8">
           Admin Reconciliation Dashboard
         </h1>
+
+        {/* Read-model freshness metadata */}
+        {freshness && (
+          <div
+            data-testid="reconciliation-freshness"
+            className="mb-8 flex flex-wrap items-center gap-4 text-sm text-gray-600 dark:text-gray-400"
+          >
+            {freshness.isStale ? (
+              <span
+                data-testid="reconciliation-stale-badge"
+                className="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-yellow-100 text-yellow-800 dark:bg-yellow-800 dark:text-yellow-200"
+              >
+                Stale projection — not confirmed settlement state
+              </span>
+            ) : (
+              <span
+                data-testid="reconciliation-fresh-badge"
+                className="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-800 dark:text-green-200"
+              >
+                Fresh
+              </span>
+            )}
+            {freshness.sourceLedgerCursor !== null &&
+              freshness.sourceLedgerCursor !== undefined && (
+                <span data-testid="reconciliation-ledger-cursor">
+                  Ledger cursor: {String(freshness.sourceLedgerCursor)}
+                </span>
+              )}
+            {freshness.dbUpdatedAt && (
+              <span data-testid="reconciliation-db-updated-at">
+                DB updated: {new Date(freshness.dbUpdatedAt).toLocaleString()}
+              </span>
+            )}
+          </div>
+        )}
 
         {/* Filters */}
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 mb-8">
@@ -266,31 +320,42 @@ export default function ReconciliationDashboard() {
                       </div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      <span
-                        className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                          record.status === 'matched'
-                            ? 'bg-green-100 text-green-800 dark:bg-green-800 dark:text-green-200'
-                            : record.status === 'unmatched'
-                              ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-800 dark:text-yellow-200'
-                              : 'bg-red-100 text-red-800 dark:bg-red-800 dark:text-red-200'
-                        }`}
-                      >
-                        {record.status}
-                      </span>
-                      {record.payoutId && (
-                        <div className="mt-1">
+                      {freshness?.isStale ? (
+                        <span
+                          data-testid="reconciliation-record-stale"
+                          className="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-yellow-100 text-yellow-800 dark:bg-yellow-800 dark:text-yellow-200"
+                        >
+                          Stale — unconfirmed
+                        </span>
+                      ) : (
+                        <>
                           <span
                             className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                              record.payoutStatus === 'completed'
+                              record.status === 'matched'
                                 ? 'bg-green-100 text-green-800 dark:bg-green-800 dark:text-green-200'
-                                : record.payoutStatus === 'pending'
+                                : record.status === 'unmatched'
                                   ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-800 dark:text-yellow-200'
                                   : 'bg-red-100 text-red-800 dark:bg-red-800 dark:text-red-200'
                             }`}
                           >
-                            {record.payoutStatus}
+                            {record.status}
                           </span>
-                        </div>
+                          {record.payoutId && (
+                            <div className="mt-1">
+                              <span
+                                className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                                  record.payoutStatus === 'completed'
+                                    ? 'bg-green-100 text-green-800 dark:bg-green-800 dark:text-green-200'
+                                    : record.payoutStatus === 'pending'
+                                      ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-800 dark:text-yellow-200'
+                                      : 'bg-red-100 text-red-800 dark:bg-red-800 dark:text-red-200'
+                                }`}
+                              >
+                                {record.payoutStatus}
+                              </span>
+                            </div>
+                          )}
+                        </>
                       )}
                     </td>
                   </tr>

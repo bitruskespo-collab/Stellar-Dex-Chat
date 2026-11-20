@@ -130,6 +130,11 @@ export class PayoutRetryQueue {
     initialDelayMs?: number;
     correlationId?: string;
   }): RetryJob {
+    // Synchronous critical section: the lookup and insertion below run without
+    // any await/yield, so concurrent callers (including parallel requests that
+    // resolve to the same event-loop tick) observe at most one job per
+    // idempotency key. This mirrors the DB-level unique constraint on
+    // (provider, idempotency_key) enforced by the production engine.
     const existing = Array.from(this.jobs.values()).find(
       (j) => j.idempotencyKey === params.idempotencyKey,
     );
@@ -198,16 +203,27 @@ export class PayoutRetryQueue {
     let failed = 0;
     let deadLetter = 0;
 
+    // Claim due jobs synchronously before any await so that concurrent
+    // processDueJobs invocations cannot both pick up the same job. The
+    // pending -> processing transition acts as an in-memory row lock,
+    // matching the SELECT ... FOR UPDATE SKIP LOCKED semantics used by the
+    // production database worker.
+    const claimed: RetryJob[] = [];
     for (const job of this.jobs.values()) {
       if (job.status !== 'pending' || job.nextRunAt > now) {
         continue;
       }
-
-      processed++;
       job.status = 'processing';
       job.attempts++;
       job.updatedAt = new Date().toISOString();
+      claimed.push(job);
+    }
+    if (claimed.length > 0) {
       this.persistToFile();
+    }
+
+    for (const job of claimed) {
+      processed++;
 
       try {
         await provider.initiateTransfer({
@@ -304,6 +320,16 @@ export class PayoutRetryQueue {
 
   public getJob(id: string): RetryJob | undefined {
     return this.jobs.get(id);
+  }
+
+  /**
+   * Look up a job by its idempotency key. Used by concurrency tests and by
+   * callers that need to verify at most one retry job exists per key.
+   */
+  public getJobByIdempotencyKey(idempotencyKey: string): RetryJob | undefined {
+    return Array.from(this.jobs.values()).find(
+      (j) => j.idempotencyKey === idempotencyKey,
+    );
   }
 
   /**

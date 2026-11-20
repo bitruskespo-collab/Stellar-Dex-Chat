@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom';
-import { afterEach, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, vi } from 'vitest';
 import { resetNetworkQueueForTests } from '@/lib/networkQueue';
 
 vi.mock('server-only', () => ({}));
@@ -75,3 +75,54 @@ console.error = (...args: unknown[]) => {
 afterEach(() => {
   resetNetworkQueueForTests();
 });
+
+// ---------------------------------------------------------------------------
+// Database-backed concurrency suite setup.
+//
+// The payout idempotency race tests run against the production database engine
+// (Postgres) using a throwaway, locally provisioned database. They are opt-in:
+// when TEST_DATABASE_URL is not set the suite is skipped so the default unit
+// test run never requires a database. Fixtures must never contain real
+// credentials or user data; only synthetic values are used.
+// ---------------------------------------------------------------------------
+const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
+
+export const hasTestDatabase = Boolean(TEST_DATABASE_URL);
+
+// Tables touched by the payout idempotency race tests. Truncated between tests
+// so each case starts from a clean slate; CASCADE handles dependent rows.
+const PAYOUT_TABLES = [
+  'payout_retry_jobs',
+  'webhook_events',
+  'payouts',
+  'payout_recipients',
+] as const;
+
+if (hasTestDatabase) {
+  // Lazily import the DB helpers so the default (no database) run never loads
+  // the Postgres driver.
+  const loadDb = async () => {
+    const { applyMigrations, truncateTables } = await import(
+      '@/lib/db/testDatabase'
+    );
+    return { applyMigrations, truncateTables };
+  };
+
+  beforeAll(async () => {
+    const { applyMigrations } = await loadDb();
+    await applyMigrations(TEST_DATABASE_URL as string);
+  }, 60_000);
+
+  beforeEach(async () => {
+    const { truncateTables } = await loadDb();
+    await truncateTables(TEST_DATABASE_URL as string, [...PAYOUT_TABLES]);
+  });
+} else {
+  // Mark the DB-backed suite as skipped when no test database is configured.
+  beforeAll(() => {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[vitest] TEST_DATABASE_URL not set; skipping database concurrency tests.',
+    );
+  });
+}

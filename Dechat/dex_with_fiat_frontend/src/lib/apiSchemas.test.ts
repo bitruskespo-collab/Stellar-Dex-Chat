@@ -5,6 +5,8 @@ import {
   RetryConfig,
   verifyAccountSchema,
   createRecipientSchema,
+  buildFreshnessMetadata,
+  calculationLineageSchema,
 } from './apiSchemas';
 
 describe('apiSchemas - Request Retry with Exponential Backoff', () => {
@@ -420,6 +422,103 @@ describe('createRecipientSchema', () => {
     ).toBe(false);
     expect(
       createRecipientSchema.safeParse({ ...valid, type: 'a'.repeat(51) })
+        .success,
+    ).toBe(false);
+  });
+});
+
+describe('buildFreshnessMetadata', () => {
+  const now = new Date('2024-06-01T12:00:00.000Z');
+
+  it('marks a current cursor and recent dbUpdatedAt as fresh', () => {
+    const metadata = buildFreshnessMetadata({
+      cursor: 1000,
+      latestLedger: 1000,
+      dbUpdatedAt: '2024-06-01T11:59:30.000Z',
+      stalenessThresholdMs: 60_000,
+      now,
+    });
+
+    expect(metadata.isStale).toBe(false);
+    expect(metadata.cursor).toBe(1000);
+    expect(metadata.latestLedger).toBe(1000);
+    expect(metadata.dbUpdatedAt).toBe('2024-06-01T11:59:30.000Z');
+    expect(metadata.stalenessThresholdMs).toBe(60_000);
+  });
+
+  it('marks a lagging cursor as stale', () => {
+    const metadata = buildFreshnessMetadata({
+      cursor: 990,
+      latestLedger: 1000,
+      dbUpdatedAt: '2024-06-01T11:59:30.000Z',
+      stalenessThresholdMs: 60_000,
+      now,
+    });
+
+    expect(metadata.isStale).toBe(true);
+    expect(metadata.cursor).toBe(990);
+    expect(metadata.latestLedger).toBe(1000);
+  });
+
+  it('marks an outdated dbUpdatedAt as stale even when the cursor is current', () => {
+    const metadata = buildFreshnessMetadata({
+      cursor: 1000,
+      latestLedger: 1000,
+      dbUpdatedAt: '2024-06-01T11:00:00.000Z',
+      stalenessThresholdMs: 60_000,
+      now,
+    });
+
+    expect(metadata.isStale).toBe(true);
+  });
+
+  it('handles a null cursor without throwing', () => {
+    const metadata = buildFreshnessMetadata({
+      cursor: null,
+      latestLedger: 1000,
+      dbUpdatedAt: '2024-06-01T11:59:30.000Z',
+      stalenessThresholdMs: 60_000,
+      now,
+    });
+
+    expect(metadata.isStale).toBe(true);
+    expect(metadata.cursor).toBeNull();
+  });
+
+  it('handles a missing cursor without throwing', () => {
+    const metadata = buildFreshnessMetadata({
+      latestLedger: 1000,
+      dbUpdatedAt: '2024-06-01T11:59:30.000Z',
+      stalenessThresholdMs: 60_000,
+      now,
+    });
+
+    expect(metadata.isStale).toBe(true);
+    expect(metadata.cursor).toBeNull();
+  });
+});
+
+describe('calculationLineageSchema', () => {
+  const valid = {
+    calculationVersion: 'fx-v1.2.0',
+    inputSourceIds: ['ledger:1000', 'rate:ngn-usd:2024-06-01'],
+    currencyMetadataVersion: 'currencies-v3',
+    roundingDecision: 'half-up',
+    roundingDelta: 0,
+  };
+
+  it('accepts a valid lineage record', () => {
+    expect(calculationLineageSchema.safeParse(valid).success).toBe(true);
+  });
+
+  it('rejects a record missing calculationVersion', () => {
+    const { calculationVersion: _omitted, ...rest } = valid;
+    expect(calculationLineageSchema.safeParse(rest).success).toBe(false);
+  });
+
+  it('rejects a negative roundingDelta', () => {
+    expect(
+      calculationLineageSchema.safeParse({ ...valid, roundingDelta: -1 })
         .success,
     ).toBe(false);
   });

@@ -277,6 +277,78 @@ export interface CanonicalAmountResult {
 }
 
 /**
+ * Rounding modes applied when converting major decimal amounts into minor units.
+ *
+ * - `exact`: the input already matched the currency exponent exactly (no rounding).
+ * - `pad`: the input had fewer decimal digits than the currency exponent and was
+ *   zero-padded (e.g. "100.5" -> 10050 kobo). No value is lost.
+ * - `reject`: the input exceeded the currency exponent and was rejected with a
+ *   PrecisionError (no amount is produced).
+ */
+export type RoundingMode = 'exact' | 'pad' | 'reject';
+
+/**
+ * Describes the rounding decision taken for a major -> minor unit conversion.
+ * Persisted in CalculationLineage so an auditor can recompute the amount.
+ */
+export interface RoundingDecision {
+  roundingMode: RoundingMode;
+  /** Difference (in minor units) between the produced amount and the exact input. */
+  roundingDelta: bigint;
+  currency: string;
+  exponent: number;
+  inputDecimal: string;
+}
+
+/**
+ * Computes the rounding decision for a major decimal amount against a currency
+ * exponent without throwing, so callers can record lineage even for rejected inputs.
+ *
+ * The returned `roundingDelta` is always `0n` for accepted inputs because this
+ * module never silently truncates or rounds away value; inputs with excess
+ * precision are rejected instead.
+ */
+export function describeRounding(
+  amount: string | number | bigint,
+  currency: string,
+): RoundingDecision {
+  const normCurrency = (currency || 'NGN').trim().toUpperCase();
+  const exponent = getCurrencyExponent(normCurrency);
+
+  let strAmount: string;
+  if (typeof amount === 'bigint') {
+    strAmount = amount.toString();
+  } else if (typeof amount === 'number') {
+    strAmount = Number.isFinite(amount) ? amount.toString() : String(amount);
+  } else if (typeof amount === 'string') {
+    strAmount = amount.trim();
+  } else {
+    strAmount = String(amount);
+  }
+
+  const parts = strAmount.split('.');
+  const fracPart = parts.length > 1 ? parts[1] : '';
+
+  if (fracPart.length > exponent) {
+    return {
+      roundingMode: 'reject',
+      roundingDelta: 0n,
+      currency: normCurrency,
+      exponent,
+      inputDecimal: strAmount,
+    };
+  }
+
+  return {
+    roundingMode: fracPart.length === exponent ? 'exact' : 'pad',
+    roundingDelta: 0n,
+    currency: normCurrency,
+    exponent,
+    inputDecimal: strAmount,
+  };
+}
+
+/**
  * Validates a payout amount at API boundaries, enforcing positive value,
  * supported precision, and max transfer limits.
  */
@@ -330,6 +402,23 @@ export function validatePayoutAmount(
     currency: normCurrency,
     exponent,
   };
+}
+
+/**
+ * Like {@link validatePayoutAmount} but also returns the rounding decision so the
+ * caller can persist it in CalculationLineage. Conversion results are identical.
+ */
+export function validatePayoutAmountWithRounding(
+  amount: unknown,
+  currency = 'NGN',
+  maxAmount = MAX_TRANSFER_AMOUNT_NGN,
+): CanonicalAmountResult & { rounding: RoundingDecision } {
+  const result = validatePayoutAmount(amount, currency, maxAmount);
+  const rounding = describeRounding(
+    amount as string | number | bigint,
+    result.currency,
+  );
+  return { ...result, rounding };
 }
 
 /**

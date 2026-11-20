@@ -2,6 +2,12 @@ import crypto from 'crypto';
 import { serverEnv as env } from '@/lib/serverEnv';
 import { telemetry } from '@/lib/telemetry';
 
+// Database-backed concurrency tests are gated on TEST_DATABASE_URL. When it is
+// absent the suite skips rather than silently passing against in-memory state.
+export const DB_CONCURRENCY_TESTS_ENABLED = Boolean(
+  process.env.TEST_DATABASE_URL,
+);
+
 export interface BeneficiaryRecord {
   dedupeKey: string;
   recipientCode: string;

@@ -94,3 +94,86 @@ This threat model MUST be reviewed and re-versioned when any of the following oc
 ## 5. Exclusions
 
 Operational secrets (API keys, signing keys, provider credentials) are explicitly out of scope for this document and are managed via the secrets store.
+
+---
+
+## 6. Read-Model Freshness Metadata
+
+Indexed read models (admin and user APIs) return a freshness envelope alongside results so a stale projection is never presented as confirmed settlement state.
+
+### Envelope fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `sourceLedgerCursor` | string \| null | Last ledger cursor applied to the projection. `null` when the projection has never been synced. |
+| `databaseUpdatedAt` | ISO-8601 string \| null | Commit time of the last write to the projection. |
+| `stale` | boolean | `true` when the projection lags the source ledger beyond the configured tolerance. |
+| `stalenessReason` | string \| null | Machine-readable reason (`cursor_lag`, `no_cursor`, `sync_error`) when `stale` is `true`. |
+
+### Stale semantics
+
+- When `stale` is `true`, consumers MUST treat amounts and statuses as provisional and MUST NOT render them as confirmed settlement.
+- `stale` is derived from `sourceLedgerCursor` lag against the current ledger cursor; a missing cursor (`null`) always yields `stale: true` with `stalenessReason: "no_cursor"`.
+- The envelope is additive; existing result fields are unchanged.
+
+---
+
+## 7. Database Concurrency Test Suite
+
+Parallel-request tests run against the production database engine to prove uniqueness and locking constraints prevent duplicate recipients, payouts, webhook events, and retry jobs.
+
+### Running the suite
+
+```bash
+# Point at a disposable test database on the production engine (Postgres).
+# Never use production data or real credentials here.
+export TEST_DATABASE_URL="postgres://test_user:test_password@localhost:5432/dex_test"
+npm run test:concurrency
+```
+
+- The suite is skipped when `TEST_DATABASE_URL` is unset, so default CI runs are unaffected.
+- Each test spawns concurrent requests (e.g. duplicate recipient creation, duplicate payout submission, replayed webhook delivery, duplicate retry-job enqueue) and asserts exactly one row is persisted and the rest fail with a conflict error.
+- Fixtures use synthetic identifiers only; no real user data or credentials.
+
+---
+
+## 8. Archival & Restore Verification
+
+### Retention tiers
+
+| Tier | Data | Retention |
+|------|------|-----------|
+| Audit | Admin actions, payout state transitions | Long-term (compliance window) |
+| Webhook | Raw provider webhook payloads and signatures | Medium-term |
+| Provider | Provider settlement reports and evidence | Medium-term |
+
+### Checksummed export / import
+
+- Exports are written with a per-record checksum and a manifest checksum over the full export.
+- Import verifies the manifest checksum and each record checksum before applying; any mismatch aborts the import.
+- After restore, records are reconciled against active payout state; a mismatch is reported as a verification failure rather than silently accepted.
+
+---
+
+## 9. FX & Settlement Calculation Lineage
+
+Every displayed and paid amount persists a `CalculationLineage` record so an auditor can recompute it.
+
+### `CalculationLineage` fields
+
+| Field | Description |
+|-------|-------------|
+| `calculationVersion` | Version of the calculation logic applied. |
+| `inputSourceIds` | Identifiers of the inputs (rates, quotes, ledger entries) used. |
+| `currencyMetadataVersion` | Version of the currency metadata (decimals, symbols) applied. |
+| `roundingMode` | Rounding decision applied (e.g. `half_up`, `floor`). |
+| `roundingScale` | Scale (decimal places) the result was rounded to. |
+| `resultAmount` | Final amount produced. |
+
+### Recompute procedure
+
+1. Load the `CalculationLineage` record for the amount.
+2. Fetch each input referenced by `inputSourceIds` at the recorded versions.
+3. Re-apply `calculationVersion` logic with `currencyMetadataVersion` and the recorded rounding decision.
+4. Compare the recomputed amount to `resultAmount`; any difference is a lineage discrepancy and must be investigated before the amount is treated as confirmed.
+=======

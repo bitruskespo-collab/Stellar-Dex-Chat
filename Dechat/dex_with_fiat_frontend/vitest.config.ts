@@ -2,6 +2,8 @@ import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vitest/config';
 import { fileURLToPath, URL } from 'node:url';
 
+const hasTestDatabase = Boolean(process.env.TEST_DATABASE_URL);
+
 export default defineConfig({
   plugins: [react()],
   resolve: {
@@ -14,6 +16,7 @@ export default defineConfig({
     globals: true,
     setupFiles: './vitest.setup.ts',
     include: ['src/**/*.{test,spec}.{ts,tsx}'],
+    exclude: ['**/node_modules/**', '**/.next/**', '**/*.db.test.{ts,tsx}'],
     testTimeout: 15000,
     hookTimeout: 15000,
     fakeTimers: {
@@ -33,5 +36,39 @@ export default defineConfig({
         '**/.next/**',
       ],
     },
+    projects: [
+      {
+        // Default jsdom project — unchanged behavior for CI without a database.
+        extends: true,
+        test: {
+          name: 'unit',
+          environment: 'jsdom',
+          include: ['src/**/*.{test,spec}.{ts,tsx}'],
+          exclude: ['**/node_modules/**', '**/.next/**', '**/*.db.test.{ts,tsx}'],
+        },
+      },
+      {
+        // Database-backed concurrency suite. Only registered when TEST_DATABASE_URL
+        // is set so CI without a database still passes.
+        extends: true,
+        test: {
+          name: 'db',
+          environment: 'node',
+          include: ['src/**/*.db.test.{ts,tsx}'],
+          exclude: ['**/node_modules/**', '**/.next/**'],
+          // Concurrency races need real timers and a longer budget.
+          fakeTimers: {
+            toFake: [],
+          },
+          testTimeout: 60000,
+          hookTimeout: 60000,
+          // Run DB suites serially to avoid cross-test interference on shared tables.
+          fileParallelism: false,
+          sequence: {
+            concurrent: false,
+          },
+        },
+      },
+    ].filter((project) => project.test.name !== 'db' || hasTestDatabase),
   },
 });

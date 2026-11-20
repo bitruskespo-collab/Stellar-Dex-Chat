@@ -20,6 +20,11 @@ interface IndexerState {
   lastPagingToken: string;
   lastLedger: number;
   updatedAt: string;
+  // Freshness metadata consumed by the read-model freshness envelope
+  // (issue #249). `sourceLedger` is the chain tip the projection was built
+  // against; `indexedAt` is when the projection was last written.
+  sourceLedger: number;
+  indexedAt: string;
 }
 
 // Config from env or defaults
@@ -206,11 +211,20 @@ async function indexEvents() {
   let state: IndexerState = {
     lastPagingToken: '0',
     lastLedger: 0,
-    updatedAt: new Date().toISOString()
+    updatedAt: new Date().toISOString(),
+    sourceLedger: 0,
+    indexedAt: new Date(0).toISOString(),
   };
 
   if (fs.existsSync(STATE_FILE)) {
-    state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    const loaded = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    state = {
+      ...state,
+      ...loaded,
+      // Backfill freshness fields for state files written before issue #249.
+      sourceLedger: Number(loaded?.sourceLedger) || Number(loaded?.lastLedger) || 0,
+      indexedAt: loaded?.indexedAt || loaded?.updatedAt || state.indexedAt,
+    };
   }
 
   const latestLedger = await getLatestLedger();
@@ -277,9 +291,12 @@ async function indexEvents() {
       fs.writeFileSync(EVENTS_FILE, JSON.stringify(mergedEvents, null, 2));
     }
 
-    // Update state
+    // Update state, including freshness metadata for the read-model envelope.
+    const indexedAt = new Date().toISOString();
     state.lastLedger = latestLedger;
-    state.updatedAt = new Date().toISOString();
+    state.sourceLedger = latestLedger;
+    state.indexedAt = indexedAt;
+    state.updatedAt = indexedAt;
     fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
 
     // -----------------------------------------------------------------------

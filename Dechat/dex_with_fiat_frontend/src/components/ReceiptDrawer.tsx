@@ -13,6 +13,7 @@ import {
   Loader2,
 } from 'lucide-react';
 import { TransactionHistoryEntry } from '@/types';
+import type { ReadModelFreshness, CalculationLineage } from '@/types';
 import { useTranslation } from '@/contexts/TranslationContext';
 import { useTheme } from '@/contexts/ThemeContext';
 import { useTransactionFilters } from '@/hooks/useTransactionFilters';
@@ -31,6 +32,27 @@ export interface ReceiptDrawerProps {
   paginationError?: string | null;
   onLoadMore?: () => void;
   onRetryPagination?: () => void;
+  /** Read-model freshness metadata reported by the receipts API (issue #249). */
+  freshness?: ReadModelFreshness | null;
+}
+
+/** Lineage fields that may be attached to a transaction entry (issue #252). */
+type LineageCarrier = Partial<CalculationLineage>;
+
+function getLineage(tx: TransactionHistoryEntry): CalculationLineage | null {
+  const carrier = tx as TransactionHistoryEntry & LineageCarrier;
+  if (
+    !carrier.calculationVersion &&
+    !carrier.currencyMetadataVersion &&
+    !carrier.roundingMode
+  ) {
+    return null;
+  }
+  return {
+    calculationVersion: carrier.calculationVersion,
+    currencyMetadataVersion: carrier.currencyMetadataVersion,
+    roundingMode: carrier.roundingMode,
+  };
 }
 
 function getReceiptQrValue(tx: TransactionHistoryEntry): string {
@@ -193,6 +215,7 @@ export default function ReceiptDrawer({
   paginationError = null,
   onLoadMore,
   onRetryPagination,
+  freshness = null,
 }: ReceiptDrawerProps) {
   const { t } = useTranslation();
   const { isDarkMode } = useTheme();
@@ -341,6 +364,29 @@ export default function ReceiptDrawer({
 
           {/* Content */}
           <div className="receipt-drawer-content flex-1 overflow-y-auto p-4 space-y-4">
+            {/* Stale projection warning (issue #249) */}
+            {freshness?.isStale && (
+              <div
+                data-testid="receipt-stale-badge"
+                role="status"
+                className="receipt-print-hide flex items-start gap-2 p-3 rounded-lg border border-amber-500/40 bg-amber-500/10 text-xs text-amber-700 dark:text-amber-300"
+              >
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <p className="font-semibold">
+                    {t('receipt.stale_title')}
+                  </p>
+                  <p>
+                    {freshness.ledgerCursor != null
+                      ? t('receipt.stale_cursor').replace(
+                          '{cursor}',
+                          String(freshness.ledgerCursor),
+                        )
+                      : t('receipt.stale_generic')}
+                  </p>
+                </div>
+              </div>
+            )}
             {isLoading ? (
               <div className="receipt-drawer-skeleton space-y-4">
                 <SkeletonReceipt />
@@ -436,6 +482,35 @@ export default function ReceiptDrawer({
                         </a>
                       </div>
                     )}
+                    {(() => {
+                      const lineage = getLineage(tx);
+                      if (!lineage) return null;
+                      return (
+                        <div
+                          data-testid="receipt-lineage"
+                          className="text-[10px] text-gray-500 space-y-0.5 pt-2 border-t dark:border-gray-700"
+                        >
+                          <div className="flex justify-between gap-2">
+                            <span>{t('receipt.calculation_version')}</span>
+                            <span className="font-mono truncate" title={lineage.calculationVersion}>
+                              {lineage.calculationVersion ?? '—'}
+                            </span>
+                          </div>
+                          <div className="flex justify-between gap-2">
+                            <span>{t('receipt.currency_metadata_version')}</span>
+                            <span className="font-mono truncate" title={lineage.currencyMetadataVersion}>
+                              {lineage.currencyMetadataVersion ?? '—'}
+                            </span>
+                          </div>
+                          <div className="flex justify-between gap-2">
+                            <span>{t('receipt.rounding_mode')}</span>
+                            <span className="font-mono truncate" title={lineage.roundingMode}>
+                              {lineage.roundingMode ?? '—'}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })()}
                     <div className="flex justify-between text-[10px] text-gray-500 pt-2 border-t dark:border-gray-700">
                       <span className="truncate min-w-0 mr-2" title={tx.id}>{tx.id}</span>
                       <span className="shrink-0">{new Date(tx.createdAt).toLocaleString()}</span>

@@ -55,6 +55,12 @@ export interface TransferTimelineProps {
   };
   /** Optional full resumable transfer state */
   state?: ResumableTransferState;
+  /**
+   * Whether the underlying read model is stale (e.g. the source ledger cursor
+   * lags behind the latest indexed ledger). When true, the timeline must not
+   * present the projection as confirmed settlement state.
+   */
+  isStale?: boolean;
 }
 
 /**

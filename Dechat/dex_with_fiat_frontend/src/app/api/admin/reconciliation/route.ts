@@ -3,6 +3,7 @@ import { ReconciliationRecord } from '@/types';
 import { requireAdminAuth } from '../_utils/requireAdminAuth';
 import { enforceAdminIpAllowlist } from '@/lib/security';
 import { reconcileStalePayouts } from '@/lib/payout/reconciliation';
+import { buildReadModelFreshness } from '@/lib/readModelFreshness';
 
 export async function GET(request: NextRequest) {
   try {
@@ -19,10 +20,20 @@ export async function GET(request: NextRequest) {
     const payouts = reconciliationStore.getPayouts();
     const report = reconcileRecords(deposits, payouts);
 
+    // Read-model freshness metadata (Issue #249): expose the source ledger
+    // cursor and database update time so stale projections are never
+    // represented as confirmed settlement state.
+    const freshness = await buildReadModelFreshness({
+      dbUpdatedAt: report.evaluatedAt,
+    });
+
     // If caller requests structured report format
     const format = request.nextUrl.searchParams.get('format');
     if (format === 'report') {
-      return NextResponse.json(serializeReconciliationReport(report));
+      return NextResponse.json({
+        ...serializeReconciliationReport(report),
+        freshness,
+      });
     }
 
     // Default: map report to standard ReconciliationRecord[] for dashboard view
@@ -122,7 +133,7 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    return NextResponse.json(records);
+    return NextResponse.json({ data: records, freshness });
   } catch (error) {
     console.error('Error fetching reconciliation data:', error);
     return NextResponse.json(

@@ -163,6 +163,135 @@ export const RETENTION_PERIODS_MS: Record<PayoutStatus, number> = {
   pending: Number.POSITIVE_INFINITY,   // Active transfers must never be auto-deleted
 };
 
+/**
+ * Evidence classes subject to archival retention tiers.
+ * - audit: minimal non-identifying financial audit summaries and deletion proofs
+ * - webhook: inbound provider webhook payloads and delivery attempts
+ * - provider_evidence: provider-side transfer/receipt artifacts (receipts, status snapshots)
+ */
+export type EvidenceClass = 'audit' | 'webhook' | 'provider_evidence';
+
+/**
+ * Storage tiers for evidence. `hot` is queryable online, `warm` is retained for
+ * operational lookups, and `archive` is retained for compliance/export only.
+ */
+export type RetentionTier = 'hot' | 'warm' | 'archive';
+
+export interface RetentionTierPolicy {
+  tier: RetentionTier;
+  /** Age (ms) at which evidence enters this tier. */
+  minAgeMs: number;
+  /** Age (ms) at which evidence leaves this tier; Infinity for archive. */
+  maxAgeMs: number;
+  /** Whether the evidence is expected to be exported to cold storage. */
+  exportable: boolean;
+  description: string;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Declarative retention tier boundaries per evidence class.
+ * Boundaries are inclusive of `minAgeMs` and exclusive of `maxAgeMs`.
+ */
+export const RETENTION_TIERS: Record<EvidenceClass, RetentionTierPolicy[]> = {
+  audit: [
+    {
+      tier: 'hot',
+      minAgeMs: 0,
+      maxAgeMs: 30 * DAY_MS,
+      exportable: false,
+      description: 'Audit summaries queryable online for 30 days',
+    },
+    {
+      tier: 'warm',
+      minAgeMs: 30 * DAY_MS,
+      maxAgeMs: 365 * DAY_MS,
+      exportable: true,
+      description: 'Audit summaries retained for operational lookups up to 1 year',
+    },
+    {
+      tier: 'archive',
+      minAgeMs: 365 * DAY_MS,
+      maxAgeMs: Number.POSITIVE_INFINITY,
+      exportable: true,
+      description: 'Audit summaries retained indefinitely for compliance',
+    },
+  ],
+  webhook: [
+    {
+      tier: 'hot',
+      minAgeMs: 0,
+      maxAgeMs: 7 * DAY_MS,
+      exportable: false,
+      description: 'Webhook payloads queryable online for 7 days',
+    },
+    {
+      tier: 'warm',
+      minAgeMs: 7 * DAY_MS,
+      maxAgeMs: 90 * DAY_MS,
+      exportable: true,
+      description: 'Webhook payloads retained for replay/debugging up to 90 days',
+    },
+    {
+      tier: 'archive',
+      minAgeMs: 90 * DAY_MS,
+      maxAgeMs: Number.POSITIVE_INFINITY,
+      exportable: true,
+      description: 'Webhook payloads archived for dispute resolution',
+    },
+  ],
+  provider_evidence: [
+    {
+      tier: 'hot',
+      minAgeMs: 0,
+      maxAgeMs: 14 * DAY_MS,
+      exportable: false,
+      description: 'Provider evidence queryable online for 14 days',
+    },
+    {
+      tier: 'warm',
+      minAgeMs: 14 * DAY_MS,
+      maxAgeMs: 180 * DAY_MS,
+      exportable: true,
+      description: 'Provider evidence retained for reconciliation up to 180 days',
+    },
+    {
+      tier: 'archive',
+      minAgeMs: 180 * DAY_MS,
+      maxAgeMs: Number.POSITIVE_INFINITY,
+      exportable: true,
+      description: 'Provider evidence archived for financial audit',
+    },
+  ],
+};
+
+/**
+ * Resolves the retention tier for a piece of evidence of the given class and age.
+ * Throws on unknown evidence classes or invalid (negative/non-finite) ages.
+ */
+export function getRetentionTier(
+  evidenceClass: EvidenceClass,
+  ageMs: number,
+): RetentionTier {
+  const policies = RETENTION_TIERS[evidenceClass];
+  if (!policies) {
+    throw new Error(`Unknown evidence class: ${String(evidenceClass)}`);
+  }
+  if (typeof ageMs !== 'number' || Number.isNaN(ageMs) || ageMs < 0) {
+    throw new Error(`Invalid evidence age: ${String(ageMs)}`);
+  }
+
+  for (const policy of policies) {
+    if (ageMs >= policy.minAgeMs && ageMs < policy.maxAgeMs) {
+      return policy.tier;
+    }
+  }
+
+  // Only reachable for non-finite ages beyond the final tier.
+  return policies[policies.length - 1].tier;
+}
+
 export interface EncryptedPayload {
   ciphertext: string;
   iv: string;

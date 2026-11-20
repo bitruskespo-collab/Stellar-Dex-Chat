@@ -51,6 +51,22 @@ const mockAuditLogData: AdminAuditLogEntry[] = Array.from(
 
 const DEFAULT_PAGE_SIZE = 20;
 
+// Read-model freshness metadata (#249): the newest entry timestamp is the
+// database update time for this projection, and the indexer cursor records how
+// far the source ledger has been indexed. Clients must treat results as
+// possibly stale until they observe a cursor at or beyond their expected one.
+const SOURCE_LEDGER_CURSOR = 'ledger:2026-03-29T19:00:00Z:seq:58';
+
+function getDbUpdatedAt(entries: AdminAuditLogEntry[]): string | null {
+  let newest: string | null = null;
+  for (const entry of entries) {
+    if (newest === null || entry.timestamp > newest) {
+      newest = entry.timestamp;
+    }
+  }
+  return newest;
+}
+
 export async function GET(request: Request) {
   try {
     const authError = requireAdminAuth(request);
@@ -83,6 +99,10 @@ export async function GET(request: Request) {
       total,
       totalPages,
       actions: ACTIONS,
+      freshness: {
+        dbUpdatedAt: getDbUpdatedAt(mockAuditLogData),
+        sourceLedgerCursor: SOURCE_LEDGER_CURSOR,
+      },
     });
   } catch (error) {
     console.error('Error fetching audit logs:', error);

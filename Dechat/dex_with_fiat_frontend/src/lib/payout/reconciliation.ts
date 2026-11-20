@@ -306,4 +306,88 @@ export class PayoutReconciliationService {
   }
 }
 
+export interface RestoredEvidenceRecord {
+  payoutReference: string;
+  status: DomainPayoutStatus;
+  eventId?: string;
+  timestamp?: string;
+}
+
+export interface ActivePayoutState {
+  payoutReference: string;
+  status: DomainPayoutStatus;
+}
+
+export type RestoredEvidenceMismatchType =
+  | 'MISSING_ACTIVE_PAYOUT'
+  | 'STATUS_MISMATCH';
+
+export interface RestoredEvidenceMismatch {
+  payoutReference: string;
+  type: RestoredEvidenceMismatchType;
+  restoredStatus: DomainPayoutStatus;
+  activeStatus?: DomainPayoutStatus;
+  reason: string;
+}
+
+export interface RestoredEvidenceReconciliationResult {
+  reconciled: boolean;
+  checkedCount: number;
+  matchedCount: number;
+  mismatches: RestoredEvidenceMismatch[];
+}
+
+/**
+ * Compares restored evidence records against active payout state to prove
+ * that an import reconciles to the live domain state. Any restored record
+ * without a matching active payout, or whose status diverges from the active
+ * payout status, is reported as a mismatch.
+ */
+export function reconcileRestoredEvidence(
+  restored: RestoredEvidenceRecord[],
+  activePayouts: ActivePayoutState[],
+): RestoredEvidenceReconciliationResult {
+  const activeByReference = new Map<string, DomainPayoutStatus>();
+  for (const active of activePayouts) {
+    activeByReference.set(active.payoutReference, active.status);
+  }
+
+  const mismatches: RestoredEvidenceMismatch[] = [];
+  let matchedCount = 0;
+
+  for (const record of restored) {
+    const activeStatus = activeByReference.get(record.payoutReference);
+
+    if (activeStatus === undefined) {
+      mismatches.push({
+        payoutReference: record.payoutReference,
+        type: 'MISSING_ACTIVE_PAYOUT',
+        restoredStatus: record.status,
+        reason: `Restored evidence references payout ${record.payoutReference} which has no active payout state`,
+      });
+      continue;
+    }
+
+    if (activeStatus !== record.status) {
+      mismatches.push({
+        payoutReference: record.payoutReference,
+        type: 'STATUS_MISMATCH',
+        restoredStatus: record.status,
+        activeStatus,
+        reason: `Restored status ${record.status} does not match active status ${activeStatus} for payout ${record.payoutReference}`,
+      });
+      continue;
+    }
+
+    matchedCount += 1;
+  }
+
+  return {
+    reconciled: mismatches.length === 0,
+    checkedCount: restored.length,
+    matchedCount,
+    mismatches,
+  };
+}
+
 export const payoutReconciliationService = new PayoutReconciliationService();

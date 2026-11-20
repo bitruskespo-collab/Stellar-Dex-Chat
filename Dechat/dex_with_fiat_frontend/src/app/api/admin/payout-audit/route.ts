@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAdminAuth } from '../_utils/requireAdminAuth';
 import { payoutAuditLedger, PayoutAuditAction } from '@/lib/payout/auditLedger';
+import { buildFreshnessMetadata } from '@/lib/readModel/freshness';
+import { getCalculationLineageForPayout } from '@/lib/lineage/calculationLineage';
 
 export async function GET(request: NextRequest) {
   const authError = requireAdminAuth(request);
@@ -50,12 +52,45 @@ export async function GET(request: NextRequest) {
 
     const result = payoutAuditLedger.getEntries(filter, { page, limit });
 
-    return NextResponse.json(result, {
-      status: 200,
-      headers: {
-        'Cache-Control': 'no-store, no-cache, must-revalidate',
+    // Read-model freshness: expose the source ledger cursor and the latest
+    // audit entry timestamp so clients never present stale projections as
+    // confirmed settlement state.
+    const latestEntry = result.entries.reduce<{ timestamp?: string } | null>(
+      (latest, entry) => {
+        const timestamp = (entry as { timestamp?: string }).timestamp;
+        if (!timestamp) return latest;
+        if (!latest?.timestamp) return { timestamp };
+        return new Date(timestamp).getTime() >
+          new Date(latest.timestamp).getTime()
+          ? { timestamp }
+          : latest;
       },
+      null,
+    );
+
+    const freshness = buildFreshnessMetadata({
+      dbUpdatedAt: latestEntry?.timestamp ?? null,
     });
+
+    // Data lineage (#252): attach persisted calculation lineage per payout
+    // entry when available so auditors can recompute displayed/paid amounts.
+    const entries = result.entries.map((entry) => {
+      const payoutId = (entry as { payoutId?: string }).payoutId;
+      const lineage = payoutId
+        ? getCalculationLineageForPayout(payoutId)
+        : undefined;
+      return lineage ? { ...entry, lineage } : entry;
+    });
+
+    return NextResponse.json(
+      { ...result, entries, freshness },
+      {
+        status: 200,
+        headers: {
+          'Cache-Control': 'no-store, no-cache, must-revalidate',
+        },
+      },
+    );
   } catch (err: unknown) {
     console.error('Error in /api/admin/payout-audit:', err);
     return NextResponse.json(

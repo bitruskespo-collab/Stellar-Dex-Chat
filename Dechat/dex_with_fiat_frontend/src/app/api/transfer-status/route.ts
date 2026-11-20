@@ -15,6 +15,53 @@ const RATE_LIMIT = {
   burstLimit: 8,
 };
 
+// Maximum age (ms) of a projection before it is reported as stale.
+const DEFAULT_STALENESS_THRESHOLD_MS = 60_000;
+
+function getStalenessThresholdMs(): number {
+  const configured = Number(process.env.READ_MODEL_STALENESS_THRESHOLD_MS);
+  return Number.isFinite(configured) && configured > 0
+    ? configured
+    : DEFAULT_STALENESS_THRESHOLD_MS;
+}
+
+/**
+ * Builds read-model freshness metadata so clients can distinguish a
+ * confirmed settlement from a stale projection (Issue #249).
+ */
+function buildFreshnessMetadata(
+  data: Record<string, unknown> | null | undefined,
+  now: number = Date.now(),
+) {
+  const sourceLedgerCursor =
+    typeof data?.sourceLedgerCursor === 'string'
+      ? data.sourceLedgerCursor
+      : null;
+  const indexedAt =
+    typeof data?.indexedAt === 'string' ? data.indexedAt : null;
+  const dbUpdatedAt =
+    typeof data?.dbUpdatedAt === 'string' ? data.dbUpdatedAt : null;
+
+  const stalenessThresholdMs = getStalenessThresholdMs();
+  const referenceTime = dbUpdatedAt ?? indexedAt;
+  const parsedReferenceTime = referenceTime ? Date.parse(referenceTime) : NaN;
+
+  // Without a trustworthy timestamp we cannot confirm freshness, so treat
+  // the projection as stale rather than implying confirmed settlement.
+  const isStale = Number.isNaN(parsedReferenceTime)
+    ? true
+    : now - parsedReferenceTime > stalenessThresholdMs;
+
+  return {
+    sourceLedgerCursor,
+    indexedAt,
+    dbUpdatedAt,
+    isStale,
+    stalenessThresholdMs,
+  };
+}
+=======
+
 export async function OPTIONS(request: NextRequest) {
   return (
     enforcePayoutRouteSecurity(request) ||
@@ -105,6 +152,9 @@ export async function POST(request: NextRequest) {
           data.amountMinor !== undefined
             ? data.amountMinor.toString()
             : undefined,
+        freshness: buildFreshnessMetadata(
+          data as unknown as Record<string, unknown>,
+        ),
       },
     });
     response.headers.set('X-Correlation-Id', correlationId);
