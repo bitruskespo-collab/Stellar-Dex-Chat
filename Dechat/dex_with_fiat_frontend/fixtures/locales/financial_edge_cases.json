@@ -1,0 +1,478 @@
+{
+  "version": 1,
+  "description": "Synthetic localization QA fixtures for financial edge cases. Synthetic data only: no credentials, secrets, or real user data. Covers long translated strings, non-Latin digits, narrow layouts, decimal/grouping separators, and currency-symbol ambiguity. Consumed by src/lib/localeQaChecks.ts, the /test-locale-money harness, and the amount-property Playwright project.",
+  "canonicalInvariance": [
+    {
+      "id": "token-1234.56",
+      "description": "The same logical amount written in each locale's accepted separator form must resolve to identical canonical stroops. This is the core financial-safety invariant: locale presentation may change, the BigInt stroops must not.",
+      "canonicalDecimal": "1234.56",
+      "decimals": 7,
+      "expectedStroops": "12345600000",
+      "localeInputs": {
+        "en-US": "1,234.56",
+        "de-DE": "1.234,56",
+        "fr-FR": "1234,56",
+        "es-ES": "1.234,56",
+        "ja-JP": "1,234.56"
+      }
+    },
+    {
+      "id": "token-smallest-unit",
+      "canonicalDecimal": "0.0000001",
+      "decimals": 7,
+      "expectedStroops": "1",
+      "localeInputs": {
+        "en-US": "0.0000001",
+        "de-DE": "0,0000001",
+        "fr-FR": "0,0000001",
+        "es-ES": "0,0000001",
+        "ja-JP": "0.0000001"
+      }
+    }
+  ],
+  "separatorMatrix": [
+    {
+      "id": "en-US",
+      "locale": "en-US",
+      "label": "English (United States)",
+      "decimalSeparator": ".",
+      "groupingSeparator": ",",
+      "decimals": 7,
+      "samples": [
+        {
+          "id": "en-grouped",
+          "input": "1,234.56",
+          "expectedValid": true,
+          "expectedCanonicalDecimal": "1234.56",
+          "expectedStroops": "12345600000",
+          "note": "Both separators present: grouping commas are stripped, dot is the decimal point."
+        },
+        {
+          "id": "en-smallest",
+          "input": "0.0000001",
+          "expectedValid": true,
+          "expectedCanonicalDecimal": "0.0000001",
+          "expectedStroops": "1",
+          "note": "Boundary: one stroop (7-decimal precision floor)."
+        },
+        {
+          "id": "en-grouping-only-quirk",
+          "input": "1,234",
+          "expectedValid": true,
+          "expectedCanonicalDecimal": "1.234",
+          "expectedStroops": "12340000",
+          "note": "Boundary: a lone grouping comma with a trailing group of <= decimals digits is treated as a decimal point by the en-US heuristic, so 1,234 resolves to 1.234, not 1234. Pinned as a known heuristic so an intentional fix is surfaced by the tests."
+        },
+        {
+          "id": "en-comma-decimal",
+          "input": "12,50",
+          "expectedValid": true,
+          "expectedCanonicalDecimal": "12.50",
+          "expectedStroops": "125000000",
+          "note": "en-US decimal-comma heuristic: a single comma followed by <= decimals digits is read as a decimal point."
+        },
+        {
+          "id": "en-malformed",
+          "input": "1.2.3",
+          "expectedValid": false,
+          "expectedError": "Invalid numeric format.",
+          "note": "Failure case: multiple decimal points are rejected."
+        }
+      ]
+    },
+    {
+      "id": "de-DE",
+      "locale": "de-DE",
+      "label": "German (Germany)",
+      "decimalSeparator": ",",
+      "groupingSeparator": ".",
+      "decimals": 7,
+      "samples": [
+        {
+          "id": "de-grouped",
+          "input": "1.234,56",
+          "expectedValid": true,
+          "expectedCanonicalDecimal": "1234.56",
+          "expectedStroops": "12345600000",
+          "note": "Dot grouping stripped, comma is the decimal point."
+        },
+        {
+          "id": "de-plain",
+          "input": "1234,56",
+          "expectedValid": true,
+          "expectedCanonicalDecimal": "1234.56",
+          "expectedStroops": "12345600000"
+        },
+        {
+          "id": "de-decimal-comma-group",
+          "input": "1,234",
+          "expectedValid": true,
+          "expectedCanonicalDecimal": "1.234",
+          "expectedStroops": "12340000",
+          "note": "In de-DE 1,234 means 1.234 (comma is the decimal separator). Contrast with en-US where the same glyphs resolve to a different value."
+        },
+        {
+          "id": "de-malformed",
+          "input": "1,2,3",
+          "expectedValid": false,
+          "expectedError": "Invalid numeric format.",
+          "note": "Failure case: only the first comma is converted, leaving a residual comma the validator rejects."
+        }
+      ]
+    },
+    {
+      "id": "fr-FR",
+      "locale": "fr-FR",
+      "label": "French (France)",
+      "decimalSeparator": ",",
+      "groupingSeparator": " ",
+      "decimals": 7,
+      "samples": [
+        {
+          "id": "fr-plain",
+          "input": "1234,56",
+          "expectedValid": true,
+          "expectedCanonicalDecimal": "1234.56",
+          "expectedStroops": "12345600000"
+        },
+        {
+          "id": "fr-space-grouping-rejected",
+          "input": "1 234,56",
+          "expectedValid": false,
+          "expectedError": "Invalid numeric format.",
+          "note": "Boundary/failure case: narrow no-break or regular space grouping is NOT normalized by parseLocaleMoney; the canonical French form is rejected. Callers must pre-strip grouping spaces."
+        },
+        {
+          "id": "fr-half",
+          "input": "0,5",
+          "expectedValid": true,
+          "expectedCanonicalDecimal": "0.5",
+          "expectedStroops": "5000000"
+        },
+        {
+          "id": "fr-apostrophe-grouping-rejected",
+          "input": "1'234,56",
+          "expectedValid": false,
+          "expectedError": "Invalid numeric format.",
+          "note": "Boundary/failure case: Swiss/French apostrophe grouping is not normalized."
+        }
+      ]
+    },
+    {
+      "id": "es-ES",
+      "locale": "es-ES",
+      "label": "Spanish (Spain)",
+      "decimalSeparator": ",",
+      "groupingSeparator": ".",
+      "decimals": 7,
+      "samples": [
+        {
+          "id": "es-grouped",
+          "input": "1.234,56",
+          "expectedValid": true,
+          "expectedCanonicalDecimal": "1234.56",
+          "expectedStroops": "12345600000"
+        },
+        {
+          "id": "es-plain",
+          "input": "1234,56",
+          "expectedValid": true,
+          "expectedCanonicalDecimal": "1234.56",
+          "expectedStroops": "12345600000"
+        },
+        {
+          "id": "es-malformed",
+          "input": "1.2.3.4",
+          "expectedValid": false,
+          "expectedError": "Invalid numeric format.",
+          "note": "Failure case: multiple grouping dots with no decimal comma are rejected."
+        }
+      ]
+    },
+    {
+      "id": "ja-JP",
+      "locale": "ja-JP",
+      "label": "Japanese (Japan)",
+      "decimalSeparator": ".",
+      "groupingSeparator": ",",
+      "decimals": 7,
+      "samples": [
+        {
+          "id": "ja-grouped",
+          "input": "1,234.56",
+          "expectedValid": true,
+          "expectedCanonicalDecimal": "1234.56",
+          "expectedStroops": "12345600000",
+          "note": "ja-JP uses dot decimal and comma grouping, handled by the en-US path."
+        },
+        {
+          "id": "ja-plain",
+          "input": "1234.56",
+          "expectedValid": true,
+          "expectedCanonicalDecimal": "1234.56",
+          "expectedStroops": "12345600000"
+        },
+        {
+          "id": "ja-smallest",
+          "input": "0.0000001",
+          "expectedValid": true,
+          "expectedCanonicalDecimal": "0.0000001",
+          "expectedStroops": "1"
+        }
+      ]
+    }
+  ],
+  "nonLatinDigits": [
+    {
+      "id": "arabic-indic",
+      "locale": "ar-EG",
+      "digitSystem": "arab",
+      "input": "١٢٣٤٥٦٧",
+      "asciiNormalized": "1234567",
+      "decimals": 7,
+      "expectedParserValid": false,
+      "reason": "non-latin-digits-not-supported",
+      "note": "parseLocaleMoney uses ASCII-only \\d, so Arabic-Indic digits are rejected. UIs must normalize non-Latin digits to ASCII before parsing; canonical arithmetic stays untouched."
+    },
+    {
+      "id": "devanagari",
+      "locale": "hi-IN",
+      "digitSystem": "deva",
+      "input": "१२३४.५६",
+      "asciiNormalized": "1234.56",
+      "decimals": 7,
+      "expectedParserValid": false,
+      "reason": "non-latin-digits-not-supported",
+      "note": "Devanagari digits are rejected for the same reason; normalization must happen upstream."
+    },
+    {
+      "id": "persian",
+      "locale": "fa-IR",
+      "digitSystem": "thaa",
+      "input": "۱۲۳۴۵۶",
+      "asciiNormalized": "123456",
+      "decimals": 7,
+      "expectedParserValid": false,
+      "reason": "non-latin-digits-not-supported",
+      "note": "Extended Arabic-Indic (Persian) digits are rejected."
+    }
+  ],
+  "longTranslatedStrings": [
+    {
+      "id": "fr-network-mismatch",
+      "translationLocale": "fr",
+      "key": "common.network_mismatch_warning",
+      "text": "Les dépôts et retraits sont désactivés. Passez à {expectedNetwork} dans Freighter : Paramètres → Réseau → {expectedNetwork}.",
+      "minLength": 80,
+      "params": { "expectedNetwork": "Testnet" },
+      "expectedContains": "Testnet",
+      "note": "Long French string with repeated interpolation; verifies the full text renders and both placeholders resolve."
+    },
+    {
+      "id": "es-network-mismatch",
+      "translationLocale": "es",
+      "key": "common.network_mismatch_warning",
+      "text": "Los depósitos y retiros están deshabilitados. Cambie a {expectedNetwork} en Freighter: Configuración → Red → {expectedNetwork}.",
+      "minLength": 80,
+      "params": { "expectedNetwork": "Testnet" },
+      "expectedContains": "Testnet"
+    },
+    {
+      "id": "en-retry-countdown",
+      "translationLocale": "en",
+      "key": "chat.retry_countdown",
+      "text": "Retrying automatically in {seconds}s (attempt {attempt} of {max})",
+      "minLength": 40,
+      "params": { "seconds": "5", "attempt": "2", "max": "5" },
+      "expectedContains": "5s",
+      "note": "Three distinct placeholders must all resolve."
+    },
+    {
+      "id": "fr-long-error",
+      "translationLocale": "fr",
+      "key": "errors.synthetic_long_rate_unavailable",
+      "text": "Échec de la conversion : le taux de change proposé pour la paire d'actifs sélectionnée n'est pas disponible actuellement. Veuillez réessayer dans un instant ou sélectionner une autre paire d'actifs prise en charge par le pont.",
+      "minLength": 150,
+      "params": {},
+      "expectedContains": "taux de change",
+      "note": "Very long single-locale string to exercise layout/overflow handling; no placeholders."
+    }
+  ],
+  "narrowLayouts": [
+    {
+      "id": "amount-320",
+      "viewportWidth": 320,
+      "component": "TransactionAmountDisplay",
+      "amount": "1000000",
+      "tokenSymbol": "XLM",
+      "formattedAmount": "1,000,000 XLM",
+      "overflowStrategy": "truncate",
+      "note": "Common phone width; the canonical amount must stay available even when the visible text truncates."
+    },
+    {
+      "id": "price-360",
+      "viewportWidth": 360,
+      "component": "PriceTicker",
+      "amount": "1234.56",
+      "tokenSymbol": "USDC",
+      "formattedAmount": "$1,234.56 USDC",
+      "overflowStrategy": "wrap"
+    },
+    {
+      "id": "payout-414",
+      "viewportWidth": 414,
+      "component": "BankDetailsModal",
+      "amount": "10000000",
+      "tokenSymbol": "NGN",
+      "formattedAmount": "₦10,000,000.00",
+      "overflowStrategy": "truncate",
+      "note": "Larger phone width; long naira amounts must not push the modal layout off-screen."
+    },
+    {
+      "id": "amount-280",
+      "viewportWidth": 280,
+      "component": "TransactionAmountDisplay",
+      "amount": "1000000000",
+      "tokenSymbol": "XLM",
+      "formattedAmount": "1,000,000,000 XLM",
+      "overflowStrategy": "truncate",
+      "note": "Very narrow viewport; stress case for the longest grouped amounts."
+    }
+  ],
+  "currencySymbolAmbiguity": [
+    {
+      "id": "dollar",
+      "symbol": "$",
+      "ambiguous": true,
+      "reason": "ambiguous-currency-symbol",
+      "candidateCurrencies": ["USD", "CAD", "AUD", "SGD", "HKD", "NZD"],
+      "expectedClarification": true,
+      "note": "The dollar sign is shared by many ISO 4217 currencies; it must be withheld for clarification. Mirrors scripts/benchmark.ts AMBIGUOUS_SYMBOLS."
+    },
+    {
+      "id": "yen",
+      "symbol": "¥",
+      "ambiguous": true,
+      "reason": "ambiguous-currency-symbol",
+      "candidateCurrencies": ["JPY", "CNY"],
+      "expectedClarification": true
+    },
+    {
+      "id": "krone",
+      "symbol": "kr",
+      "ambiguous": true,
+      "reason": "ambiguous-currency-symbol",
+      "candidateCurrencies": ["SEK", "NOK", "DKK", "ISK"],
+      "expectedClarification": true
+    },
+    {
+      "id": "euro",
+      "symbol": "€",
+      "ambiguous": false,
+      "resolvedCurrency": "EUR",
+      "expectedClarification": false,
+      "note": "Unambiguous symbol; resolves without clarification."
+    },
+    {
+      "id": "naira",
+      "symbol": "₦",
+      "ambiguous": false,
+      "resolvedCurrency": "NGN",
+      "expectedClarification": false
+    },
+    {
+      "id": "usdc",
+      "symbol": "USDC",
+      "ambiguous": false,
+      "resolvedCurrency": "USDC",
+      "expectedClarification": false,
+      "note": "Token tickers are unambiguous."
+    },
+    {
+      "id": "xlm",
+      "symbol": "XLM",
+      "ambiguous": false,
+      "resolvedCurrency": "XLM",
+      "expectedClarification": false
+    }
+  ],
+  "fiatPrecisionCases": [
+    {
+      "id": "jpy-whole",
+      "currency": "JPY",
+      "exponent": 0,
+      "input": "100",
+      "expectedValid": true,
+      "expectedMinorUnits": "100",
+      "note": "Zero-decimal currency: 100 JPY is 100 minor units."
+    },
+    {
+      "id": "jpy-excess-precision",
+      "currency": "JPY",
+      "exponent": 0,
+      "input": "100.50",
+      "expectedValid": false,
+      "expectedErrorCode": "UNSUPPORTED_PRECISION",
+      "note": "Failure case: fractions are invalid for zero-decimal currencies."
+    },
+    {
+      "id": "kwd-three-decimals",
+      "currency": "KWD",
+      "exponent": 3,
+      "input": "1.234",
+      "expectedValid": true,
+      "expectedMinorUnits": "1234",
+      "note": "Three-decimal currency: 1.234 KWD is 1234 fils."
+    },
+    {
+      "id": "kwd-excess-precision",
+      "currency": "KWD",
+      "exponent": 3,
+      "input": "1.2345",
+      "expectedValid": false,
+      "expectedErrorCode": "UNSUPPORTED_PRECISION"
+    },
+    {
+      "id": "ngn-two-decimals",
+      "currency": "NGN",
+      "exponent": 2,
+      "input": "100.50",
+      "expectedValid": true,
+      "expectedMinorUnits": "10050"
+    },
+    {
+      "id": "ngn-excess-precision",
+      "currency": "NGN",
+      "exponent": 2,
+      "input": "100.505",
+      "expectedValid": false,
+      "expectedErrorCode": "UNSUPPORTED_PRECISION"
+    },
+    {
+      "id": "usd-two-decimals",
+      "currency": "USD",
+      "exponent": 2,
+      "input": "12.99",
+      "expectedValid": true,
+      "expectedMinorUnits": "1299"
+    },
+    {
+      "id": "jpy-zero",
+      "currency": "JPY",
+      "exponent": 0,
+      "input": "0",
+      "expectedValid": true,
+      "expectedMinorUnits": "0",
+      "note": "toMinorUnits permits zero (unlike parseLocaleMoney); display-layer validation rejects zero separately."
+    },
+    {
+      "id": "ngn-scientific-notation",
+      "currency": "NGN",
+      "exponent": 2,
+      "input": "1e3",
+      "expectedValid": false,
+      "expectedErrorCode": "SCIENTIFIC_NOTATION",
+      "note": "Failure case: scientific notation is rejected at the API boundary to prevent float-induced precision drift."
+    }
+  ]
+}

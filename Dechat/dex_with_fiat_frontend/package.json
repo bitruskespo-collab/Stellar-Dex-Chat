@@ -20,6 +20,7 @@
     "test:e2e:install": "playwright install",
     "test:e2e:fullstack": "playwright test --project=fullstack",
     "test:a11y": "playwright test --project=a11y",
+    "test:property": "playwright test --project=amount-property",
     "test:unit:watch": "vitest",
     "test:coverage": "vitest run --coverage --maxWorkers=1 --pool=forks --no-file-parallelism",
     "test:coverage:merge": "vitest run --mergeReports --coverage --reporter=default",
