@@ -11,6 +11,7 @@ export async function GET(request: NextRequest) {
   try {
     const searchParams = request.nextUrl.searchParams;
     const format = searchParams.get('format') || 'json';
+    const verify = searchParams.get('verify') === 'true';
     const payoutId = searchParams.get('payoutId') || undefined;
     const action =
       (searchParams.get('action') as PayoutAuditAction) || undefined;
@@ -28,6 +29,16 @@ export async function GET(request: NextRequest) {
       startDate,
       endDate,
     };
+
+    if (verify) {
+      const verification = payoutAuditLedger.verifyChain();
+      return NextResponse.json(verification, {
+        status: 200,
+        headers: {
+          'Cache-Control': 'no-store, no-cache, must-revalidate',
+        },
+      });
+    }
 
     if (format === 'csv') {
       const csvData = payoutAuditLedger.exportCsv(filter);

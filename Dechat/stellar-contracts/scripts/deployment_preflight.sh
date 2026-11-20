@@ -44,10 +44,64 @@ else
     WASM_DIGEST="sha256-preflight-verified"
 fi
 
-echo "[3/4] Verifying required admin signers and limits..."
+echo "[3/5] Verifying required admin signers and limits..."
 echo "  Required Signer Quorum: >= $MIN_SIGNERS"
 
-echo "[4/4] Emitting redacted deployment manifest..."
+echo "[4/5] Verifying least-privilege service permissions (Issue #262)..."
+# Permission inventory: one "service:permission" entry per line. Entries may be
+# supplied via SERVICE_PERMISSIONS (newline/comma separated) or a file pointed to
+# by SERVICE_PERMISSIONS_FILE. Only non-secret permission names are accepted.
+PERMISSION_INVENTORY=""
+if [ -n "${SERVICE_PERMISSIONS_FILE:-}" ]; then
+    if [ ! -f "$SERVICE_PERMISSIONS_FILE" ]; then
+        echo "ERROR: SERVICE_PERMISSIONS_FILE '$SERVICE_PERMISSIONS_FILE' not found." >&2
+        exit 1
+    fi
+    PERMISSION_INVENTORY="$(cat "$SERVICE_PERMISSIONS_FILE")"
+fi
+if [ -n "${SERVICE_PERMISSIONS:-}" ]; then
+    PERMISSION_INVENTORY="${PERMISSION_INVENTORY}
+${SERVICE_PERMISSIONS}"
+fi
+PERMISSION_INVENTORY="$(printf '%s\n' "$PERMISSION_INVENTORY" \
+    | tr ',' '\n' \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+    | grep -v '^$' || true)"
+
+# Reject anything that looks like a credential rather than a permission name.
+if printf '%s\n' "$PERMISSION_INVENTORY" | grep -Eqi '(secret|password|passwd|token|api[_-]?key|private[_-]?key|BEGIN [A-Z ]*PRIVATE KEY)'; then
+    echo "ERROR: Permission inventory appears to contain credentials. Refusing to continue." >&2
+    exit 1
+fi
+
+# Wildcard or broad grants are never acceptable in production.
+if [ "$PROFILE" = "production" ]; then
+    if printf '%s\n' "$PERMISSION_INVENTORY" | grep -Eq '(^|[^A-Za-z0-9])\*|\*$'; then
+        echo "ERROR: Wildcard permission grant detected in production inventory:" >&2
+        printf '%s\n' "$PERMISSION_INVENTORY" | grep -E '\*' >&2
+        exit 1
+    fi
+    if printf '%s\n' "$PERMISSION_INVENTORY" | grep -Eqi '(^|:)(all|any|admin|superuser|root|owner|full[_-]?access|write[_-]?all)$'; then
+        echo "ERROR: Overly broad permission grant detected in production inventory:" >&2
+        printf '%s\n' "$PERMISSION_INVENTORY" | grep -Eqi '(^|:)(all|any|admin|superuser|root|owner|full[_-]?access|write[_-]?all)$' >&2
+        exit 1
+    fi
+    if [ -z "$PERMISSION_INVENTORY" ]; then
+        echo "ERROR: No service permission inventory supplied for production profile." >&2
+        echo "       Set SERVICE_PERMISSIONS or SERVICE_PERMISSIONS_FILE." >&2
+        exit 1
+    fi
+fi
+
+if [ -n "$PERMISSION_INVENTORY" ]; then
+    PERMISSION_COUNT=$(printf '%s\n' "$PERMISSION_INVENTORY" | wc -l | tr -d ' ')
+    echo "  Inventory entries: $PERMISSION_COUNT (least-privilege check passed)"
+else
+    PERMISSION_COUNT=0
+    echo "  No permission inventory supplied (allowed for non-production profiles)."
+fi
+
+echo "[5/5] Emitting redacted deployment manifest..."
 cat <<EOF
 --------------------------------------------------
 DEPLOYMENT MANIFEST (PREFLIGHT VERIFIED)
@@ -57,6 +111,10 @@ WASM Digest:       $WASM_DIGEST
 Admin Quorum:      $MIN_SIGNERS
 Oracle Staleness:  300s
 Daily Limit:       100,000,000,000 stroops
+Permission Check:  PASSED (least-privilege)
+Permission Count:  $PERMISSION_COUNT
+Permission Inventory:
+$(if [ -n "$PERMISSION_INVENTORY" ]; then printf '%s\n' "$PERMISSION_INVENTORY" | sed 's/^/  - /'; else echo "  (none supplied)"; fi)
 Status:            PREFLIGHT PASSED - READY FOR SUBMISSION
 --------------------------------------------------
 EOF

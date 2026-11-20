@@ -75,6 +75,73 @@ describe('/api/admin/payout-audit', () => {
     expect(csvText).toContain('payout_succeeded');
   });
 
+  it('returns valid=true when verifying an untampered ledger', async () => {
+    payoutAuditLedger.recordEvent({
+      payoutId: 'PO-VERIFY-1',
+      action: 'payout_initiated',
+      actor: 'client:test',
+    });
+    payoutAuditLedger.recordEvent({
+      payoutId: 'PO-VERIFY-2',
+      action: 'payout_succeeded',
+      actor: 'webhook:paystack',
+    });
+
+    const req = new NextRequest(
+      new Request('http://localhost/api/admin/payout-audit?verify=true'),
+    );
+    const res = await GET(req);
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    expect(body.valid).toBe(true);
+    expect(body.reason).toBeUndefined();
+    expect(body.checkedEntries).toBe(2);
+  });
+
+  it('returns valid=false with a failure reason when the ledger is tampered', async () => {
+    payoutAuditLedger.recordEvent({
+      payoutId: 'PO-TAMPER-1',
+      action: 'payout_initiated',
+      actor: 'client:test',
+    });
+    payoutAuditLedger.recordEvent({
+      payoutId: 'PO-TAMPER-2',
+      action: 'payout_succeeded',
+      actor: 'webhook:paystack',
+    });
+
+    // Simulate an attacker rewriting a historical payload without re-chaining.
+    const entries = payoutAuditLedger.listEntries();
+    entries[0].action = 'payout_failed';
+
+    const req = new NextRequest(
+      new Request('http://localhost/api/admin/payout-audit?verify=true'),
+    );
+    const res = await GET(req);
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    expect(body.valid).toBe(false);
+    expect(typeof body.reason).toBe('string');
+    expect(body.reason.length).toBeGreaterThan(0);
+  });
+
+  it('enforces authorization before running ledger verification', async () => {
+    mockRequireAdminAuth.mockReturnValue(
+      new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 }),
+    );
+
+    const req = new NextRequest(
+      new Request('http://localhost/api/admin/payout-audit?verify=true'),
+    );
+    const res = await GET(req);
+    expect(res.status).toBe(401);
+
+    const body = await res.json();
+    expect(body.error).toBe('Unauthorized');
+  });
+
   it('rejects POST, PUT, DELETE, and PATCH methods with 405 Method Not Allowed to preserve append-only ledger', async () => {
     const postRes = await POST();
     const putRes = await PUT();

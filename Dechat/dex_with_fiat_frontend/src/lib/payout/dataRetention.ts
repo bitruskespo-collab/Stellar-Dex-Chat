@@ -163,6 +163,192 @@ export const RETENTION_PERIODS_MS: Record<PayoutStatus, number> = {
   pending: Number.POSITIVE_INFINITY,   // Active transfers must never be auto-deleted
 };
 
+/**
+ * Legal/audit retention exceptions that override user-initiated account deletion.
+ * Each exception documents why a category of user-linked data must survive an
+ * account deletion request and what transformation is permitted instead.
+ */
+export type RetentionExceptionCategory =
+  | 'financial_audit'      // Accounting / tax records of settled payouts
+  | 'financial_logs'       // Operational financial logs required for reconciliation
+  | 'dispute_hold'         // Records under active dispute or chargeback investigation
+  | 'regulatory_mandate';  // Statutory retention imposed by a regulator
+
+export type RetentionAction =
+  | 'retain'               // Keep the record as-is (already non-identifying)
+  | 'deidentify'           // Irreversibly strip identifiers, keep the audit skeleton
+  | 'delete';              // No exception applies; erase the record
+
+export interface RetentionException {
+  id: string;
+  category: RetentionExceptionCategory;
+  description: string;
+  /** Minimum period the exception keeps the record alive, in milliseconds. */
+  retentionMs: number;
+  /** Fields that must be irreversibly de-identified when the exception applies. */
+  deidentifyFields: string[];
+  /** Fields that may be preserved verbatim under the exception. */
+  preservedFields: string[];
+}
+
+/**
+ * Declarative registry of legal/audit retention exceptions.
+ */
+export const RETENTION_EXCEPTIONS: Record<string, RetentionException> = {
+  payout_financial_audit: {
+    id: 'payout_financial_audit',
+    category: 'financial_audit',
+    description:
+      'Settled payout audit summaries are retained for accounting and tax reporting.',
+    retentionMs: 7 * 365 * 24 * 60 * 60 * 1000, // 7 years
+    deidentifyFields: [
+      'account_number',
+      'account_name',
+      'bvn',
+      'phone_number',
+      'email',
+      'recipient_code',
+      'transfer_code',
+    ],
+    preservedFields: [
+      'reference',
+      'amount',
+      'currency',
+      'fee',
+      'status',
+      'createdAt',
+      'settledAt',
+      'bankToken',
+    ],
+  },
+  payout_financial_logs: {
+    id: 'payout_financial_logs',
+    category: 'financial_logs',
+    description:
+      'Financial transaction logs are retained for reconciliation and fraud review.',
+    retentionMs: 2 * 365 * 24 * 60 * 60 * 1000, // 2 years
+    deidentifyFields: [
+      'account_number',
+      'account_name',
+      'bvn',
+      'phone_number',
+      'email',
+      'recipient_code',
+      'transfer_code',
+    ],
+    preservedFields: ['reference', 'amount', 'currency', 'status', 'createdAt'],
+  },
+  payout_dispute_hold: {
+    id: 'payout_dispute_hold',
+    category: 'dispute_hold',
+    description:
+      'Records tied to an open dispute or chargeback are frozen until resolution.',
+    retentionMs: 180 * 24 * 60 * 60 * 1000, // 180 days
+    deidentifyFields: [
+      'account_number',
+      'account_name',
+      'bvn',
+      'phone_number',
+      'email',
+    ],
+    preservedFields: ['reference', 'amount', 'currency', 'status', 'createdAt'],
+  },
+};
+
+export interface RetentionDecision {
+  action: RetentionAction;
+  /** Matched exception id, if any. */
+  exceptionId?: string;
+  /** Fields that must be irreversibly de-identified. */
+  deidentifyFields: string[];
+  /** Fields that may be preserved under the exception. */
+  preservedFields: string[];
+  /** Timestamp (ms) until which the record must be retained, if applicable. */
+  retainUntil?: number;
+  reason: string;
+}
+
+export interface RetentionEvaluationInput {
+  status: PayoutStatus;
+  createdAt: number;
+  settledAt?: number;
+  /** True when the record is linked to an open dispute or chargeback. */
+  hasOpenDispute?: boolean;
+  /** True when the record is a financial log entry rather than a payout record. */
+  isFinancialLog?: boolean;
+  /** Current time in ms (injectable for deterministic tests). */
+  now?: number;
+}
+
+/**
+ * Decides how a user-linked payout record must be handled after an account
+ * deletion request: retained, irreversibly de-identified, or deleted.
+ *
+ * Pending payouts are never deleted or de-identified because they are still
+ * in flight; the caller must wait for a terminal status.
+ */
+export function evaluateRetention(
+  input: RetentionEvaluationInput,
+): RetentionDecision {
+  const now = input.now ?? Date.now();
+
+  if (input.status === 'pending') {
+    return {
+      action: 'retain',
+      deidentifyFields: [],
+      preservedFields: [],
+      reason:
+        'Pending payouts are in flight and cannot be deleted or de-identified until terminal status.',
+    };
+  }
+
+  if (input.hasOpenDispute) {
+    const exception = RETENTION_EXCEPTIONS.payout_dispute_hold;
+    return {
+      action: 'deidentify',
+      exceptionId: exception.id,
+      deidentifyFields: [...exception.deidentifyFields],
+      preservedFields: [...exception.preservedFields],
+      retainUntil: now + exception.retentionMs,
+      reason: exception.description,
+    };
+  }
+
+  if (input.isFinancialLog) {
+    const exception = RETENTION_EXCEPTIONS.payout_financial_logs;
+    return {
+      action: 'deidentify',
+      exceptionId: exception.id,
+      deidentifyFields: [...exception.deidentifyFields],
+      preservedFields: [...exception.preservedFields],
+      retainUntil: now + exception.retentionMs,
+      reason: exception.description,
+    };
+  }
+
+  if (input.status === 'completed') {
+    const exception = RETENTION_EXCEPTIONS.payout_financial_audit;
+    const settledAt = input.settledAt ?? input.createdAt;
+    const retainUntil = settledAt + exception.retentionMs;
+    return {
+      action: retainUntil > now ? 'deidentify' : 'delete',
+      exceptionId: exception.id,
+      deidentifyFields: [...exception.deidentifyFields],
+      preservedFields: [...exception.preservedFields],
+      retainUntil,
+      reason: exception.description,
+    };
+  }
+
+  // Failed, cancelled, and rejected payouts carry no legal retention obligation.
+  return {
+    action: 'delete',
+    deidentifyFields: [],
+    preservedFields: [],
+    reason: 'No legal or audit retention exception applies to this record.',
+  };
+}
+
 export interface EncryptedPayload {
   ciphertext: string;
   iv: string;
@@ -575,6 +761,38 @@ export class PayoutRetentionService {
     ).length;
 
     return { prunedProofs, activeCount };
+  }
+
+  /**
+   * Applies an account deletion request to a stored payout record, honoring
+   * legal/audit retention exceptions. Returns the retention decision and, when
+   * the record was de-identified or deleted, the resulting deletion proof.
+   */
+  public applyAccountDeletion(
+    reference: string,
+    options?: { requestedBy?: string; hasOpenDispute?: boolean; now?: number },
+  ): { decision: RetentionDecision; proof?: DeletionProof } {
+    const existing = this.records.get(reference);
+    if (!existing) {
+      throw new Error(`Payout record not found for reference: ${reference}`);
+    }
+
+    const decision = evaluateRetention({
+      status: existing.status,
+      createdAt: existing.createdAt,
+      settledAt: existing.settledAt,
+      hasOpenDispute: options?.hasOpenDispute,
+      now: options?.now,
+    });
+
+    if (decision.action === 'retain') {
+      return { decision };
+    }
+
+    const proof = this.deletePayoutPii(reference, 'user_request', {
+      requestedBy: options?.requestedBy,
+    });
+    return { decision, proof };
   }
 
   public getDeletionProof(reference: string): DeletionProof | null {

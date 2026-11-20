@@ -5,6 +5,12 @@ import {
   RetryConfig,
   verifyAccountSchema,
   createRecipientSchema,
+  validateRedirectUrl,
+  validateCallbackUrl,
+  validateDeepLink,
+  redirectUrlSchema,
+  callbackUrlSchema,
+  deepLinkSchema,
 } from './apiSchemas';
 
 describe('apiSchemas - Request Retry with Exponential Backoff', () => {
@@ -422,5 +428,225 @@ describe('createRecipientSchema', () => {
       createRecipientSchema.safeParse({ ...valid, type: 'a'.repeat(51) })
         .success,
     ).toBe(false);
+  });
+});
+
+describe('URL destination validation', () => {
+  const allowedHosts = ['app.example.com', 'pay.example.com'];
+
+  describe('validateRedirectUrl', () => {
+    it('accepts an allowlisted https URL', () => {
+      const result = validateRedirectUrl(
+        'https://app.example.com/dashboard?tab=wallet',
+        { allowedHosts },
+      );
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.url.host).toBe('app.example.com');
+      }
+    });
+
+    it('accepts a relative path when relative URLs are allowed', () => {
+      const result = validateRedirectUrl('/wallet/overview', {
+        allowedHosts,
+        allowRelative: true,
+      });
+      expect(result.ok).toBe(true);
+    });
+
+    it('rejects a relative path when relative URLs are not allowed', () => {
+      const result = validateRedirectUrl('/wallet/overview', { allowedHosts });
+      expect(result.ok).toBe(false);
+    });
+
+    it('rejects an external host', () => {
+      const result = validateRedirectUrl('https://evil.example.org/steal', {
+        allowedHosts,
+      });
+      expect(result.ok).toBe(false);
+    });
+
+    it('rejects a lookalike host that merely contains an allowed host', () => {
+      expect(
+        validateRedirectUrl('https://app.example.com.evil.org/x', {
+          allowedHosts,
+        }).ok,
+      ).toBe(false);
+      expect(
+        validateRedirectUrl('https://evil-app.example.com/x', { allowedHosts })
+          .ok,
+      ).toBe(false);
+    });
+
+    it('rejects scheme/host confusion via userinfo', () => {
+      expect(
+        validateRedirectUrl('https://app.example.com@evil.org/x', {
+          allowedHosts,
+        }).ok,
+      ).toBe(false);
+      expect(
+        validateRedirectUrl('https://evil.org#@app.example.com', {
+          allowedHosts,
+        }).ok,
+      ).toBe(false);
+    });
+
+    it('rejects non-https schemes', () => {
+      for (const url of [
+        'http://app.example.com/x',
+        'javascript:alert(1)',
+        'data:text/html,<script>alert(1)</script>',
+        'ftp://app.example.com/x',
+      ]) {
+        expect(validateRedirectUrl(url, { allowedHosts }).ok).toBe(false);
+      }
+    });
+
+    it('rejects protocol-relative URLs', () => {
+      expect(
+        validateRedirectUrl('//evil.org/x', { allowedHosts }).ok,
+      ).toBe(false);
+    });
+
+    it('rejects percent-encoded bypass attempts', () => {
+      for (const url of [
+        'https://app.example.com%2eevil.org/x',
+        'https://app.example.com/%2f%2fevil.org',
+        'https://app.example.com\\@evil.org/x',
+        'https%3a%2f%2fevil.org%2fx',
+      ]) {
+        expect(validateRedirectUrl(url, { allowedHosts }).ok).toBe(false);
+      }
+    });
+
+    it('rejects malformed URLs and empty input', () => {
+      for (const url of ['', '   ', 'not a url', 'https://', 'https:///path']) {
+        expect(validateRedirectUrl(url, { allowedHosts }).ok).toBe(false);
+      }
+    });
+
+    it('rejects non-string input', () => {
+      expect(
+        validateRedirectUrl(undefined as unknown as string, { allowedHosts })
+          .ok,
+      ).toBe(false);
+      expect(
+        validateRedirectUrl(42 as unknown as string, { allowedHosts }).ok,
+      ).toBe(false);
+    });
+
+    it('rejects every URL when the allowlist is empty', () => {
+      expect(
+        validateRedirectUrl('https://app.example.com/x', { allowedHosts: [] })
+          .ok,
+      ).toBe(false);
+    });
+  });
+
+  describe('validateCallbackUrl', () => {
+    it('accepts an allowlisted https callback', () => {
+      expect(
+        validateCallbackUrl('https://pay.example.com/callback', {
+          allowedHosts,
+        }).ok,
+      ).toBe(true);
+    });
+
+    it('rejects an external callback host', () => {
+      expect(
+        validateCallbackUrl('https://attacker.example.net/cb', {
+          allowedHosts,
+        }).ok,
+      ).toBe(false);
+    });
+
+    it('rejects a callback with a non-https scheme', () => {
+      expect(
+        validateCallbackUrl('http://pay.example.com/callback', {
+          allowedHosts,
+        }).ok,
+      ).toBe(false);
+    });
+
+    it('rejects a percent-encoded host bypass in a callback', () => {
+      expect(
+        validateCallbackUrl('https://pay.example.com%2fattacker.example.net', {
+          allowedHosts,
+        }).ok,
+      ).toBe(false);
+    });
+  });
+
+  describe('validateDeepLink', () => {
+    const allowedSchemes = ['dechat'];
+
+    it('accepts an allowlisted custom scheme deep link', () => {
+      const result = validateDeepLink('dechat://wallet/receive?amount=10', {
+        allowedSchemes,
+      });
+      expect(result.ok).toBe(true);
+    });
+
+    it('rejects a deep link with a disallowed scheme', () => {
+      for (const link of [
+        'javascript:alert(1)',
+        'https://app.example.com/x',
+        'intent://scan/#Intent;scheme=zxing;end',
+        'dechat-evil://wallet',
+      ]) {
+        expect(validateDeepLink(link, { allowedSchemes }).ok).toBe(false);
+      }
+    });
+
+    it('rejects scheme confusion via encoded separators', () => {
+      for (const link of [
+        'dechat%3a%2f%2fwallet',
+        'dechat://wallet%2f..%2f..%2fadmin',
+        'dechat:///\\evil.org',
+      ]) {
+        expect(validateDeepLink(link, { allowedSchemes }).ok).toBe(false);
+      }
+    });
+
+    it('rejects malformed deep links', () => {
+      for (const link of ['', '   ', 'dechat:', 'dechat://']) {
+        expect(validateDeepLink(link, { allowedSchemes }).ok).toBe(false);
+      }
+    });
+  });
+
+  describe('zod schemas', () => {
+    it('redirectUrlSchema accepts allowlisted URLs and rejects others', () => {
+      expect(
+        redirectUrlSchema(allowedHosts).safeParse('https://app.example.com/x')
+          .success,
+      ).toBe(true);
+      expect(
+        redirectUrlSchema(allowedHosts).safeParse('https://evil.org/x').success,
+      ).toBe(false);
+    });
+
+    it('callbackUrlSchema rejects external and malformed URLs', () => {
+      expect(
+        callbackUrlSchema(allowedHosts).safeParse('https://pay.example.com/cb')
+          .success,
+      ).toBe(true);
+      expect(
+        callbackUrlSchema(allowedHosts).safeParse('https://evil.org/cb')
+          .success,
+      ).toBe(false);
+      expect(callbackUrlSchema(allowedHosts).safeParse('nope').success).toBe(
+        false,
+      );
+    });
+
+    it('deepLinkSchema rejects disallowed schemes', () => {
+      expect(
+        deepLinkSchema(['dechat']).safeParse('dechat://wallet').success,
+      ).toBe(true);
+      expect(
+        deepLinkSchema(['dechat']).safeParse('javascript:alert(1)').success,
+      ).toBe(false);
+    });
   });
 });

@@ -10,12 +10,64 @@
 import { serverEnv } from '@/lib/serverEnv';
 import { isLiveSecretKey } from './credentialGuard';
 
+/**
+ * Least-privilege access roles for provider credentials (Issue #262).
+ * - `read`: status checks, webhook signature verification, reconciliation reads.
+ * - `mutate`: initiating/cancelling transfers and other state-changing calls.
+ */
+export type CredentialAccessRole = 'read' | 'mutate';
+
 export interface ProviderCredential {
   version: string;
   secretKey: string;
   isLive: boolean;
   status: 'active' | 'retiring' | 'revoked';
   addedAt: number;
+  /**
+   * Roles this credential is permitted to serve. Defaults to both roles when
+   * unspecified so existing single-key deployments keep working.
+   */
+  roles?: CredentialAccessRole[];
+}
+
+const ALL_ROLES: CredentialAccessRole[] = ['read', 'mutate'];
+
+/**
+ * Rejects wildcard or unnecessary production permissions.
+ * A live credential must not carry wildcard scopes and must be explicitly
+ * limited to the known access roles.
+ */
+export function assertLeastPrivilege(
+  cred: ProviderCredential,
+  role: CredentialAccessRole,
+): void {
+  const roles = cred.roles ?? ALL_ROLES;
+  if (roles.length === 0) {
+    throw new Error(
+      `Credential ${cred.version} has no permitted roles; refusing to use it.`,
+    );
+  }
+  for (const granted of roles) {
+    if (!ALL_ROLES.includes(granted)) {
+      throw new Error(
+        `Credential ${cred.version} grants unknown role "${String(
+          granted,
+        )}"; wildcard permissions are not allowed.`,
+      );
+    }
+  }
+  if (!roles.includes(role)) {
+    throw new Error(
+      `Credential ${cred.version} is not permitted for "${role}" access.`,
+    );
+  }
+  if (cred.isLive && roles.length === ALL_ROLES.length) {
+    // Live credentials must be split into read/mutate roles where practical.
+    throw new Error(
+      `Live credential ${cred.version} grants both read and mutate roles; ` +
+        'split production credentials into least-privilege roles.',
+    );
+  }
 }
 
 class CredentialManager {
@@ -90,6 +142,28 @@ class CredentialManager {
   }
 
   /**
+   * Read-role accessor for status checks, webhook verification and reads.
+   * Enforces least-privilege role scoping before returning secret material.
+   */
+  public getReadCredential(version?: string): ProviderCredential | null {
+    const cred = this.getCredential(version);
+    if (!cred) return null;
+    assertLeastPrivilege(cred, 'read');
+    return cred;
+  }
+
+  /**
+   * Mutation-role accessor for initiating/cancelling transfers.
+   * Enforces least-privilege role scoping before returning secret material.
+   */
+  public getMutationCredential(version?: string): ProviderCredential | null {
+    const cred = this.getCredential(version);
+    if (!cred) return null;
+    assertLeastPrivilege(cred, 'mutate');
+    return cred;
+  }
+
+  /**
    * Returns all active and retiring credentials for webhook signature verification
    * during bounded overlap.
    */
@@ -97,6 +171,12 @@ class CredentialManager {
     const valid: ProviderCredential[] = [];
     for (const cred of Array.from(this.keyring.values())) {
       if (cred.status === 'active' || cred.status === 'retiring') {
+        // Webhook verification is a read path; skip credentials without read role.
+        try {
+          assertLeastPrivilege(cred, 'read');
+        } catch {
+          continue;
+        }
         valid.push(cred);
       }
     }
@@ -110,6 +190,7 @@ class CredentialManager {
   public rotateCredential(
     newSecretKey: string,
     newVersion: string,
+    roles?: CredentialAccessRole[],
   ): ProviderCredential {
     const currentActive = this.getActiveCredential();
     if (currentActive) {
@@ -122,6 +203,7 @@ class CredentialManager {
       isLive: isLiveSecretKey(newSecretKey),
       status: 'active',
       addedAt: Date.now(),
+      roles,
     };
 
     this.keyring.set(newVersion, nextCred);
@@ -133,6 +215,17 @@ class CredentialManager {
    * Registers an existing credential version for testing or recovery.
    */
   public registerCredential(cred: ProviderCredential): void {
+    // Validate role scoping up-front so misconfigured credentials fail fast.
+    const roles = cred.roles ?? ALL_ROLES;
+    for (const granted of roles) {
+      if (!ALL_ROLES.includes(granted)) {
+        throw new Error(
+          `Credential ${cred.version} grants unknown role "${String(
+            granted,
+          )}"; wildcard permissions are not allowed.`,
+        );
+      }
+    }
     this.keyring.set(cred.version, cred);
   }
 

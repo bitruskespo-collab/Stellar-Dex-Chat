@@ -9,6 +9,7 @@ import {
 import { publishPaymentStatus } from '@/lib/paymentStatusEvents';
 import { webhookDeduplicationService } from '@/lib/payout/webhookDeduplication';
 import { payoutReconciliationService } from '@/lib/payout/reconciliation';
+import { validateCallbackDestination } from '@/lib/security/urlAllowlist';
 
 interface PaystackWebhookData {
   id?: string | number;
@@ -59,6 +60,38 @@ export async function POST(request: NextRequest) {
     telemetry.addLog(span.spanId, 'info', 'Starting webhook processing', {
       endpoint: '/api/webhook',
     });
+
+    // Validate the callback destination before processing provider callbacks.
+    // Rejects malformed URLs, external hosts, and scheme/host confusion
+    // (including percent-encoded bypasses) against the centralized allowlist.
+    const callbackDestination =
+      request.headers.get('x-callback-url') ??
+      request.headers.get('x-paystack-callback-url') ??
+      request.nextUrl.searchParams.get('callback_url');
+
+    if (callbackDestination !== null) {
+      const destinationCheck = validateCallbackDestination(callbackDestination);
+      if (!destinationCheck.ok) {
+        telemetry.addLog(
+          span.spanId,
+          'warn',
+          'Webhook rejected: invalid callback destination',
+          {
+            endpoint: '/api/webhook',
+            reason: destinationCheck.reason,
+          },
+        );
+        telemetry.finishSpan(span.spanId, {
+          success: false,
+          error: 'Invalid callback destination',
+          errorType: 'invalid_destination',
+        });
+        return NextResponse.json(
+          { message: 'Invalid callback destination' },
+          { status: 400 },
+        );
+      }
+    }
 
     const payload = await request.text();
     const signature = request.headers.get('x-paystack-signature');

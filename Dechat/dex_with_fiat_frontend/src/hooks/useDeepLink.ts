@@ -1,15 +1,24 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import {
+  validateDeepLinkDestination,
+  type DestinationValidationResult,
+} from '../lib/urlDestinationValidator';
 
 export type DeepLinkState =
   | { status: 'idle' }
   | { status: 'loading'; sessionId: string }
-  | { status: 'not-found'; sessionId: string };
+  | { status: 'not-found'; sessionId: string }
+  | { status: 'rejected'; reason: string };
 
 /**
  * Reads the URL hash on mount and attempts to navigate to the referenced
  * chat session.  Expected format: /chat#<session-id>
+ *
+ * The hash is validated against the centralized destination allowlist before
+ * being followed.  Malformed, external, or otherwise disallowed destinations
+ * are rejected safely and never passed to `loadChatSession`.
  *
  * @param loadChatSession - Callback that loads a session by ID and returns
  *   whether the session was found.
@@ -23,19 +32,32 @@ export function useDeepLink(
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
-    const hash = window.location.hash.slice(1).trim(); // strip leading '#'
-    if (!hash) return;
+    const rawHash = window.location.hash.slice(1).trim(); // strip leading '#'
+    if (!rawHash) return;
 
-    setState({ status: 'loading', sessionId: hash });
+    const validation: DestinationValidationResult = validateDeepLinkDestination(
+      rawHash,
+      window.location.origin,
+    );
+
+    if (!validation.ok) {
+      setState({ status: 'rejected', reason: validation.reason });
+      return;
+    }
+
+    const sessionId = validation.sessionId;
+    if (!sessionId) return;
+
+    setState({ status: 'loading', sessionId });
 
     // loadChatSession is synchronous; after calling it, check whether the
     // session is now current to determine success vs. not-found.
-    loadChatSession(hash);
+    loadChatSession(sessionId);
 
-    if (hasSessionLoaded(hash)) {
+    if (hasSessionLoaded(sessionId)) {
       setState({ status: 'idle' });
     } else {
-      setState({ status: 'not-found', sessionId: hash });
+      setState({ status: 'not-found', sessionId });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // run once on mount

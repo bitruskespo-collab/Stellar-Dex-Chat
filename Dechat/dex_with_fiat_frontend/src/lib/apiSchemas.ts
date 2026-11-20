@@ -11,6 +11,11 @@ import {
   strictCreateRecipientSchema,
   strictVerifyAccountSchema,
 } from './bankAccountSchemas';
+import {
+  redirectDestinationSchema,
+  callbackDestinationSchema,
+  deepLinkDestinationSchema,
+} from './urlValidation';
 
 export {
   countrySchema,
@@ -84,6 +89,42 @@ export const transferStatusSchema = z.object({
 });
 
 export type TransferStatusInput = z.infer<typeof transferStatusSchema>;
+
+// Destination validation for auth and payment flows. These wrap the
+// centralized validator in `urlValidation.ts` so that request payloads reject
+// non-allowlisted schemes/hosts, scheme/host confusion, and percent-encoded
+// bypasses at the schema boundary rather than trusting downstream consumers.
+export const redirectUrlSchema = redirectDestinationSchema;
+export const callbackUrlSchema = callbackDestinationSchema;
+export const deepLinkUrlSchema = deepLinkDestinationSchema;
+
+export type RedirectUrl = z.infer<typeof redirectUrlSchema>;
+export type CallbackUrl = z.infer<typeof callbackUrlSchema>;
+export type DeepLinkUrl = z.infer<typeof deepLinkUrlSchema>;
+
+// Schema for the auth redirect request payload. Only the allowlisted
+// `redirectUrl` destination is accepted; unknown keys are rejected so callers
+// cannot smuggle an alternate destination field past validation.
+export const authRedirectRequestSchema = z
+  .object({
+    redirectUrl: redirectUrlSchema,
+  })
+  .strict();
+
+export type AuthRedirectRequest = z.infer<typeof authRedirectRequestSchema>;
+
+// Schema for the payment callback request payload. `callbackUrl` and the
+// optional `deepLink` are both validated against their allowlists.
+export const paymentCallbackRequestSchema = z
+  .object({
+    callbackUrl: callbackUrlSchema,
+    deepLink: deepLinkUrlSchema.optional(),
+  })
+  .strict();
+
+export type PaymentCallbackRequest = z.infer<
+  typeof paymentCallbackRequestSchema
+>;
 
 // Schema for the payment-status/stream endpoint query string. The stream is
 // keyed by the client session id minted in `clientSession.ts` (a UUID), so a

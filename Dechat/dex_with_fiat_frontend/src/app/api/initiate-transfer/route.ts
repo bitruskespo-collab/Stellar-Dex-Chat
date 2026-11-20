@@ -15,6 +15,10 @@ import { setTransferStatus, getTransferStatus } from '@/lib/transferStore';
 import { initiateTransferSchema } from '@/lib/apiSchemas';
 import { payoutAuditLedger } from '@/lib/payout/auditLedger';
 import { payoutRetryQueue } from '@/lib/payout/retryQueue';
+import {
+  validateRedirectDestination,
+  type RedirectDestinationKind,
+} from '@/lib/urlAllowlist';
 
 const RATE_LIMIT = { maxRequests: 3, windowMs: 60_000 };
 
@@ -95,6 +99,55 @@ export async function POST(request: NextRequest) {
 
     const { source, reason, amount, recipient } = validationResult.data;
     const bodyRecord = body as Record<string, unknown>;
+
+    // Validate any redirect/callback/deep-link destinations against the
+    // centralized allowlist before initiating a transfer (Issue #264).
+    const destinationFields: Array<{
+      field: string;
+      kind: RedirectDestinationKind;
+    }> = [
+      { field: 'redirectUrl', kind: 'redirect' },
+      { field: 'callbackUrl', kind: 'callback' },
+      { field: 'returnUrl', kind: 'redirect' },
+      { field: 'deepLink', kind: 'deepLink' },
+    ];
+
+    for (const { field, kind } of destinationFields) {
+      const rawValue = bodyRecord[field];
+      if (rawValue === undefined || rawValue === null) continue;
+
+      const destinationResult = validateRedirectDestination(rawValue, kind);
+      if (!destinationResult.ok) {
+        telemetry.addLog(
+          span.spanId,
+          'warn',
+          'Rejected invalid redirect destination',
+          {
+            field,
+            kind,
+            reason: destinationResult.reason,
+            correlationId,
+          },
+        );
+        telemetry.finishSpan(span.spanId, {
+          success: false,
+          error: 'Invalid redirect destination',
+        });
+
+        return validationError({
+          message: 'Invalid redirect destination.',
+          correlationId,
+          code: 'INVALID_REDIRECT_DESTINATION',
+          issues: [
+            {
+              path: [field],
+              code: 'custom',
+              message: `The ${field} must be a safe, allowlisted ${kind} destination.`,
+            },
+          ],
+        });
+      }
+    }
     const clientSessionId =
       request.headers.get('x-client-session-id') ||
       (typeof bodyRecord.clientSessionId === 'string'

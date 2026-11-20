@@ -30,6 +30,109 @@ export interface PayoutAuditEntry {
   hash: string;
 }
 
+/**
+ * Periodic checkpoint anchoring the chain at a given sequence number.
+ * The checkpoint hash commits to the sequence number and the entry hash
+ * so that truncation or splicing of the tail is detectable.
+ */
+export interface PayoutAuditCheckpoint {
+  sequenceNumber: number;
+  entryHash: string;
+  checkpointHash: string;
+  createdAt: string;
+}
+
+export type PayoutAuditVerificationIssueType =
+  | 'deletion'
+  | 'reordering'
+  | 'payload_modification'
+  | 'checkpoint_mismatch'
+  | 'missing_checkpoint';
+
+export interface PayoutAuditVerificationIssue {
+  type: PayoutAuditVerificationIssueType;
+  entryId?: string;
+  sequenceNumber?: number;
+  detail: string;
+}
+
+export interface PayoutAuditVerificationResult {
+  valid: boolean;
+  entriesChecked: number;
+  checkpointsChecked: number;
+  issues: PayoutAuditVerificationIssue[];
+  /** Convenience list of entry ids implicated in any issue. */
+  invalidEntries: string[];
+}
+
+export const GENESIS_HASH = '0'.repeat(64);
+export const DEFAULT_CHECKPOINT_INTERVAL = 25;
+
+/**
+ * Canonical serialization of an audit entry payload (excluding hash fields).
+ * Uses an explicit field set and stable key ordering so that the same logical
+ * entry always produces the same byte sequence across runtimes.
+ */
+export function canonicalizeAuditEntry(
+  entry: Pick<
+    PayoutAuditEntry,
+    | 'sequenceNumber'
+    | 'payoutId'
+    | 'action'
+    | 'actor'
+    | 'requestCorrelationId'
+    | 'providerReference'
+    | 'timestamp'
+    | 'metadata'
+  >,
+): string {
+  const canonicalMetadata = canonicalizeValue(entry.metadata ?? {});
+  return JSON.stringify({
+    sequenceNumber: entry.sequenceNumber,
+    payoutId: entry.payoutId,
+    action: entry.action,
+    actor: entry.actor,
+    requestCorrelationId: entry.requestCorrelationId,
+    providerReference: entry.providerReference,
+    timestamp: entry.timestamp,
+    metadata: canonicalMetadata,
+  });
+}
+
+function canonicalizeValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => canonicalizeValue(item));
+  }
+  if (value && typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(obj).sort()) {
+      sorted[key] = canonicalizeValue(obj[key]);
+    }
+    return sorted;
+  }
+  return value;
+}
+
+/**
+ * Compute the chain hash for an entry: SHA-256 over previousHash + canonical payload.
+ */
+export function computeAuditEntryHash(
+  previousHash: string,
+  entry: Parameters<typeof canonicalizeAuditEntry>[0],
+): string {
+  const raw = `${previousHash}|${canonicalizeAuditEntry(entry)}`;
+  return crypto.createHash('sha256').update(raw).digest('hex');
+}
+
+export function computeCheckpointHash(
+  sequenceNumber: number,
+  entryHash: string,
+): string {
+  const raw = `checkpoint|${sequenceNumber}|${entryHash}`;
+  return crypto.createHash('sha256').update(raw).digest('hex');
+}
+
 export interface RecordPayoutEventParams {
   payoutId: string;
   action: PayoutAuditAction;
@@ -65,10 +168,21 @@ export interface PaginatedPayoutAuditResult {
 
 export class PayoutAuditLedger {
   private entries: PayoutAuditEntry[] = [];
+  private checkpoints: PayoutAuditCheckpoint[] = [];
   private storageFilePath: string | null = null;
-  private lastHash = '0'.repeat(64);
+  private checkpointFilePath: string | null = null;
+  private lastHash = GENESIS_HASH;
+  private checkpointInterval: number;
 
-  constructor(storageDir?: string) {
+  constructor(storageDir?: string, checkpointInterval?: number) {
+    const envInterval = Number(process.env.PAYOUT_AUDIT_CHECKPOINT_INTERVAL);
+    this.checkpointInterval =
+      checkpointInterval && checkpointInterval > 0
+        ? checkpointInterval
+        : envInterval > 0
+          ? envInterval
+          : DEFAULT_CHECKPOINT_INTERVAL;
+
     if (storageDir) {
       this.initStorage(storageDir);
     } else if (process.env.PAYOUT_DATA_DIR) {
@@ -82,9 +196,54 @@ export class PayoutAuditLedger {
         fs.mkdirSync(storageDir, { recursive: true });
       }
       this.storageFilePath = path.join(storageDir, 'payout_audit_ledger.jsonl');
+      this.checkpointFilePath = path.join(
+        storageDir,
+        'payout_audit_checkpoints.jsonl',
+      );
       this.loadFromFile();
+      this.loadCheckpointsFromFile();
     } catch (err) {
       console.warn('Failed to initialize audit ledger storage:', err);
+    }
+  }
+
+  private loadCheckpointsFromFile(): void {
+    if (!this.checkpointFilePath || !fs.existsSync(this.checkpointFilePath)) {
+      return;
+    }
+
+    try {
+      const fileData = fs.readFileSync(this.checkpointFilePath, 'utf8');
+      const lines = fileData
+        .split('\n')
+        .filter((line) => line.trim().length > 0);
+      const loaded: PayoutAuditCheckpoint[] = [];
+
+      for (const line of lines) {
+        try {
+          loaded.push(JSON.parse(line) as PayoutAuditCheckpoint);
+        } catch {
+          // Skip corrupted line
+        }
+      }
+
+      this.checkpoints = loaded;
+    } catch (err) {
+      console.warn('Failed to load audit checkpoints from file:', err);
+    }
+  }
+
+  private appendCheckpointToFile(checkpoint: PayoutAuditCheckpoint): void {
+    if (!this.checkpointFilePath) return;
+
+    try {
+      fs.appendFileSync(
+        this.checkpointFilePath,
+        JSON.stringify(checkpoint) + '\n',
+        'utf8',
+      );
+    } catch (err) {
+      console.error('Failed to append audit checkpoint to file:', err);
     }
   }
 
@@ -143,8 +302,16 @@ export class PayoutAuditLedger {
     timestamp: string,
     metadata: Record<string, unknown>,
   ): string {
-    const raw = `${sequenceNumber}|${previousHash}|${payoutId}|${action}|${actor}|${requestCorrelationId}|${providerReference}|${timestamp}|${JSON.stringify(metadata)}`;
-    return crypto.createHash('sha256').update(raw).digest('hex');
+    return computeAuditEntryHash(previousHash, {
+      sequenceNumber,
+      payoutId,
+      action: action as PayoutAuditAction,
+      actor,
+      requestCorrelationId,
+      providerReference,
+      timestamp,
+      metadata,
+    });
   }
 
   /**
@@ -188,7 +355,30 @@ export class PayoutAuditLedger {
     this.lastHash = hash;
     this.appendToFile(entry);
 
+    if (sequenceNumber % this.checkpointInterval === 0) {
+      this.createCheckpoint(entry);
+    }
+
     return entry;
+  }
+
+  private createCheckpoint(entry: PayoutAuditEntry): PayoutAuditCheckpoint {
+    const checkpoint: PayoutAuditCheckpoint = Object.freeze({
+      sequenceNumber: entry.sequenceNumber,
+      entryHash: entry.hash,
+      checkpointHash: computeCheckpointHash(entry.sequenceNumber, entry.hash),
+      createdAt: new Date().toISOString(),
+    });
+    this.checkpoints.push(checkpoint);
+    this.appendCheckpointToFile(checkpoint);
+    return checkpoint;
+  }
+
+  /**
+   * Return a copy of the recorded checkpoints (read-only).
+   */
+  public getCheckpoints(): PayoutAuditCheckpoint[] {
+    return this.checkpoints.map((c) => ({ ...c }));
   }
 
   /**
@@ -298,36 +488,10 @@ export class PayoutAuditLedger {
    * Verify cryptographic integrity of the append-only ledger.
    */
   public verifyIntegrity(): { valid: boolean; invalidEntries: string[] } {
-    let expectedPrevious = '0'.repeat(64);
-    const invalidEntries: string[] = [];
-
-    for (const entry of this.entries) {
-      if (entry.previousHash !== expectedPrevious) {
-        invalidEntries.push(entry.id);
-      }
-
-      const calculated = this.computeHash(
-        entry.sequenceNumber,
-        entry.previousHash,
-        entry.payoutId,
-        entry.action,
-        entry.actor,
-        entry.requestCorrelationId,
-        entry.providerReference,
-        entry.timestamp,
-        entry.metadata,
-      );
-
-      if (calculated !== entry.hash) {
-        invalidEntries.push(entry.id);
-      }
-
-      expectedPrevious = entry.hash;
-    }
-
+    const result = verifyPayoutAuditChain(this.entries, this.checkpoints);
     return {
-      valid: invalidEntries.length === 0,
-      invalidEntries,
+      valid: result.valid,
+      invalidEntries: result.invalidEntries,
     };
   }
 
@@ -351,12 +515,125 @@ export class PayoutAuditLedger {
    */
   public _resetForTest(newDir?: string): void {
     this.entries = [];
-    this.lastHash = '0'.repeat(64);
+    this.checkpoints = [];
+    this.lastHash = GENESIS_HASH;
     this.storageFilePath = null;
+    this.checkpointFilePath = null;
     if (newDir) {
       this.initStorage(newDir);
     }
   }
+}
+
+/**
+ * Offline verifier for a payout audit chain.
+ *
+ * Walks the supplied entries in order, recomputes each hash from the
+ * canonical payload and previous hash, and validates any supplied
+ * checkpoints. Detects:
+ *  - deletion: sequence gaps or a chain that no longer starts at genesis
+ *  - reordering: sequence numbers out of order or previousHash mismatch
+ *  - payload_modification: recomputed hash differs from stored hash
+ *  - checkpoint_mismatch: checkpoint hash or anchored entry hash differs
+ *  - missing_checkpoint: a checkpoint references an absent sequence number
+ *
+ * The function is pure and does not touch storage, so it can be run offline
+ * against exported ledger data.
+ */
+export function verifyPayoutAuditChain(
+  entries: PayoutAuditEntry[],
+  checkpoints: PayoutAuditCheckpoint[] = [],
+): PayoutAuditVerificationResult {
+  const issues: PayoutAuditVerificationIssue[] = [];
+  const invalidEntries = new Set<string>();
+  let expectedPrevious = GENESIS_HASH;
+  let expectedSequence = 1;
+
+  for (const entry of entries) {
+    if (entry.sequenceNumber !== expectedSequence) {
+      const isReorder = entry.sequenceNumber < expectedSequence;
+      issues.push({
+        type: isReorder ? 'reordering' : 'deletion',
+        entryId: entry.id,
+        sequenceNumber: entry.sequenceNumber,
+        detail: isReorder
+          ? `Entry sequence ${entry.sequenceNumber} appears after ${expectedSequence - 1}`
+          : `Missing sequence number(s) before ${entry.sequenceNumber}`,
+      });
+      invalidEntries.add(entry.id);
+    }
+
+    if (entry.previousHash !== expectedPrevious) {
+      issues.push({
+        type: 'reordering',
+        entryId: entry.id,
+        sequenceNumber: entry.sequenceNumber,
+        detail: `previousHash does not match prior entry hash at sequence ${entry.sequenceNumber}`,
+      });
+      invalidEntries.add(entry.id);
+    }
+
+    const calculated = computeAuditEntryHash(entry.previousHash, entry);
+    if (calculated !== entry.hash) {
+      issues.push({
+        type: 'payload_modification',
+        entryId: entry.id,
+        sequenceNumber: entry.sequenceNumber,
+        detail: `Recomputed hash does not match stored hash at sequence ${entry.sequenceNumber}`,
+      });
+      invalidEntries.add(entry.id);
+    }
+
+    expectedPrevious = entry.hash;
+    expectedSequence = entry.sequenceNumber + 1;
+  }
+
+  const entryBySequence = new Map<number, PayoutAuditEntry>();
+  for (const entry of entries) {
+    entryBySequence.set(entry.sequenceNumber, entry);
+  }
+
+  for (const checkpoint of checkpoints) {
+    const expectedCheckpointHash = computeCheckpointHash(
+      checkpoint.sequenceNumber,
+      checkpoint.entryHash,
+    );
+    if (expectedCheckpointHash !== checkpoint.checkpointHash) {
+      issues.push({
+        type: 'checkpoint_mismatch',
+        sequenceNumber: checkpoint.sequenceNumber,
+        detail: `Checkpoint hash invalid at sequence ${checkpoint.sequenceNumber}`,
+      });
+    }
+
+    const anchored = entryBySequence.get(checkpoint.sequenceNumber);
+    if (!anchored) {
+      issues.push({
+        type: 'missing_checkpoint',
+        sequenceNumber: checkpoint.sequenceNumber,
+        detail: `Checkpoint references missing sequence ${checkpoint.sequenceNumber}`,
+      });
+      continue;
+    }
+
+    if (anchored.hash !== checkpoint.entryHash) {
+      issues.push({
+        type: 'checkpoint_mismatch',
+        entryId: anchored.id,
+        sequenceNumber: checkpoint.sequenceNumber,
+        detail: `Entry hash does not match checkpoint at sequence ${checkpoint.sequenceNumber}`,
+      });
+      invalidEntries.add(anchored.id);
+    }
+  }
+
+  return {
+    valid: issues.length === 0,
+    entriesChecked: entries.length,
+    checkpointsChecked: checkpoints.length,
+    issues,
+    invalidEntries: Array.from(invalidEntries),
+  };
 }
 
 export const payoutAuditLedger = new PayoutAuditLedger();

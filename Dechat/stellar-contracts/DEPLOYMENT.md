@@ -145,6 +145,79 @@ cargo install --locked stellar-cli --version 28.0.0
 stellar --version
 ```
 
+## Least-Privilege Runtime Permissions
+
+Application services that interact with the deployed contract must run with the
+minimum credentials and data-store privileges required for their job. This
+section is the canonical inventory; keep it in sync with
+`scripts/check_runtime_permissions.sh` and the service manifests under
+`deploy/permissions/`.
+
+### Credential Inventory
+
+| Service | Credential | Scope | Notes |
+|---------|------------|-------|-------|
+| `fiat-bridge-indexer` | `INDEXER_STELLAR_SECRET_KEY` | Read-only Horizon/RPC access | Must not be able to submit transactions |
+| `fiat-bridge-api` | `API_STELLAR_SECRET_KEY` | Submit `mint`/`burn`/`transfer` invocations only | No admin/upgrade authority |
+| `fiat-bridge-admin` | `FUTURENET_ADMIN_SECRET_KEY` | Contract admin functions | Break-glass only; never mounted in long-running services |
+| `fiat-bridge-migrator` | `MIGRATOR_STELLAR_SECRET_KEY` | Contract upgrade/initialize | One-shot job; revoked after migration |
+
+Rules:
+- Each service gets its **own** keypair. Shared keys across services are rejected.
+- Admin and migrator keys are never exposed to request-serving pods.
+- Keys are injected at runtime (GitHub Secrets / secret manager), never baked
+  into images or committed to the repository.
+
+### Data-Store Privilege Inventory
+
+| Role | Ledger read | Ledger write | Contract storage write | Admin entries |
+|------|-------------|--------------|------------------------|---------------|
+| `bridge_reader` | ✅ | ❌ | ❌ | ❌ |
+| `bridge_writer` | ✅ | ✅ (invoke only) | ✅ (contract-scoped) | ❌ |
+| `bridge_admin` | ✅ | ✅ | ✅ | ✅ |
+
+- `bridge_reader` backs the indexer and any read-only API surface.
+- `bridge_writer` backs the API's mutation paths and is scoped to the single
+  deployed contract ID — no wildcard contract or account grants.
+- `bridge_admin` is reserved for the admin/migrator jobs.
+
+### Read vs Mutation Role Split
+
+Where practical, deploy separate credentials for read and mutation paths:
+
+- **Read path** (`bridge_reader`): query contract state, stream events, serve
+  GET endpoints. Must fail closed if a write is attempted.
+- **Mutation path** (`bridge_writer`): submit state-changing invocations. Must
+  not be able to read admin-only entries or perform upgrades.
+
+If a service genuinely needs both, document the justification in its manifest
+and grant the narrowest combined role rather than a wildcard.
+
+### Deployment Permission Checks
+
+`scripts/check_runtime_permissions.sh` runs in CI (and can be run locally) to
+reject unsafe production permissions. It fails the deployment when it finds:
+
+- Wildcard grants (`*`, `**`, `all`, `any`) in any production role or policy.
+- Admin or migrator credentials referenced by a request-serving service.
+- A single keypair shared across more than one service.
+- Write privileges on resources outside the deployed contract ID.
+- Missing read/mutation role split for services that perform both.
+
+Run it before deploying:
+
+```bash
+# Validate the production permission manifests.
+bash scripts/check_runtime_permissions.sh --env production
+
+# Validate a specific service manifest.
+bash scripts/check_runtime_permissions.sh --env production --service fiat-bridge-api
+```
+
+A non-zero exit code means the deployment must be blocked until the offending
+grant is removed. Futurenet/dev manifests may use broader grants for testing,
+but production manifests must pass with zero findings.
+
 ## Security Considerations
 
 ⚠️ **Important:** Never commit secret keys to the repository.
@@ -153,6 +226,8 @@ stellar --version
 - Store local secret keys in secure, encrypted storage
 - Rotate keys periodically
 - Use different keys for different environments (Futurenet, Testnet, Public)
+- Follow the least-privilege inventory above; do not grant wildcard or
+  cross-service permissions in production
 
 ## Additional Resources
 
