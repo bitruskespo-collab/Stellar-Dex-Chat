@@ -1,3 +1,5 @@
+import { redact } from './redaction';
+
 function generateId(): string {
   return Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
 }
@@ -59,7 +61,9 @@ class TelemetryService {
     if (span) {
       span.endTime = Date.now();
       if (tags) {
-        span.tags = { ...span.tags, ...tags };
+        // Redact at the boundary so sensitive tag values never persist in the
+        // in-memory span that is later emitted.
+        span.tags = redact({ ...span.tags, ...tags });
       }
       this.logSpanCompletion(span);
       this.activeSpans.delete(spanId);
@@ -74,16 +78,19 @@ class TelemetryService {
   ): void {
     const span = this.activeSpans.get(spanId);
     if (span) {
+      // Redact fields before storing them on the span so the in-memory trace
+      // never retains sensitive values.
+      const safeFields = fields ? redact(fields) : fields;
       const logEntry = {
         timestamp: Date.now(),
         level,
         message,
-        fields,
+        fields: safeFields,
       };
       span.logs = span.logs || [];
       span.logs.push(logEntry);
 
-      this.logWithTrace(level, message, span.traceId, span.spanId, fields);
+      this.logWithTrace(level, message, span.traceId, span.spanId, safeFields);
     }
   }
 
@@ -118,7 +125,11 @@ class TelemetryService {
       ...fields,
     };
 
-    console.log(JSON.stringify(logData));
+    // Central redaction boundary: every emitted log payload passes through
+    // redact() so nested/encoded sensitive values (bank details, credentials,
+    // wallet/session tokens, prompt content, provider payloads) are scrubbed.
+    // Event shape is preserved; only sensitive values are replaced.
+    console.log(JSON.stringify(redact(logData)));
   }
 
   getTraceContext(traceId: string, spanId?: string): TraceContext {

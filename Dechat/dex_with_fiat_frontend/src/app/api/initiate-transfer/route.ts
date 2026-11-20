@@ -11,6 +11,7 @@ import {
 import { reconcileAmbiguousInitiation } from '@/lib/payout/reconciliation';
 import { telemetry } from '@/lib/telemetry';
 import { applyRateLimit, getClientIp } from '@/lib/rateLimit';
+import { enforcePayoutRouteSecurity } from '@/lib/payout/routeSecurity';
 import { setTransferStatus, getTransferStatus } from '@/lib/transferStore';
 import { initiateTransferSchema } from '@/lib/apiSchemas';
 import { payoutAuditLedger } from '@/lib/payout/auditLedger';
@@ -25,14 +26,18 @@ const idempotencyCache = new Map<
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 
 export async function OPTIONS(request: NextRequest) {
-  return (
-    enforcePayoutRouteSecurity(request) ||
-    new NextResponse(null, { status: 204 })
-  );
+  // Reject untrusted preflight requests before any expensive work
+  const securityBlocked = enforcePayoutRouteSecurity(request);
+  if (securityBlocked) return securityBlocked;
+
+  return new NextResponse(null, {
+    status: 204,
+    headers: buildCorsHeaders(request),
+  });
 }
 
 export async function POST(request: NextRequest) {
-  // Enforce payout API security
+  // Enforce payout API security (CORS origin + credentials) before any work
   const securityBlocked = enforcePayoutRouteSecurity(request);
   if (securityBlocked) return securityBlocked;
 
@@ -200,10 +205,13 @@ export async function POST(request: NextRequest) {
         timestamp: Date.now(),
       });
 
-      return NextResponse.json({
-        success: true,
-        data,
-      });
+      return NextResponse.json(
+        {
+          success: true,
+          data,
+        },
+        { headers: buildCorsHeaders(request) },
+      );
     } catch (providerError: unknown) {
       const errorMessage =
         providerError instanceof Error
@@ -253,7 +261,7 @@ export async function POST(request: NextRequest) {
           jobId: retryJob.id,
           message: 'Transfer queued for retry due to provider failure',
         },
-        { status: 202 },
+        { status: 202, headers: buildCorsHeaders(request) },
       );
     }
   } catch (error: unknown) {
@@ -299,7 +307,20 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(errorDetails.body, {
       status: errorDetails.status,
-      headers: errorDetails.headers,
+      headers: { ...errorDetails.headers, ...buildCorsHeaders(request) },
     });
   }
+}
+
+function buildCorsHeaders(request: NextRequest): Record<string, string> {
+  const origin = request.headers.get('origin');
+  if (!origin) return {};
+  return {
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Credentials': 'true',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers':
+      'Content-Type, X-Idempotency-Key, X-Client-Session-Id',
+    Vary: 'Origin',
+  };
 }

@@ -36,6 +36,19 @@ function parseTrustedProxyHops(): number {
   return Number.isSafeInteger(configured) && configured > 0 ? configured : 0;
 }
 
+/**
+ * Headers that may carry the client IP. Only headers listed here (comma
+ * separated, lower-cased) are consulted, and only when at least one trusted
+ * proxy hop is configured. Anything else is treated as attacker-controlled.
+ */
+function parseTrustedProxyHeaders(): string[] {
+  const configured = process.env.TRUSTED_PROXY_HEADERS ?? '';
+  return configured
+    .split(',')
+    .map((header) => header.trim().toLowerCase())
+    .filter((header) => header.length > 0);
+}
+
 function validAddress(raw: string | null | undefined): string | null {
   if (!raw) return null;
   const normalized = normalizeCandidateIp(raw);
@@ -46,22 +59,26 @@ export function getClientIp(request: RequestWithClientIp): string {
   const requestIp = validAddress(request.ip);
   if (requestIp) return requestIp;
 
-  for (const headerName of [
-    'cf-connecting-ip',
-    'x-vercel-forwarded-for',
-    'x-real-ip',
-  ]) {
+  const trustedHops = parseTrustedProxyHops();
+  if (trustedHops === 0) return 'unknown';
+
+  const trustedHeaders = parseTrustedProxyHeaders();
+  if (trustedHeaders.length === 0) return 'unknown';
+
+  for (const headerName of trustedHeaders) {
+    if (headerName === 'x-forwarded-for') continue;
     const address = validAddress(request.headers.get(headerName));
     if (address) return address;
   }
 
-  const trustedHops = parseTrustedProxyHops();
-  const forwardedFor = request.headers.get('x-forwarded-for');
-  if (trustedHops > 0 && forwardedFor) {
-    const chain = forwardedFor.split(',').map((hop) => validAddress(hop));
-    if (chain.every((hop): hop is string => hop !== null)) {
-      const clientIndex = chain.length - trustedHops - 1;
-      if (clientIndex >= 0) return chain[clientIndex];
+  if (trustedHeaders.includes('x-forwarded-for')) {
+    const forwardedFor = request.headers.get('x-forwarded-for');
+    if (forwardedFor) {
+      const chain = forwardedFor.split(',').map((hop) => validAddress(hop));
+      if (chain.every((hop): hop is string => hop !== null)) {
+        const clientIndex = chain.length - trustedHops - 1;
+        if (clientIndex >= 0) return chain[clientIndex];
+      }
     }
   }
 

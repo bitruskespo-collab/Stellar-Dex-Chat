@@ -156,6 +156,27 @@ export function setSharedRateLimitStore(store: RateLimitStore): void {
 }
 
 /**
+ * Normalizes a verified wallet/session identity into a stable, bounded key segment.
+ *
+ * Only values that originate from a verified session (never raw client headers) should
+ * be passed here. The value is trimmed, lowercased, and length-bounded so that spoofed
+ * or oversized identifiers cannot fragment or poison the rate-limit key space.
+ */
+export function normalizeVerifiedIdentity(
+  verifiedUserId: string | null | undefined,
+): string | null {
+  if (typeof verifiedUserId !== 'string') {
+    return null;
+  }
+  const trimmed = verifiedUserId.trim().toLowerCase();
+  if (!trimmed) {
+    return null;
+  }
+  // Bound the identity length to avoid unbounded key growth from hostile input.
+  return trimmed.slice(0, 128);
+}
+
+/**
  * Extracts a trusted identity for rate limiting.
  *
  * Prevents identity spoofing:
@@ -167,8 +188,9 @@ export function getTrustedIdentity(
   requestOrIp: RequestWithClientIp | string,
   options?: { verifiedUserId?: string },
 ): string {
-  if (options?.verifiedUserId && options.verifiedUserId.trim()) {
-    return `user:${options.verifiedUserId.trim()}`;
+  const verified = normalizeVerifiedIdentity(options?.verifiedUserId);
+  if (verified) {
+    return `user:${verified}`;
   }
 
   if (typeof requestOrIp === 'string') {
@@ -177,6 +199,31 @@ export function getTrustedIdentity(
 
   const ip = getClientIp(requestOrIp);
   return `ip:${ip}`;
+}
+
+/**
+ * Builds the composite rate-limit identities for a request.
+ *
+ * Both the trusted client IP and (when present) the verified session wallet identity
+ * are returned so callers can enforce limits on each dimension. This ensures that:
+ * - Rotating spoofed forwarding headers cannot bypass the IP-scoped limit.
+ * - Switching wallets cannot bypass the identity-scoped limit.
+ */
+export function getTrustedIdentities(
+  requestOrIp: RequestWithClientIp | string,
+  options?: { verifiedUserId?: string },
+): string[] {
+  const identities: string[] = [];
+  const verified = normalizeVerifiedIdentity(options?.verifiedUserId);
+  if (verified) {
+    identities.push(`user:${verified}`);
+  }
+
+  const ip =
+    typeof requestOrIp === 'string' ? requestOrIp : getClientIp(requestOrIp);
+  identities.push(`ip:${ip}`);
+
+  return identities;
 }
 
 /**
@@ -279,6 +326,44 @@ export function applyRateLimit(
       maxRequests: config.maxRequests,
       limitHeaders: headers,
     });
+  }
+
+  return null;
+}
+
+/**
+ * Applies rate limiting across every trusted identity dimension for a request.
+ *
+ * Enforces the limit on both the trusted client IP and (when present) the verified
+ * session wallet identity, so spoofed forwarding headers or wallet switching cannot
+ * bypass abuse controls. The first blocked dimension short-circuits with a 429.
+ *
+ * Callers should invoke this before any expensive work (DB writes, provider calls).
+ */
+export function applyRateLimitForRequest(
+  requestOrIp: RequestWithClientIp | string,
+  route: string,
+  config: RateLimitConfig,
+  options?: {
+    verifiedUserId?: string;
+    cost?: number;
+    correlationId?: string;
+    now?: number;
+  },
+): NextResponse | null {
+  const identities = getTrustedIdentities(requestOrIp, {
+    verifiedUserId: options?.verifiedUserId,
+  });
+
+  for (const identity of identities) {
+    const blocked = applyRateLimit(identity, route, config, {
+      cost: options?.cost,
+      correlationId: options?.correlationId,
+      now: options?.now,
+    });
+    if (blocked) {
+      return blocked;
+    }
   }
 
   return null;

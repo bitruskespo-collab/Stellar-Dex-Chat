@@ -46,4 +46,33 @@ export const PAYOUT_MIGRATIONS: MigrationStep[] = [
       DROP TABLE IF EXISTS payout_intents;
     `,
   },
+  {
+    version: 2,
+    name: 'add_payout_key_rotation_metadata',
+    upSql: `
+      -- Key identifiers only: never store key material in the database.
+      ALTER TABLE payout_intents
+        ADD COLUMN IF NOT EXISTS data_key_id VARCHAR(64),
+        ADD COLUMN IF NOT EXISTS previous_data_key_id VARCHAR(64),
+        ADD COLUMN IF NOT EXISTS reencryption_state VARCHAR(32) NOT NULL DEFAULT 'active',
+        ADD COLUMN IF NOT EXISTS reencryption_started_at TIMESTAMP WITH TIME ZONE,
+        ADD COLUMN IF NOT EXISTS reencryption_completed_at TIMESTAMP WITH TIME ZONE,
+        ADD COLUMN IF NOT EXISTS reencryption_rollback_at TIMESTAMP WITH TIME ZONE;
+
+      CREATE INDEX IF NOT EXISTS idx_payout_intents_data_key_id ON payout_intents(data_key_id);
+      CREATE INDEX IF NOT EXISTS idx_payout_intents_reencryption_state ON payout_intents(reencryption_state);
+    `,
+    downSql: `
+      DROP INDEX IF EXISTS idx_payout_intents_reencryption_state;
+      DROP INDEX IF EXISTS idx_payout_intents_data_key_id;
+
+      ALTER TABLE payout_intents
+        DROP COLUMN IF EXISTS reencryption_rollback_at,
+        DROP COLUMN IF EXISTS reencryption_completed_at,
+        DROP COLUMN IF EXISTS reencryption_started_at,
+        DROP COLUMN IF EXISTS reencryption_state,
+        DROP COLUMN IF EXISTS previous_data_key_id,
+        DROP COLUMN IF EXISTS data_key_id;
+    `,
+  },
 ];

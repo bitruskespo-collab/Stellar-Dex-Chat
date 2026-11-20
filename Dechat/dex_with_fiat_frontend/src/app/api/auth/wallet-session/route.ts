@@ -1,10 +1,28 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { verifySignature } from '@/lib/stellarSignature';
 import { createWalletSessionToken } from '@/lib/payout/auth';
+import {
+  applyCorsHeaders,
+  isOriginAllowed,
+  rejectDisallowedOrigin,
+} from '@/lib/security/cors';
 
 const TIMESTAMP_TOLERANCE_MS = 5 * 60 * 1000; // 5 minutes
 
+export async function OPTIONS(request: NextRequest) {
+  if (!isOriginAllowed(request, 'wallet-session')) {
+    return rejectDisallowedOrigin();
+  }
+
+  const response = new NextResponse(null, { status: 204 });
+  return applyCorsHeaders(request, response, 'wallet-session');
+}
+
 export async function POST(request: NextRequest) {
+  if (!isOriginAllowed(request, 'wallet-session')) {
+    return rejectDisallowedOrigin();
+  }
+
   try {
     const body = await request.json().catch(() => ({}));
     const { address, signature, timestamp, message } = body;
@@ -47,6 +65,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Bind the session to the verified address only; never echo client input.
     const session = createWalletSessionToken(address);
 
     const response = NextResponse.json({
@@ -61,17 +80,21 @@ export async function POST(request: NextRequest) {
     response.cookies.set('wallet_session', session.sessionToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
+      sameSite: 'strict',
       maxAge: Math.floor((session.expiresAt - Date.now()) / 1000),
       path: '/',
     });
 
-    return response;
+    return applyCorsHeaders(request, response, 'wallet-session');
   } catch (error) {
     console.error('Wallet session authentication error:', error);
-    return NextResponse.json(
-      { success: false, message: 'Authentication failed' },
-      { status: 500 },
+    return applyCorsHeaders(
+      request,
+      NextResponse.json(
+        { success: false, message: 'Authentication failed' },
+        { status: 500 },
+      ),
+      'wallet-session',
     );
   }
 }

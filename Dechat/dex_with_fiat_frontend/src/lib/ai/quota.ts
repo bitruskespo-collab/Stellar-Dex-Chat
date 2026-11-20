@@ -102,6 +102,14 @@ export function resolveQuotaIdentity(input: {
   userId?: string | null;
   /** Server-issued anonymous session id (opaque, not client-chosen). */
   anonymousSessionId?: string | null;
+  /**
+   * Client-supplied identity hints (e.g. wallet address, forwarded IP).
+   * Accepted only for typing compatibility and always ignored: quota
+   * identity must never be derived from values a caller can choose.
+   */
+  clientSuppliedUserId?: string | null;
+  clientSuppliedWallet?: string | null;
+  clientSuppliedIp?: string | null;
 }): QuotaIdentity {
   const userId = input.userId?.trim();
   if (userId) {
@@ -113,6 +121,61 @@ export function resolveQuotaIdentity(input: {
   }
   // Fail closed: unknown callers share the strictest anonymous bucket.
   return { key: "anon:unidentified", kind: "anonymous" };
+}
+
+/**
+ * Resolve the client IP from trusted proxy headers only.
+ *
+ * Only the left-most hop of `x-forwarded-for` is considered, and only when
+ * the request is known to have arrived through a trusted proxy. Untrusted
+ * requests fall back to the socket address. Returns `null` when no trusted
+ * source is available so callers can fail closed.
+ */
+export function resolveTrustedClientIp(input: {
+  /** Whether the request arrived via a trusted proxy. */
+  trustedProxy: boolean;
+  /** Raw `x-forwarded-for` header value, if present. */
+  forwardedFor?: string | null;
+  /** Raw `x-real-ip` header value, if present. */
+  realIp?: string | null;
+  /** Socket-level remote address from the server runtime. */
+  socketAddress?: string | null;
+}): string | null {
+  if (input.trustedProxy) {
+    const forwarded = input.forwardedFor?.split(",")[0]?.trim();
+    if (forwarded) return forwarded;
+    const realIp = input.realIp?.trim();
+    if (realIp) return realIp;
+  }
+  const socket = input.socketAddress?.trim();
+  return socket || null;
+}
+
+/**
+ * Result of a pre-flight quota gate. `allowed: false` carries the typed
+ * limit response so callers can short-circuit before expensive work.
+ */
+export type QuotaGateResult =
+  | { allowed: true; decision: QuotaAllowedResponse }
+  | { allowed: false; decision: QuotaLimitResponse };
+
+/**
+ * Apply the bounded quota check before any expensive model work.
+ *
+ * Call this at the very start of a request handler, before prompt assembly,
+ * retrieval, or model invocation. It never consumes budget; pair it with
+ * `QuotaStore.record` after the model responds.
+ */
+export function enforceQuotaBeforeWork(
+  store: QuotaStore,
+  identity: QuotaIdentity,
+  now: number = Date.now(),
+): QuotaGateResult {
+  const decision = store.check(identity, now);
+  if (decision.limited) {
+    return { allowed: false, decision };
+  }
+  return { allowed: true, decision };
 }
 
 function emptyUsage(now: number): QuotaUsage {

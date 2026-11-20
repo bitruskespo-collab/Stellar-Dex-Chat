@@ -24,6 +24,78 @@ const isDev = process.env.NODE_ENV !== 'production';
 const reportOnly = process.env.CSP_REPORT_ONLY === 'true';
 const reportUri = process.env.CSP_REPORT_URI ?? '/api/csp-report';
 
+// ---------------------------------------------------------------------------
+// Cross-Origin Resource Sharing (#259)
+//
+// Financial routes (deposits, withdrawals, orders, balances, transfers) are
+// browser-facing and must only be reachable from explicitly trusted origins.
+// The allow-list is derived from server-side env so production and local
+// development can be configured independently:
+//
+//   FINANCIAL_ALLOWED_ORIGINS  comma-separated list of trusted origins
+//                              (e.g. "https://app.example.com,https://admin.example.com")
+//   NEXT_PUBLIC_APP_URL        the canonical app origin, always trusted
+//
+// In development, localhost origins are trusted by default. In production
+// they are never trusted unless explicitly listed. Credentials are only
+// allowed for explicitly listed origins; wildcard origins are rejected.
+// ---------------------------------------------------------------------------
+
+const FINANCIAL_ROUTE_PREFIXES = [
+  '/api/financial',
+  '/api/deposits',
+  '/api/withdrawals',
+  '/api/orders',
+  '/api/balances',
+  '/api/transfers',
+];
+
+const DEV_DEFAULT_ORIGINS = [
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+];
+
+function parseOrigins(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter((origin) => origin.length > 0 && origin !== '*');
+}
+
+function buildFinancialAllowedOrigins(): string[] {
+  const configured = [
+    ...parseOrigins(process.env.FINANCIAL_ALLOWED_ORIGINS),
+    ...parseOrigins(process.env.NEXT_PUBLIC_APP_URL),
+  ];
+  const defaults = isDev ? DEV_DEFAULT_ORIGINS : [];
+  return Array.from(new Set([...configured, ...defaults]));
+}
+
+const financialAllowedOrigins = buildFinancialAllowedOrigins();
+
+function isFinancialRoute(pathname: string): boolean {
+  return FINANCIAL_ROUTE_PREFIXES.some(
+    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
+  );
+}
+
+function financialCorsHeaders(origin: string | null): Record<string, string> {
+  const headers: Record<string, string> = {
+    Vary: 'Origin',
+  };
+  if (origin && financialAllowedOrigins.includes(origin)) {
+    headers['Access-Control-Allow-Origin'] = origin;
+    headers['Access-Control-Allow-Credentials'] = 'true';
+    headers['Access-Control-Allow-Methods'] =
+      'GET, POST, PUT, PATCH, DELETE, OPTIONS';
+    headers['Access-Control-Allow-Headers'] =
+      'Content-Type, Authorization, X-Requested-With';
+    headers['Access-Control-Max-Age'] = '600';
+  }
+  return headers;
+}
+
 const scriptSrc = [
   "'self'",
   "'unsafe-inline'",
@@ -65,6 +137,14 @@ const nextConfig: NextConfig = {
   async headers() {
     return [
       {
+        // Financial routes: restrictive CORS. Untrusted origins receive no
+        // Access-Control-Allow-* headers, so browsers block the response.
+        source: '/api/:path*',
+        headers: Object.entries(
+          financialCorsHeaders(null),
+        ).map(([key, value]) => ({ key, value })),
+      },
+      {
         source: '/:path*',
         headers: [
           {
@@ -103,6 +183,8 @@ const nextConfig: NextConfig = {
     ];
   },
 };
+
+export { financialAllowedOrigins, isFinancialRoute, financialCorsHeaders };
 
 export default withSentryConfig(nextConfig, {
   org: process.env.SENTRY_ORG,

@@ -2,7 +2,14 @@
  * Redacted Payout Evidence Bundle Exporter
  * Addresses Issue #96: Provide consistent evidence linking on-chain and provider records
  * without exposing sensitive bank credentials.
+ *
+ * Issue #257: Sensitive fields (bank details, credentials, wallet/session tokens,
+ * prompt content, provider payloads) are redacted at the structured logging/trace
+ * boundary via the shared redaction module. Evidence integrity fields (txHash,
+ * receiptReference, providerReference, timestamps, integrityChecksum) remain intact.
  */
+
+import { redactSensitiveFields } from '../logging/redaction';
 
 export interface PayoutEvidenceBundle {
   bundleVersion: number;
@@ -69,4 +76,52 @@ export function createRedactedEvidenceBundle(params: {
     },
     integrityChecksum,
   };
+}
+
+/**
+ * Fields within an evidence bundle that must never be emitted to logs or traces
+ * in raw form. These are scrubbed by the shared redaction module while the
+ * evidence integrity fields are preserved verbatim.
+ */
+const EVIDENCE_BUNDLE_SENSITIVE_KEYS = [
+  'rawBankAccount',
+  'bankAccount',
+  'accountNumber',
+  'iban',
+  'routingNumber',
+  'sortCode',
+  'swift',
+  'bic',
+  'bankName',
+  'recipientName',
+  'providerPayload',
+  'providerResponse',
+  'rawProviderPayload',
+  'credentials',
+  'apiKey',
+  'secret',
+  'token',
+  'sessionToken',
+  'walletToken',
+  'prompt',
+  'promptContent',
+];
+
+/**
+ * Produces a log/trace-safe representation of a payout evidence bundle.
+ *
+ * The bundle's integrity fields (txHash, receiptReference, providerReference,
+ * timestamps, integrityChecksum, statusSource, network, contractId) are kept
+ * intact so evidence remains verifiable, while any sensitive fields — bank
+ * details, credentials, wallet/session tokens, prompt content, and provider
+ * payloads — are scrubbed via the shared redaction module. This handles nested
+ * objects and encoded values (e.g. base64/JSON-encoded payloads) consistently
+ * with the rest of the logging boundary.
+ */
+export function toRedactedEvidenceLogPayload(
+  bundle: PayoutEvidenceBundle & Record<string, unknown>,
+): Record<string, unknown> {
+  return redactSensitiveFields(bundle, {
+    sensitiveKeys: EVIDENCE_BUNDLE_SENSITIVE_KEYS,
+  }) as Record<string, unknown>;
 }

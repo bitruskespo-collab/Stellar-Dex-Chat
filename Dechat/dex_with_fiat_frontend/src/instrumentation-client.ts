@@ -1,4 +1,5 @@
 import * as Sentry from '@sentry/nextjs';
+import { redactSensitiveData } from './lib/redaction';
 
 const REPLAY_SESSION_SAMPLE_RATE = 0.1;
 const REPLAY_OPTIONS = {
@@ -19,7 +20,7 @@ async function loadReplayIntegration() {
     const { replayIntegration } = await import('@sentry/replay');
     Sentry.addIntegration(replayIntegration(REPLAY_OPTIONS));
   } catch (error) {
-    console.warn('Failed to lazy-load Sentry Replay integration:', error);
+    console.warn('Failed to lazy-load Sentry Replay integration:', redactSensitiveData(error));
   }
 }
 
@@ -33,10 +34,13 @@ Sentry.init({
   beforeSend(event, hint) {
     if (event.exception) {
       const error = hint.originalException;
-      console.error('Sentry capturing error:', error);
+      console.error('Sentry capturing error:', redactSensitiveData(error));
       void loadReplayIntegration();
     }
-    return event;
+    return redactSensitiveData(event);
+  },
+  beforeBreadcrumb(breadcrumb) {
+    return redactSensitiveData(breadcrumb);
   },
   environment: process.env.NODE_ENV || 'development',
 });

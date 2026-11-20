@@ -93,22 +93,40 @@ interface WindowState {
   spendCents: number;
 }
 
+/** Maximum accepted length for a trusted identity value. */
+const MAX_IDENTITY_LENGTH = 256;
+
+/**
+ * Normalize a trusted identity value. Returns `null` for empty, non-string, or
+ * oversized values so callers fail closed instead of keying on junk input.
+ */
+function normalizeTrustedId(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > MAX_IDENTITY_LENGTH) return null;
+  return trimmed;
+}
+
 /**
  * Resolve the quota identity from a trusted server-side context.
  *
  * SECURITY: client-supplied ids are deliberately ignored. Only a verified
  * authenticated user id, or a server-issued anonymous session id, is accepted.
  * This prevents a client from spoofing an identity to obtain a higher quota.
+ *
+ * Note: forwarding headers (X-Forwarded-For, X-Real-IP) and any client-provided
+ * wallet/user id must be resolved by the caller from a trusted proxy/session
+ * source before being passed here; this function never reads request headers.
  */
 export function resolveQuotaIdentity(ctx: {
   authenticatedUserId?: string | null;
   anonymousSessionId?: string | null;
 }): QuotaIdentity {
-  const userId = ctx.authenticatedUserId?.trim();
+  const userId = normalizeTrustedId(ctx.authenticatedUserId);
   if (userId) {
     return { kind: "user", userId };
   }
-  const sessionId = ctx.anonymousSessionId?.trim();
+  const sessionId = normalizeTrustedId(ctx.anonymousSessionId);
   if (sessionId) {
     return { kind: "anonymous", sessionId };
   }

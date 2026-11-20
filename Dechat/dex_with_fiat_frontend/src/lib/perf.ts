@@ -1,7 +1,14 @@
 /**
  * Performance tracking utility for measuring latency of UI renders,
  * AI responses, and Stellar transaction flows.
+ *
+ * All telemetry payloads (metadata attached to metrics, console output, and
+ * generated reports) are routed through the shared redaction module so that
+ * sensitive fields (bank details, credentials, wallet/session tokens, prompt
+ * content, provider payloads) are scrubbed before emission.
  */
+
+import { redact } from './redaction';
 
 export interface PerfMetric {
   name: string;
@@ -29,12 +36,19 @@ class PerformanceTracker {
     }
 
     const endTime = performance.now();
+    // Scrub sensitive fields at the logging boundary before the metric is
+    // stored or emitted anywhere.
+    const safeMetadata =
+      metadata !== undefined
+        ? (redact(metadata) as Record<string, unknown>)
+        : undefined;
+
     const metric: PerfMetric = {
       name,
       duration: endTime - startTime,
       startTime,
       endTime,
-      metadata,
+      metadata: safeMetadata,
     };
 
     this.metrics.push(metric);
@@ -43,7 +57,7 @@ class PerformanceTracker {
     // Also log to console for immediate visibility during dev/benchmarking
     console.log(
       `[PERF] ${name}: ${metric.duration.toFixed(2)}ms`,
-      metadata || '',
+      safeMetadata || '',
     );
 
     return metric;
@@ -67,7 +81,9 @@ class PerformanceTracker {
     report += '| :--- | :--- | :--- |\n';
 
     this.metrics.forEach((m) => {
-      const notes = m.metadata ? JSON.stringify(m.metadata) : '-';
+      const notes = m.metadata
+        ? JSON.stringify(redact(m.metadata))
+        : '-';
       report += `| ${m.name} | ${m.duration.toFixed(2)} | ${notes} |\n`;
     });
 

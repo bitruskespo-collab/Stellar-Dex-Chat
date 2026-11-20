@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { telemetry } from '@/lib/telemetry';
+import { redactForLog } from '@/lib/logging/redaction';
 import {
   isReplayEvent,
   getTransferStatus,
@@ -124,9 +125,12 @@ export async function POST(request: NextRequest) {
     }
 
     if (!matchedVersion) {
-      telemetry.addLog(span.spanId, 'error', 'Invalid webhook signature', {
-        receivedSignature: signature,
-      });
+      telemetry.addLog(
+        span.spanId,
+        'error',
+        'Invalid webhook signature',
+        redactForLog({ receivedSignature: signature }) as Record<string, unknown>,
+      );
       telemetry.finishSpan(span.spanId, {
         success: false,
         error: verification.message ?? 'Invalid signature',
@@ -202,12 +206,17 @@ export async function POST(request: NextRequest) {
     const replayKey = `${event.event}:${dataId ?? dataRef}`;
     const dedupeEventId = String(dataId ?? dataRef);
 
-    telemetry.addLog(span.spanId, 'info', 'Webhook signature verified', {
-      eventType: event.event,
-      reference: event.data?.reference,
-      replayKey,
-      dedupeEventId,
-    });
+    telemetry.addLog(
+      span.spanId,
+      'info',
+      'Webhook signature verified',
+      redactForLog({
+        eventType: event.event,
+        reference: event.data?.reference,
+        replayKey,
+        dedupeEventId,
+      }) as Record<string, unknown>,
+    );
 
     console.log('Received Paystack webhook:', event.event);
 
@@ -301,18 +310,26 @@ export async function POST(request: NextRequest) {
 
       switch (event.event) {
         case 'transfer.success': {
-          telemetry.addLog(span.spanId, 'info', 'Processing transfer success', {
-            reference: data.reference,
-            amount: data.amount,
-            recipient: data.recipient,
-            status: data.status,
-          });
-          console.log('Transfer successful:', {
-            reference: data.reference,
-            amount: data.amount,
-            recipient: data.recipient,
-            status: data.status,
-          });
+          telemetry.addLog(
+            span.spanId,
+            'info',
+            'Processing transfer success',
+            redactForLog({
+              reference: data.reference,
+              amount: data.amount,
+              recipient: data.recipient,
+              status: data.status,
+            }) as Record<string, unknown>,
+          );
+          console.log(
+            'Transfer successful:',
+            redactForLog({
+              reference: data.reference,
+              amount: data.amount,
+              recipient: data.recipient,
+              status: data.status,
+            }),
+          );
           const nextRecord = setTransferStatus({
             reference: data.reference ?? '',
             status: 'success',
@@ -330,20 +347,28 @@ export async function POST(request: NextRequest) {
         }
 
         case 'transfer.failed': {
-          telemetry.addLog(span.spanId, 'warn', 'Processing transfer failure', {
-            reference: data.reference,
-            amount: data.amount,
-            recipient: data.recipient,
-            status: data.status,
-            failureReason: data.failure_reason,
-          });
-          console.log('Transfer failed:', {
-            reference: data.reference,
-            amount: data.amount,
-            recipient: data.recipient,
-            status: data.status,
-            failure_reason: data.failure_reason,
-          });
+          telemetry.addLog(
+            span.spanId,
+            'warn',
+            'Processing transfer failure',
+            redactForLog({
+              reference: data.reference,
+              amount: data.amount,
+              recipient: data.recipient,
+              status: data.status,
+              failureReason: data.failure_reason,
+            }) as Record<string, unknown>,
+          );
+          console.log(
+            'Transfer failed:',
+            redactForLog({
+              reference: data.reference,
+              amount: data.amount,
+              recipient: data.recipient,
+              status: data.status,
+              failure_reason: data.failure_reason,
+            }),
+          );
           const nextRecord = setTransferStatus({
             reference: data.reference ?? '',
             status: 'failed',
@@ -367,19 +392,22 @@ export async function POST(request: NextRequest) {
             span.spanId,
             'info',
             'Processing transfer reversal',
-            {
+            redactForLog({
               reference: data.reference,
               amount: data.amount,
               recipient: data.recipient,
               status: data.status,
-            },
+            }) as Record<string, unknown>,
           );
-          console.log('Transfer reversed:', {
-            reference: data.reference,
-            amount: data.amount,
-            recipient: data.recipient,
-            status: data.status,
-          });
+          console.log(
+            'Transfer reversed:',
+            redactForLog({
+              reference: data.reference,
+              amount: data.amount,
+              recipient: data.recipient,
+              status: data.status,
+            }),
+          );
           const nextRecord = setTransferStatus({
             reference: data.reference ?? '',
             status: 'reversed',
@@ -420,9 +448,14 @@ export async function POST(request: NextRequest) {
       throw processError;
     }
   } catch (error) {
-    telemetry.addLog(span.spanId, 'error', 'Webhook processing error', {
-      error: error instanceof Error ? error.message : 'Unknown error',
-    });
+    telemetry.addLog(
+      span.spanId,
+      'error',
+      'Webhook processing error',
+      redactForLog({
+        error: error instanceof Error ? error.message : 'Unknown error',
+      }) as Record<string, unknown>,
+    );
     telemetry.finishSpan(span.spanId, {
       success: false,
       error: 'Webhook processing failed',

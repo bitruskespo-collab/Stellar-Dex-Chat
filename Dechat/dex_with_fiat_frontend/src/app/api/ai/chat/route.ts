@@ -3,6 +3,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import { serverEnv as env } from '@/lib/serverEnv';
 import { parseMessage, mergeParserWithAI } from '@/lib/messageParser';
 import { findFAQMatch } from '@/lib/faq';
+import { redactForLogging } from '@/lib/logRedaction';
 import {
   AIAnalysisResult,
   GuardrailCategory,
@@ -288,7 +289,11 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(aiResult);
   } catch (error) {
-    console.error('AI chat route error:', error);
+    // Scrub provider payloads, prompt content, and tokens before emission.
+    console.error(
+      'AI chat route error:',
+      redactForLogging(error, { context: 'ai.chat.route' }),
+    );
     return NextResponse.json(
       {
         intent: 'unknown',

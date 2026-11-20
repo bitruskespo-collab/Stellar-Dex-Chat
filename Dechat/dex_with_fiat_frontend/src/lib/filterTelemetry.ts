@@ -17,6 +17,7 @@
  */
 
 import { TELEMETRY_SCHEMA_VERSION, getTelemetryConsent, ChatEvent } from './chatTelemetry';
+import { redactTelemetryPayload } from './redactTelemetry';
 
 /**
  * Names of the filter events dispatched on the `chat:telemetry` channel.
@@ -85,10 +86,15 @@ export interface FilterShortcutPayload {
  *    `requestAnimationFrame`, keeping listener work off the click handler's
  *    critical path (mirrors the same fix in `chatTelemetry`'s emitter).
  *
+ * Payloads are passed through {@link redactTelemetryPayload} before they are
+ * placed in the envelope, so bank details, credentials, wallet/session tokens,
+ * prompt content, and provider payloads are scrubbed at this logging boundary
+ * even if a caller accidentally forwards them.
+ *
  * @typeParam P - Shape of the event-specific payload.
  * @param name - Which filter event to emit.
- * @param payload - Event-specific data; widened to `Record<string, unknown>`
- *   inside the envelope.
+ * @param payload - Event-specific data; redacted and then widened to
+ *   `Record<string, unknown>` inside the envelope.
  * @returns Nothing. Emission is fire-and-forget and completes asynchronously on
  *   the next animation frame, so a caller cannot observe whether any listener
  *   ran.
@@ -112,7 +118,7 @@ function emit<P extends object>(
       name: name as unknown as ChatEvent['name'],
       version: TELEMETRY_SCHEMA_VERSION,
       timestamp: Date.now(),
-      payload: payload as Record<string, unknown>,
+      payload: redactTelemetryPayload(payload) as Record<string, unknown>,
     };
 
     if (typeof window !== 'undefined') {

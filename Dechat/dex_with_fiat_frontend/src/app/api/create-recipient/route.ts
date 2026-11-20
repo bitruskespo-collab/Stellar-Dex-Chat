@@ -3,7 +3,10 @@ import { getPayoutProvider } from '@/lib/payout/providers/registry';
 import { telemetry } from '@/lib/telemetry';
 import { applyRateLimit, getClientIp } from '@/lib/rateLimit';
 import { createRecipientSchema } from '@/lib/apiSchemas';
-import { enforcePayoutRouteSecurity } from '@/lib/payout/security';
+import {
+  enforcePayoutRouteSecurity,
+  getPayoutCorsHeaders,
+} from '@/lib/payout/security';
 import {
   getProviderCircuitBreaker,
   handlePayoutApiError,
@@ -13,10 +16,14 @@ import { getOrCreateBeneficiary } from '@/lib/payout/beneficiaryStore';
 const RATE_LIMIT = { maxRequests: 5, windowMs: 60_000 };
 
 export async function OPTIONS(request: NextRequest) {
-  return (
-    enforcePayoutRouteSecurity(request) ||
-    new NextResponse(null, { status: 204 })
-  );
+  // Reject untrusted preflight requests before any expensive work.
+  const securityBlocked = enforcePayoutRouteSecurity(request);
+  if (securityBlocked) return securityBlocked;
+
+  return new NextResponse(null, {
+    status: 204,
+    headers: getPayoutCorsHeaders(request),
+  });
 }
 
 export async function POST(request: NextRequest) {
@@ -132,6 +139,12 @@ export async function POST(request: NextRequest) {
         recovered: beneficiaryResult.recovered,
       },
     });
+
+    for (const [header, value] of Object.entries(
+      getPayoutCorsHeaders(request),
+    )) {
+      apiResponse.headers.set(header, value);
+    }
 
     telemetry.setTraceHeaders(apiResponse.headers, traceContext);
     return apiResponse;

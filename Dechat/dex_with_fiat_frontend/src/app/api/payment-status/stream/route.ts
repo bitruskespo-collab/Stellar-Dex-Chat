@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { subscribeToPaymentStatus } from '@/lib/paymentStatusEvents';
 import { applyRateLimit, getClientIp } from '@/lib/rateLimit';
 import { paymentStatusStreamQuerySchema } from '@/lib/apiSchemas';
+import { enforceCorsPolicy } from '@/lib/corsPolicy';
 
 export const dynamic = 'force-dynamic';
 
@@ -12,6 +13,12 @@ export const dynamic = 'force-dynamic';
 const RATE_LIMIT = { maxRequests: 60, windowMs: 60_000 };
 
 export async function GET(request: NextRequest) {
+  // Payment status is financial data: only same-origin (or explicitly
+  // allowlisted) browser contexts may open the stream, and no preflight is
+  // ever permitted on this route.
+  const corsRejection = enforceCorsPolicy(request, '/api/payment-status/stream');
+  if (corsRejection) return corsRejection;
+
   const ip = getClientIp(request);
   const limited = applyRateLimit(ip, '/api/payment-status/stream', RATE_LIMIT);
   if (limited) return limited;

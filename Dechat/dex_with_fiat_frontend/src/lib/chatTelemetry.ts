@@ -1,5 +1,6 @@
 'use client';
 import type { Variants } from 'framer-motion';
+import { redactTelemetryPayload } from './telemetryRedaction';
 
 // ── Schema ────────────────────────────────────────────────────────────────
 
@@ -420,11 +421,16 @@ function emit<P extends object>(
         ? payload
         : withAccessibleAvatarContrast(payload);
 
+    // #257: Redact sensitive fields (bank details, credentials, wallet/session
+    // tokens, prompt content, provider payloads) at the structured logging
+    // boundary before the event leaves this module.
+    const redactedPayload = redactTelemetryPayload(normalizedPayload);
+
     const event: ChatEvent = {
       name,
       version: TELEMETRY_SCHEMA_VERSION,
       timestamp: Date.now(),
-      payload: normalizedPayload as Record<string, unknown>,
+      payload: redactedPayload as Record<string, unknown>,
     };
 
     // Fix rendering overflow: defer event dispatch to prevent blocking renders.

@@ -1,8 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAdminAuth } from '../_utils/requireAdminAuth';
+import { enforceRouteCors } from '@/lib/security/routeCors';
 import { payoutRetryQueue } from '@/lib/payout/retryQueue';
 
 export async function GET(request: NextRequest) {
+  const corsError = enforceRouteCors(request, 'admin/payout-retry');
+  if (corsError) {
+    return corsError;
+  }
+
   const authError = requireAdminAuth(request);
   if (authError) {
     return authError;
@@ -39,6 +45,11 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const corsError = enforceRouteCors(request, 'admin/payout-retry');
+  if (corsError) {
+    return corsError;
+  }
+
   const authError = requireAdminAuth(request);
   if (authError) {
     return authError;

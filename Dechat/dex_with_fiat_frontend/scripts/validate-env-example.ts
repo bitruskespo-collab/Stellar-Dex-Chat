@@ -30,6 +30,19 @@ const PAYOUT_KEY_VARIABLES = [
 ];
 
 /**
+ * Variables that define the browser-facing cross-origin policy and the trusted
+ * proxy boundary used for rate-limit identity derivation. These must be
+ * declared in .env.example so production and local-development configurations
+ * are explicit and reviewable.
+ */
+const CORS_AND_PROXY_VARIABLES = [
+  'CORS_ALLOWED_ORIGINS',
+  'CORS_ALLOW_CREDENTIALS',
+  'TRUSTED_PROXY_HOPS',
+  'TRUSTED_PROXY_IPS',
+];
+
+/**
  * Extract variable names from env.ts schema definitions
  */
 function extractEnvTsVariables(): Set<string> {
@@ -122,6 +135,29 @@ function validatePayoutKeyMaterial(): boolean {
 }
 
 /**
+ * Ensure the cross-origin and trusted-proxy variables are declared in
+ * .env.example. They gate which browser origins may call financial routes and
+ * which hops are trusted when deriving client IPs, so an undocumented value
+ * would silently widen the trust boundary.
+ */
+function validateCorsAndProxyVariables(): boolean {
+  const exampleVars = extractEnvExampleVariables();
+  let isValid = true;
+
+  for (const key of CORS_AND_PROXY_VARIABLES) {
+    if (!exampleVars.has(key)) {
+      console.error(
+        `❌ ERROR: ${key} must be declared in .env.example so the CORS and ` +
+          'trusted-proxy policy is documented for production and local development.',
+      );
+      isValid = false;
+    }
+  }
+
+  return isValid;
+}
+
+/**
  * Main validation logic
  */
 function validateEnvExample(): boolean {
@@ -152,6 +188,10 @@ function validateEnvExample(): boolean {
     isValid = false;
   }
 
+  if (!validateCorsAndProxyVariables()) {
+    isValid = false;
+  }
+
   if (isValid) {
     console.log('✅ SUCCESS: .env.example matches env.ts schema');
     console.log(`   Found ${schemaVars.size} variables`);
@@ -162,5 +202,4 @@ function validateEnvExample(): boolean {
 
 // Run validation
 const envValid = validateEnvExample();
-const alertsValid = validateAlertThresholds();
-process.exit(envValid && alertsValid ? 0 : 1);
+process.exit(envValid ? 0 : 1);

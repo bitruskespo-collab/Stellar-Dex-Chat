@@ -2,7 +2,13 @@
  * Audit Log Module
  * Provides append-only logging for admin actions with transaction metadata
  * Stores entries in localStorage for persistence across sessions
+ *
+ * All entries are routed through the shared redaction module before being
+ * persisted or emitted, so bank details, credentials, wallet/session tokens,
+ * prompt content, and provider payloads never reach storage or logs.
  */
+
+import { redactSensitiveData } from './redaction';
 
 export interface AuditEntry {
   id: string;
@@ -75,10 +81,29 @@ export async function retryWithBackoff<T>(
   throw lastError;
 }
 
+/**
+ * Redact sensitive values from an arbitrary audit payload.
+ * Delegates to the shared redaction module so the boundary logic stays
+ * centralized. Falls back to a conservative string scrub if the shared
+ * module is unavailable for any reason.
+ */
+function redactAuditValue<T>(value: T): T {
+  try {
+    return redactSensitiveData(value) as T;
+  } catch {
+    if (typeof value === 'string') {
+      return '[REDACTED]' as unknown as T;
+    }
+    return value;
+  }
+}
+
 class AuditLogService {
   /**
    * Record an admin action in the append-only log
-   * Entries are immutable once written
+   * Entries are immutable once written.
+   * Sensitive fields in metadata and the description are redacted before
+   * the entry is persisted.
    */
   static recordAction(
     adminAddress: string,
@@ -93,9 +118,9 @@ class AuditLogService {
       timestamp: new Date(),
       adminAddress,
       actionType,
-      actionDescription,
+      actionDescription: redactAuditValue(actionDescription),
       txHash,
-      metadata,
+      metadata: redactAuditValue(metadata),
       status,
     };
 
@@ -177,9 +202,15 @@ class AuditLogService {
 
   /**
    * Export audit log as JSON (for compliance/backup)
+   * Entries are already redacted at write time; re-redact defensively in case
+   * legacy entries predate the redaction boundary.
    */
   static exportLog(): string {
-    const entries = this.getAllEntries();
+    const entries = this.getAllEntries().map((entry) => ({
+      ...entry,
+      actionDescription: redactAuditValue(entry.actionDescription),
+      metadata: redactAuditValue(entry.metadata),
+    }));
     return JSON.stringify(entries, null, 2);
   }
 
@@ -211,7 +242,9 @@ class AuditLogService {
     entries.push(entry);
     retryWithBackoff(
       async () => {
-        window.localStorage.setItem(AUDIT_LOG_STORAGE_KEY, JSON.stringify(entries));
+        // Redact at the persistence boundary as a final safety net.
+        const serialized = JSON.stringify(redactAuditValue(entries));
+        window.localStorage.setItem(AUDIT_LOG_STORAGE_KEY, serialized);
       },
       { retries: 3, minDelayMs: 100, maxDelayMs: 1_000, factor: 2 },
     ).catch(() => {
@@ -231,9 +264,11 @@ class AuditLogService {
 
     try {
       const entries = JSON.parse(stored) as AuditEntry[];
-      // Ensure timestamps are Date objects
+      // Ensure timestamps are Date objects and re-redact legacy entries.
       return entries.map((entry) => ({
         ...entry,
+        actionDescription: redactAuditValue(entry.actionDescription),
+        metadata: redactAuditValue(entry.metadata),
         timestamp: new Date(entry.timestamp),
       }));
     } catch (error) {

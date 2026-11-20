@@ -4,11 +4,16 @@ import { telemetry } from '@/lib/telemetry';
 import { serverEnv as env } from '@/lib/serverEnv';
 import { banksQuerySchema } from '@/lib/apiSchemas';
 import { applyRateLimit, getClientIp } from '@/lib/rateLimit';
+import { enforceCorsPolicy } from '@/lib/corsPolicy';
 
 const PAYSTACK_SECRET_KEY = env.PAYSTACK_SECRET_KEY;
 const RATE_LIMIT = { maxRequests: 30, windowMs: 60_000 };
 
 export async function GET(request: NextRequest) {
+  // Reject untrusted origins and preflight requests before any expensive work.
+  const corsRejection = enforceCorsPolicy(request, '/api/banks');
+  if (corsRejection) return corsRejection;
+
   const limited = applyRateLimit(getClientIp(request), '/api/banks', RATE_LIMIT);
   if (limited) return limited;
 

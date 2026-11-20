@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { redactSensitiveData } from '../logging/redaction';
 
 export type PayoutAuditAction =
   | 'payout_initiated'
@@ -155,7 +156,12 @@ export class PayoutAuditLedger {
     const timestamp = params.timestamp || new Date().toISOString();
     const requestCorrelationId = params.requestCorrelationId || 'n/a';
     const providerReference = params.providerReference || params.payoutId;
-    const metadata = params.metadata ? { ...params.metadata } : {};
+    // Redact sensitive fields (bank details, credentials, provider payloads,
+    // wallet/session tokens) at the logging boundary before the entry is
+    // hashed, persisted, or emitted. The ledger record structure is preserved.
+    const metadata = params.metadata
+      ? (redactSensitiveData(params.metadata) as Record<string, unknown>)
+      : {};
     const previousHash = this.lastHash;
 
     const hash = this.computeHash(

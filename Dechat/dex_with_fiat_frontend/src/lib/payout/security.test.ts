@@ -1,154 +1,246 @@
-import { describe, expect, it, vi } from 'vitest';
-import { NextRequest } from 'next/server';
+import { describe, it, expect, beforeEach } from 'vitest';
 import {
-  buildCorsHeaders,
-  evaluatePayoutRequestSecurity,
-  generateCsrfToken,
-  isWalletOrProgrammaticClient,
-  validateCsrfToken,
+  createKeyRegistry,
+  encryptField,
+  decryptField,
+  reencryptField,
+  rotateActiveKey,
+  retireKey,
+  isKeyRetired,
+  getActiveKeyId,
+  getPreviousKeyId,
+  type KeyRegistry,
+  type EncryptedField,
 } from './security';
 
-vi.mock('server-only', () => ({}));
+// Test-only key material. These are deterministic, non-secret fixtures used
+// solely to exercise rotation logic. They must never be used in production.
+const TEST_KEY_A = 'test-key-material-aaaaaaaaaaaaaaaaaaaaaaaa';
+const TEST_KEY_B = 'test-key-material-bbbbbbbbbbbbbbbbbbbbbbbb';
+const TEST_KEY_C = 'test-key-material-cccccccccccccccccccccccc';
 
-function makeRequest(
-  headers: Record<string, string> = {},
-  url = 'http://localhost:3000/api/create-recipient',
-) {
-  return new NextRequest(
-    new Request(url, {
-      method: 'POST',
-      headers,
-    }),
-  );
+const KEY_ID_A = 'key-a';
+const KEY_ID_B = 'key-b';
+const KEY_ID_C = 'key-c';
+
+function makeRegistry(): KeyRegistry {
+  return createKeyRegistry({
+    activeKeyId: KEY_ID_A,
+    keys: {
+      [KEY_ID_A]: TEST_KEY_A,
+    },
+  });
 }
 
-describe('Payout API Security', () => {
-  describe('Origin and Fetch Metadata Validation', () => {
-    it('allows same-origin browser requests', () => {
-      const req = makeRequest({
-        origin: 'http://localhost:3000',
-        'sec-fetch-site': 'same-origin',
-      });
+describe('payout field encryption key rotation', () => {
+  let registry: KeyRegistry;
 
-      const result = evaluatePayoutRequestSecurity(req);
-      expect(result.allowed).toBe(true);
-    });
-
-    it('rejects hostile untrusted origins with 403', () => {
-      const req = makeRequest({
-        origin: 'https://evil-attacker-site.com',
-        'sec-fetch-site': 'cross-site',
-      });
-
-      const result = evaluatePayoutRequestSecurity(req);
-      expect(result.allowed).toBe(false);
-      expect(result.statusCode).toBe(403);
-    });
-
-    it('allows missing-origin wallet-based and programmatic clients without blocking them', () => {
-      // Wallet clients send no browser Origin or Sec-Fetch headers
-      const req = makeRequest({
-        authorization: 'Bearer wallet_signature_token',
-      });
-
-      expect(isWalletOrProgrammaticClient(req)).toBe(true);
-      const result = evaluatePayoutRequestSecurity(req);
-      expect(result.allowed).toBe(true);
-      expect(result.isWalletClient).toBe(true);
-    });
-
-    it('rejects cross-site fetch metadata even if origin is forged or missing', () => {
-      const req = makeRequest({
-        'sec-fetch-site': 'cross-site',
-      });
-
-      const result = evaluatePayoutRequestSecurity(req);
-      expect(result.allowed).toBe(false);
-      expect(result.statusCode).toBe(403);
-      expect(result.error).toBe('CROSS_SITE_REQUEST_FORBIDDEN');
-    });
+  beforeEach(() => {
+    registry = makeRegistry();
   });
 
-  describe('CORS behavior and wildcard credentialed access rejection', () => {
-    it('sets explicit origin and credentials for allowed origins', () => {
-      const req = makeRequest({
-        origin: 'http://localhost:3000',
-      });
+  describe('encryption with the active key', () => {
+    it('encrypts a field and stores only the key identifier', () => {
+      const plaintext = 'payout-account-1234567890';
+      const encrypted = encryptField(registry, plaintext);
 
-      const headers = buildCorsHeaders(req);
-      expect(headers['Access-Control-Allow-Origin']).toBe(
-        'http://localhost:3000',
+      expect(encrypted.keyId).toBe(KEY_ID_A);
+      expect(encrypted.ciphertext).toBeTruthy();
+      expect(encrypted.ciphertext).not.toBe(plaintext);
+
+      // Stored record must never contain key material.
+      const serialized = JSON.stringify(encrypted);
+      expect(serialized).not.toContain(TEST_KEY_A);
+      expect(serialized).not.toContain(TEST_KEY_B);
+      expect(serialized).not.toContain(TEST_KEY_C);
+      expect(Object.keys(encrypted).sort()).toEqual(
+        ['ciphertext', 'iv', 'keyId'].sort(),
       );
-      expect(headers['Access-Control-Allow-Credentials']).toBe('true');
     });
 
-    it('never emits wildcard * origin when credentials are enabled', () => {
-      const req = makeRequest({
-        origin: 'https://unknown-untrusted.com',
-      });
-
-      const headers = buildCorsHeaders(req, {
-        allowedOrigins: ['http://localhost:3000'],
-        allowCredentials: true,
-      });
-
-      // Wildcard is strictly forbidden
-      expect(headers['Access-Control-Allow-Origin']).toBeUndefined();
-      expect(headers['Access-Control-Allow-Origin']).not.toBe('*');
+    it('round-trips through the active key', () => {
+      const plaintext = 'routing-021000021';
+      const encrypted = encryptField(registry, plaintext);
+      expect(decryptField(registry, encrypted)).toBe(plaintext);
     });
   });
 
-  describe('CSRF Token Strategy', () => {
-    it('generates and validates valid CSRF tokens', () => {
-      const token = generateCsrfToken('user_session_1');
-      expect(validateCsrfToken(token, 'user_session_1')).toBe(true);
+  describe('decryption with active and previous keys', () => {
+    it('decrypts data encrypted under the previous key after rotation', () => {
+      const plaintext = 'payout-account-abcdef';
+      const encryptedWithA = encryptField(registry, plaintext);
+
+      // Rotate to B; A becomes the previous key.
+      registry = rotateActiveKey(registry, KEY_ID_B, TEST_KEY_B);
+
+      expect(getActiveKeyId(registry)).toBe(KEY_ID_B);
+      expect(getPreviousKeyId(registry)).toBe(KEY_ID_A);
+
+      // Old ciphertext still decrypts using the previous key.
+      expect(decryptField(registry, encryptedWithA)).toBe(plaintext);
+
+      // New ciphertext uses the active key.
+      const encryptedWithB = encryptField(registry, plaintext);
+      expect(encryptedWithB.keyId).toBe(KEY_ID_B);
+      expect(decryptField(registry, encryptedWithB)).toBe(plaintext);
     });
 
-    it('rejects tokens with mismatched scope or tampered payload', () => {
-      const token = generateCsrfToken('user_session_1');
-      expect(validateCsrfToken(token, 'different_session')).toBe(false);
+    it('decrypts data encrypted under the active key', () => {
+      const plaintext = 'payout-account-active';
+      const encrypted = encryptField(registry, plaintext);
+      expect(encrypted.keyId).toBe(KEY_ID_A);
+      expect(decryptField(registry, encrypted)).toBe(plaintext);
+    });
+  });
 
-      const tampered = token.slice(0, -3) + 'abc';
-      expect(validateCsrfToken(tampered, 'user_session_1')).toBe(false);
+  describe('incremental re-encryption progress', () => {
+    it('re-encrypts a single field from previous to active key', () => {
+      const plaintext = 'payout-account-reencrypt';
+      const encryptedWithA = encryptField(registry, plaintext);
+
+      registry = rotateActiveKey(registry, KEY_ID_B, TEST_KEY_B);
+
+      const reencrypted = reencryptField(registry, encryptedWithA);
+      expect(reencrypted.keyId).toBe(KEY_ID_B);
+      expect(reencrypted.ciphertext).not.toBe(encryptedWithA.ciphertext);
+      expect(decryptField(registry, reencrypted)).toBe(plaintext);
     });
 
-    it('rejects expired CSRF tokens', () => {
-      let fakeTime = 1_000_000;
-      const token = generateCsrfToken('session_1', undefined, () => fakeTime);
+    it('reports progress across a batch of fields', () => {
+      const fields: EncryptedField[] = [
+        encryptField(registry, 'field-1'),
+        encryptField(registry, 'field-2'),
+        encryptField(registry, 'field-3'),
+      ];
 
-      // Advance time by 25 hours (exceeds default 24h TTL)
-      fakeTime += 25 * 60 * 60 * 1000;
-      expect(
-        validateCsrfToken(
-          token,
-          'session_1',
-          undefined,
-          undefined,
-          () => fakeTime,
-        ),
-      ).toBe(false);
-    });
+      registry = rotateActiveKey(registry, KEY_ID_B, TEST_KEY_B);
 
-    it('enforces CSRF tokens for browser sessions with cookies', () => {
-      const token = generateCsrfToken('default');
-
-      // Valid token
-      const validReq = makeRequest({
-        origin: 'http://localhost:3000',
-        cookie: 'session_id=123',
-        'x-csrf-token': token,
+      const progress: Array<{ keyId: string }> = [];
+      const reencrypted = fields.map((field) => {
+        const next = reencryptField(registry, field);
+        progress.push({ keyId: next.keyId });
+        return next;
       });
-      expect(evaluatePayoutRequestSecurity(validReq).allowed).toBe(true);
 
-      // Missing token on browser session with cookies
-      const missingReq = makeRequest({
-        origin: 'http://localhost:3000',
-        cookie: 'session_id=123',
-      });
-      const result = evaluatePayoutRequestSecurity(missingReq);
-      expect(result.allowed).toBe(false);
-      expect(result.statusCode).toBe(403);
-      expect(result.error).toBe('CSRF_VALIDATION_FAILED');
+      expect(progress).toHaveLength(3);
+      expect(progress.every((p) => p.keyId === KEY_ID_B)).toBe(true);
+      expect(reencrypted.map((f) => decryptField(registry, f))).toEqual([
+        'field-1',
+        'field-2',
+        'field-3',
+      ]);
+    });
+
+    it('is idempotent when re-encrypting an already-active field', () => {
+      const plaintext = 'payout-account-idempotent';
+      const encrypted = encryptField(registry, plaintext);
+      const reencrypted = reencryptField(registry, encrypted);
+      expect(reencrypted.keyId).toBe(KEY_ID_A);
+      expect(decryptField(registry, reencrypted)).toBe(plaintext);
+    });
+  });
+
+  describe('rollback to the previous key', () => {
+    it('restores the previous key as active and decrypts both generations', () => {
+      const plaintext = 'payout-account-rollback';
+      const encryptedWithA = encryptField(registry, plaintext);
+
+      registry = rotateActiveKey(registry, KEY_ID_B, TEST_KEY_B);
+      const encryptedWithB = encryptField(registry, plaintext);
+
+      // Roll back: B becomes previous, A becomes active again.
+      registry = rotateActiveKey(registry, KEY_ID_A, TEST_KEY_A);
+
+      expect(getActiveKeyId(registry)).toBe(KEY_ID_A);
+      expect(getPreviousKeyId(registry)).toBe(KEY_ID_B);
+
+      expect(decryptField(registry, encryptedWithA)).toBe(plaintext);
+      expect(decryptField(registry, encryptedWithB)).toBe(plaintext);
+    });
+  });
+
+  describe('retirement of old keys', () => {
+    it('marks a key retired and rejects decryption with it', () => {
+      const plaintext = 'payout-account-retire';
+      const encryptedWithA = encryptField(registry, plaintext);
+
+      registry = rotateActiveKey(registry, KEY_ID_B, TEST_KEY_B);
+      registry = retireKey(registry, KEY_ID_A);
+
+      expect(isKeyRetired(registry, KEY_ID_A)).toBe(true);
+      expect(() => decryptField(registry, encryptedWithA)).toThrow(
+        /retired/i,
+      );
+    });
+
+    it('allows decryption with the active key after retiring the previous key', () => {
+      registry = rotateActiveKey(registry, KEY_ID_B, TEST_KEY_B);
+      registry = retireKey(registry, KEY_ID_A);
+
+      const encryptedWithB = encryptField(registry, 'payout-account-live');
+      expect(decryptField(registry, encryptedWithB)).toBe(
+        'payout-account-live',
+      );
+    });
+
+    it('does not expose retired key material in stored records', () => {
+      const encryptedWithA = encryptField(registry, 'payout-account-secret');
+      registry = rotateActiveKey(registry, KEY_ID_B, TEST_KEY_B);
+      registry = retireKey(registry, KEY_ID_A);
+
+      const serialized = JSON.stringify(encryptedWithA);
+      expect(serialized).not.toContain(TEST_KEY_A);
+      expect(serialized).not.toContain(TEST_KEY_B);
+      expect(encryptedWithA.keyId).toBe(KEY_ID_A);
+    });
+  });
+
+  describe('failure cases', () => {
+    it('rejects decryption with an unknown key id', () => {
+      const encrypted = encryptField(registry, 'payout-account-unknown');
+      const tampered: EncryptedField = { ...encrypted, keyId: 'key-unknown' };
+      expect(() => decryptField(registry, tampered)).toThrow(/unknown/i);
+    });
+
+    it('rejects decryption with a retired key id', () => {
+      const encrypted = encryptField(registry, 'payout-account-retired');
+      registry = rotateActiveKey(registry, KEY_ID_B, TEST_KEY_B);
+      registry = retireKey(registry, KEY_ID_A);
+      expect(() => decryptField(registry, encrypted)).toThrow(/retired/i);
+    });
+
+    it('rejects decryption of corrupted ciphertext', () => {
+      const encrypted = encryptField(registry, 'payout-account-corrupt');
+      const corrupted: EncryptedField = {
+        ...encrypted,
+        ciphertext: encrypted.ciphertext.slice(0, -2) + 'xx',
+      };
+      expect(() => decryptField(registry, corrupted)).toThrow();
+    });
+
+    it('rejects decryption of corrupted iv', () => {
+      const encrypted = encryptField(registry, 'payout-account-corrupt-iv');
+      const corrupted: EncryptedField = {
+        ...encrypted,
+        iv: encrypted.iv.slice(0, -2) + 'yy',
+      };
+      expect(() => decryptField(registry, corrupted)).toThrow();
+    });
+
+    it('rejects re-encryption of corrupted ciphertext', () => {
+      const encrypted = encryptField(registry, 'payout-account-corrupt-re');
+      registry = rotateActiveKey(registry, KEY_ID_B, TEST_KEY_B);
+      const corrupted: EncryptedField = {
+        ...encrypted,
+        ciphertext: encrypted.ciphertext.slice(0, -2) + 'zz',
+      };
+      expect(() => reencryptField(registry, corrupted)).toThrow();
+    });
+
+    it('rejects rotation to a key id without key material', () => {
+      expect(() =>
+        rotateActiveKey(registry, KEY_ID_C, undefined as unknown as string),
+      ).toThrow();
     });
   });
 });

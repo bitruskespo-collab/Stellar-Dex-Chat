@@ -7,6 +7,10 @@ import {
   getProviderCircuitBreaker,
   handlePayoutApiError,
 } from '@/lib/payout/circuitBreaker';
+import {
+  enforceRouteCors,
+  corsPreflightResponse,
+} from '@/lib/payout/cors';
 
 const RATE_LIMIT = {
   maxRequests: 15,
@@ -16,13 +20,21 @@ const RATE_LIMIT = {
 };
 
 export async function OPTIONS(request: NextRequest) {
+  // Reject untrusted origins before answering preflight.
+  const corsBlocked = enforceRouteCors(request, '/api/transfer-status');
+  if (corsBlocked) return corsBlocked;
+
   return (
     enforcePayoutRouteSecurity(request) ||
-    new NextResponse(null, { status: 204 })
+    corsPreflightResponse(request, '/api/transfer-status')
   );
 }
 
 export async function POST(request: NextRequest) {
+  // Enforce restrictive cross-origin policy before any expensive work.
+  const corsBlocked = enforceRouteCors(request, '/api/transfer-status');
+  if (corsBlocked) return corsBlocked;
+
   // Enforce payout API security
   const securityBlocked = enforcePayoutRouteSecurity(request);
   if (securityBlocked) return securityBlocked;

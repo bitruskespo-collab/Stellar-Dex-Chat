@@ -1,4 +1,5 @@
 import { ReconciliationRecord } from '@/types';
+import { redactSensitiveData } from '@/lib/redaction';
 
 export interface DailyMetric {
   date: string;
@@ -116,6 +117,38 @@ function isDefaultRetryable(error: unknown, retryableStatuses: number[]): boolea
   }
 
   return false;
+}
+
+/**
+ * Emit an analytics event with sensitive fields redacted.
+ *
+ * All payloads pass through the shared redaction module so wallet/session
+ * tokens, credentials, bank details, prompt content and provider payloads are
+ * scrubbed before the event leaves the application boundary.
+ *
+ * @param eventName - Name of the analytics event
+ * @param payload - Arbitrary event payload; sensitive values are redacted
+ * @returns The redacted payload that was emitted
+ */
+export function trackEvent(
+  eventName: string,
+  payload: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const redactedPayload = redactSensitiveData(payload) as Record<string, unknown>;
+
+  if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+    try {
+      window.dispatchEvent(
+        new CustomEvent('analytics:event', {
+          detail: { event: eventName, payload: redactedPayload },
+        }),
+      );
+    } catch {
+      // Analytics emission must never break the caller's flow.
+    }
+  }
+
+  return redactedPayload;
 }
 
 export function aggregateDailyVolume(

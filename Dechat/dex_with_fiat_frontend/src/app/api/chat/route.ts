@@ -1,5 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createHash } from 'crypto';
+import { redactForLogging } from '@/lib/logging/redact';
+
+/**
+ * Emit a structured log line through the shared redaction boundary.
+ *
+ * All log/trace output from this route MUST go through this helper so that
+ * prompt content, wallet/session tokens, credentials, bank details and
+ * provider payloads are scrubbed before emission (issue #257).
+ */
+function logEvent(event: string, fields: Record<string, unknown> = {}): void {
+  const safe = redactForLogging({ event, ...fields });
+  // eslint-disable-next-line no-console
+  console.info(JSON.stringify(safe));
+}
 
 // ---------------------------------------------------------------------------
 // Per-user AI assistant quotas and model spend ceilings (issue #111)
@@ -161,6 +175,7 @@ export async function POST(req: NextRequest) {
   try {
     body = await req.json();
   } catch {
+    logEvent('chat.invalid_request', { authenticated });
     return NextResponse.json({ error: 'invalid_request' }, { status: 400 });
   }
 
@@ -169,6 +184,13 @@ export async function POST(req: NextRequest) {
 
   if (limit) {
     state.metrics.limitedRequests += 1;
+    logEvent('chat.quota_exceeded', {
+      authenticated,
+      reason: limit.reason,
+      limit: limit.limit,
+      windowMs: limit.windowMs,
+      retryAfterMs: limit.retryAfterMs,
+    });
     // Fail closed: no model call is made and the client keeps its draft.
     return NextResponse.json(limit, {
       status: 429,
@@ -180,5 +202,15 @@ export async function POST(req: NextRequest) {
 
   // Existing assistant handling continues here. The quota gate above runs
   // before any model invocation so limits always fail closed.
+  //
+  // Any diagnostics emitted from the assistant/provider path must be routed
+  // through `logEvent` (or `redactForLogging`) so prompt content and provider
+  // payloads never reach logs or traces in cleartext.
+  logEvent('chat.request_accepted', {
+    authenticated,
+    estimatedTokens,
+    messageCount: Array.isArray(body.messages) ? body.messages.length : 0,
+  });
+
   return NextResponse.json({ ok: true });
 }

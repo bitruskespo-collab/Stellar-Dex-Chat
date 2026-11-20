@@ -12,6 +12,7 @@ import {
 const RATE_LIMIT = { maxRequests: 10, windowMs: 60_000 };
 
 export async function OPTIONS(request: NextRequest) {
+  // Reject untrusted origins / preflight before any expensive work.
   return (
     enforcePayoutRouteSecurity(request) ||
     new NextResponse(null, { status: 204 })
@@ -19,7 +20,8 @@ export async function OPTIONS(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  // Enforce payout API security
+  // Enforce payout API security (CORS origin + credential policy) before
+  // rate limiting, parsing, or provider calls.
   const securityBlocked = enforcePayoutRouteSecurity(request);
   if (securityBlocked) return securityBlocked;
 

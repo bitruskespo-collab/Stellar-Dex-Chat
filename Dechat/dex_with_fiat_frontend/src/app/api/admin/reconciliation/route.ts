@@ -2,10 +2,14 @@ import { NextRequest, NextResponse } from 'next/server';
 import { ReconciliationRecord } from '@/types';
 import { requireAdminAuth } from '../_utils/requireAdminAuth';
 import { enforceAdminIpAllowlist } from '@/lib/security';
+import { enforceRouteCors } from '@/lib/security/cors';
 import { reconcileStalePayouts } from '@/lib/payout/reconciliation';
 
 export async function GET(request: NextRequest) {
   try {
+    const corsResponse = enforceRouteCors(request, 'admin/reconciliation');
+    if (corsResponse) return corsResponse;
+
     const blockedResponse = enforceAdminIpAllowlist(request);
     if (blockedResponse) return blockedResponse;
 
@@ -134,6 +138,9 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
+    const corsResponse = enforceRouteCors(request, 'admin/reconciliation');
+    if (corsResponse) return corsResponse;
+
     const blockedResponse = enforceAdminIpAllowlist(request);
     if (blockedResponse) return blockedResponse;
 

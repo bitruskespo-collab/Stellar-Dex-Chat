@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { credentialManager } from '../credentialManager';
 import { executeWithTimeoutBudget } from '../timeoutBudget';
+import { redactForLog } from '../../logging/redaction';
 
 import type {
   CancelTransferInput,
@@ -56,7 +57,9 @@ function normalizePaystackStatus(status?: string): NormalizedPayoutStatus {
     const cred = credentialManager.getActiveCredential();
 
     if (!cred || !cred.secretKey) {
-      console.warn('Paystack secret key not found, using mock verification');
+      console.warn(
+        redactForLog('Paystack secret key not found, using mock verification'),
+      );
 
     return new PayoutProviderError({
       message,
@@ -119,7 +122,9 @@ function normalizePaystackStatus(status?: string): NormalizedPayoutStatus {
 
     if (!cred || !cred.secretKey) {
       console.warn(
-        'Paystack secret key not found, using mock recipient creation',
+        redactForLog(
+          'Paystack secret key not found, using mock recipient creation',
+        ),
       );
       return {
         recipientCode: `RCP_${Math.random().toString(36).substring(2, 11)}`,
@@ -167,7 +172,9 @@ function normalizePaystackStatus(status?: string): NormalizedPayoutStatus {
 
     if (!cred || !cred.secretKey) {
       console.warn(
-        'Paystack secret key not found, using mock transfer initiation',
+        redactForLog(
+          'Paystack secret key not found, using mock transfer initiation',
+        ),
       );
       const mockResult: InitiatedTransfer = {
         reference,
@@ -245,7 +252,9 @@ function normalizePaystackStatus(status?: string): NormalizedPayoutStatus {
     const cred = credentialManager.getCredential(credentialVersion);
 
     if (!cred || !cred.secretKey) {
-      console.warn('Paystack secret key not found, using mock transfer status');
+      console.warn(
+        redactForLog('Paystack secret key not found, using mock transfer status'),
+      );
 
       const mockStatus = {
         status: true,
@@ -295,7 +304,11 @@ function normalizePaystackStatus(status?: string): NormalizedPayoutStatus {
     const { reference } = input;
 
     if (!PAYSTACK_SECRET_KEY) {
-      console.warn('Paystack secret key not found, using mock transfer cancellation');
+      console.warn(
+        redactForLog(
+          'Paystack secret key not found, using mock transfer cancellation',
+        ),
+      );
       await new Promise((resolve) => setTimeout(resolve, 300));
 
       return {
@@ -337,7 +350,11 @@ function normalizePaystackStatus(status?: string): NormalizedPayoutStatus {
         providerReference: reference,
       };
     } catch (error) {
-      console.error('Error contacting provider during cancellation:', error);
+      console.error(
+        redactForLog('Error contacting provider during cancellation', {
+          error,
+        }),
+      );
       throw error;
     }
   },

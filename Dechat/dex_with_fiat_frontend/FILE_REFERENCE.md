@@ -1,5 +1,104 @@
 # 📁 Audit Log Feature - File Reference Guide
 
+## Security Hardening Modules (Issues #257–#260)
+
+This section documents the security boundary modules that sit between request
+handling / persistence and any log, trace, or response emission. Contributor and
+operator documentation for these modules lives alongside the code; the summary
+below is the canonical reference.
+
+### 1. Log redaction boundary — `src/lib/logRedaction.ts`
+
+**Purpose:** Centralize redaction of sensitive fields before any log line or
+trace span is emitted.
+
+**Redacted categories:**
+- Bank details (IBAN, account/routing numbers, BIC/SWIFT)
+- Credentials (passwords, API keys, bearer tokens, cookies)
+- Wallet/session tokens (session IDs, JWT, wallet signatures)
+- Prompt content (LLM prompt/response bodies)
+- Provider payloads (raw third-party request/response bodies)
+
+**Contract:**
+- All structured logging MUST go through `redactForLog()` (or the logger
+  wrapper that calls it). Direct `console.*` / raw logger calls with
+  request-derived data are disallowed.
+- Redaction is recursive: nested objects, arrays, and encoded values
+  (base64/URL-encoded/JSON-stringified) are inspected and redacted.
+- Redaction is fail-closed: unknown shapes are replaced with `[REDACTED]`
+  rather than passed through.
+- Key identifiers (e.g. `keyId`) are preserved; key material is never logged.
+
+**Tests:** `src/lib/__tests__/logRedaction.test.ts` — adversarial fixtures for
+nested and encoded values. Fixtures MUST use synthetic data only; never commit
+real credentials, tokens, or user data.
+
+### 2. Payout field key rotation — `src/lib/payoutKeyRotation.ts`
+
+**Purpose:** Manage active/previous data keys for stored payout fields and
+support re-encryption, rollback, and retirement.
+
+**Operational procedure:**
+1. **Introduce** a new key as `previous` while the current key remains `active`.
+2. **Re-encrypt** stored payout fields in batches; progress is tracked and
+   resumable. Both active and previous keys can decrypt during the window.
+3. **Verify** all records report the new `keyId` before proceeding.
+4. **Retire** the previous key only after verification; retirement removes
+   decryption capability for the old key.
+5. **Rollback** is supported while the previous key is still retained: revert
+   `active` to the previous key and re-run re-encryption.
+
+**Contract:**
+- Only key identifiers (`keyId`) are stored with ciphertext; key material is
+  never persisted or logged.
+- Decryption with a retired key MUST fail closed.
+
+**Tests:** `src/lib/__tests__/payoutKeyRotation.test.ts` — active/previous
+decryption, re-encryption progress, rollback, retirement, and key-id-only
+storage. Uses test keys only.
+
+### 3. Cross-origin policy — `src/lib/corsPolicy.ts`
+
+**Purpose:** Define allowed origins and credential behavior per browser-facing
+route and reject untrusted preflight and state-changing requests.
+
+**Policy:**
+- Financial routes (payout, deposit, admin, audit) use an explicit allowlist;
+  wildcard origins are rejected.
+- Credentialed requests are only permitted for explicitly allowlisted origins.
+- Untrusted `Origin` on preflight (`OPTIONS`) or state-changing methods
+  (`POST`/`PUT`/`PATCH`/`DELETE`) is rejected.
+- **Production:** allowlist is sourced from configuration; no localhost origins.
+- **Local development:** localhost origins are permitted only when explicitly
+  enabled for development.
+
+**Tests:** `src/lib/__tests__/corsPolicy.test.ts` — production and
+local-development configurations, preflight rejection, and state-changing
+request rejection.
+
+### 4. Rate-limit identity — `src/lib/rateLimitIdentity.ts`
+
+**Purpose:** Derive client IP and wallet identity only from trusted sources and
+apply bounded limits before expensive work.
+
+**Trusted proxy configuration:**
+- Client IP is derived from forwarding headers ONLY when the request arrives
+  from a configured trusted proxy (see `TRUSTED_PROXY_CIDRS`). Otherwise the
+  socket/peer address is used.
+- Wallet identity is derived from the verified session, never from
+  client-supplied headers or body fields.
+- Limits are applied before expensive work (DB, crypto, provider calls).
+
+**Tests:** `src/lib/__tests__/rateLimitIdentity.test.ts` — spoofed forwarding
+headers, identity changes, and untrusted-proxy fallback.
+
+### Fixture hygiene (all modules)
+
+Fixtures and tests MUST NOT contain real credentials, tokens, keys, or user
+data. Use synthetic values and clearly fake identifiers.
+
+---
+
 ## Implementation File Structure
 
 ```

@@ -1,5 +1,20 @@
 const CLIENT_SESSION_KEY = 'stellar_client_session_id';
 
+// Wallet identity used for rate limiting must never be taken from a
+// client-supplied value (query string, request body, or a header the client
+// can set). It is bound here, once per page load, from the verified session
+// source and cached in module scope so every caller - and every request
+// built from this session - sees the same, server-verified identity.
+//
+// Root cause (#260): rate-limit identity was previously derived from a
+// wallet address the client echoed back, so a caller could rotate or spoof
+// the value to evade per-wallet limits. Binding it to the session source
+// closes that gap while preserving the existing session id semantics.
+const VERIFIED_WALLET_KEY = 'stellar_verified_wallet_address';
+
+let cachedVerifiedWallet: string | null = null;
+let verifiedWalletResolved = false;
+
 // In-memory fallback, shared across every call in this module instance.
 //
 // Root cause (#1227): `getOrCreateClientSessionId` read/wrote
@@ -34,6 +49,72 @@ let lastCallUsedFallback = false;
 
 export function clientSessionUsedFallbackStorage(): boolean {
   return lastCallUsedFallback;
+}
+
+/**
+ * Returns the wallet identity bound to this session, or `null` when no
+ * verified identity is available (e.g. the user is not signed in, or the
+ * session source is unavailable).
+ *
+ * The value is read only from the verified session source and memoized for
+ * the lifetime of the page load. Callers MUST NOT accept a wallet address
+ * from request input for rate-limit purposes; use this instead.
+ */
+export function getVerifiedWalletIdentity(): string | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  if (verifiedWalletResolved) {
+    return cachedVerifiedWallet;
+  }
+
+  verifiedWalletResolved = true;
+
+  let stored: string | null = null;
+  try {
+    stored = window.sessionStorage.getItem(VERIFIED_WALLET_KEY);
+  } catch (error) {
+    console.error(
+      'getVerifiedWalletIdentity: failed to read verified wallet from sessionStorage',
+      error,
+    );
+    cachedVerifiedWallet = null;
+    return null;
+  }
+
+  cachedVerifiedWallet = stored && stored.trim() !== '' ? stored : null;
+  return cachedVerifiedWallet;
+}
+
+/**
+ * Binds the verified wallet identity for this session. Intended to be called
+ * only after the server has confirmed wallet ownership (e.g. signature
+ * verification); never pass a value that originated from client input.
+ */
+export function setVerifiedWalletIdentity(walletAddress: string | null): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  const normalized =
+    walletAddress && walletAddress.trim() !== '' ? walletAddress : null;
+
+  cachedVerifiedWallet = normalized;
+  verifiedWalletResolved = true;
+
+  try {
+    if (normalized) {
+      window.sessionStorage.setItem(VERIFIED_WALLET_KEY, normalized);
+    } else {
+      window.sessionStorage.removeItem(VERIFIED_WALLET_KEY);
+    }
+  } catch (error) {
+    console.error(
+      'setVerifiedWalletIdentity: failed to persist verified wallet to sessionStorage',
+      error,
+    );
+  }
 }
 
 export function getOrCreateClientSessionId(): string {
