@@ -7,6 +7,20 @@ import {
   getProviderCircuitBreaker,
   handlePayoutApiError,
 } from '@/lib/payout/circuitBreaker';
+import {
+  extractOrGenerateCorrelationId,
+  logStructuredError,
+  validationError,
+} from '@/lib/payout/errors';
+import {
+  authorizeTransferAccess,
+  isTransferAuthorized,
+  nonEnumeratingNotFoundResponse,
+  uniformNotFoundResponse,
+} from '@/lib/auth/authorizationMatrix';
+import { resolveCallerIdentity } from '@/lib/payout/auth';
+import { unauthorizedResponse } from '@/lib/payout/auth';
+import { getTransferStatus } from '@/lib/transferStore';
 
 const RATE_LIMIT = {
   maxRequests: 15,
@@ -28,6 +42,7 @@ export async function POST(request: NextRequest) {
   if (securityBlocked) return securityBlocked;
 
   const ip = getClientIp(request);
+  const correlationId = extractOrGenerateCorrelationId(request.headers);
 
   const limited = applyRateLimit(ip, '/api/transfer-status', RATE_LIMIT);
   if (limited) return limited;
@@ -91,7 +106,10 @@ export async function POST(request: NextRequest) {
     }
 
     const provider = getPayoutProvider();
-    const breaker = getProviderCircuitBreaker(provider.name);
+    const breaker = getProviderCircuitBreaker(
+      provider.name,
+      'status_query',
+    );
 
     const data = await breaker.execute(() =>
       provider.checkTransferStatus({ reference }),

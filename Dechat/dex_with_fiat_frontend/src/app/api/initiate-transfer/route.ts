@@ -15,6 +15,7 @@ import { setTransferStatus, getTransferStatus } from '@/lib/transferStore';
 import { initiateTransferSchema } from '@/lib/apiSchemas';
 import { payoutAuditLedger } from '@/lib/payout/auditLedger';
 import { payoutRetryQueue } from '@/lib/payout/retryQueue';
+import { getProviderCircuitBreaker } from '@/lib/payout/circuitBreaker';
 
 const RATE_LIMIT = { maxRequests: 3, windowMs: 60_000 };
 
@@ -160,15 +161,21 @@ export async function POST(request: NextRequest) {
     });
 
     const provider = getPayoutProvider();
+    const breaker = getProviderCircuitBreaker(
+      provider.name,
+      'transfer_initiation',
+    );
 
     try {
-      const data = await provider.initiateTransfer({
-        source,
-        reason,
-        amount: Number(amount),
-        recipient,
-        reference: idempotencyKey,
-      });
+      const data = await breaker.execute(() =>
+        provider.initiateTransfer({
+          source,
+          reason,
+          amount: Number(amount),
+          recipient,
+          reference: idempotencyKey,
+        }),
+      );
 
       const transferReference =
         typeof data.reference === 'string' && data.reference

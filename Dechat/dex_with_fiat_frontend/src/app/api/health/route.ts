@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { getProviderCircuitBreakerHealth } from '@/lib/payout/circuitBreaker';
 
 export const runtime = 'edge';
 
@@ -8,6 +9,7 @@ export async function GET() {
       {
         status: 'ok',
         timestamp: new Date().toISOString(),
+        providerCircuits: getProviderCircuitBreakerHealth(),
       },
       { status: 200 },
     );

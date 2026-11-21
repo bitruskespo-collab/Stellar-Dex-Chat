@@ -9,6 +9,10 @@ import {
   handlePayoutApiError,
 } from '@/lib/payout/circuitBreaker';
 import { getOrCreateBeneficiary } from '@/lib/payout/beneficiaryStore';
+import {
+  extractOrGenerateCorrelationId,
+  validationError,
+} from '@/lib/payout/errors';
 
 const RATE_LIMIT = { maxRequests: 5, windowMs: 60_000 };
 
@@ -25,6 +29,7 @@ export async function POST(request: NextRequest) {
   if (securityBlocked) return securityBlocked;
 
   const ip = getClientIp(request);
+  const correlationId = extractOrGenerateCorrelationId(request.headers);
 
   const limited = applyRateLimit(ip, '/api/create-recipient', RATE_LIMIT);
   if (limited) return limited;
@@ -97,7 +102,10 @@ export async function POST(request: NextRequest) {
       ip;
 
     const provider = getPayoutProvider();
-    const breaker = getProviderCircuitBreaker(provider.name);
+    const breaker = getProviderCircuitBreaker(
+      provider.name,
+      'recipient_creation',
+    );
 
     // Race-safe beneficiary resolution with circuit breaker protection
     const beneficiaryResult = await getOrCreateBeneficiary(

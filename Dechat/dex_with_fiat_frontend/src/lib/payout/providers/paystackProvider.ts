@@ -1,344 +1,249 @@
 import axios from 'axios';
 import { credentialManager } from '../credentialManager';
-import { executeWithTimeoutBudget } from '../timeoutBudget';
-
 import type {
   CancelTransferInput,
   CancelTransferResult,
   CreateRecipientInput,
+  CreatedRecipient,
   InitiatedTransfer,
   InitiateTransferInput,
   NormalizedPayoutStatus,
-  PayoutErrorCode,
   PayoutProvider,
-  PayoutProviderError,
   TransferStatus,
   TransferStatusInput,
   VerifiedAccount,
   VerifyAccountInput,
 } from './types';
+import { PayoutProviderError } from './types';
 
-export function toKobo(amountNgn: number): number {
-  return Math.round(amountNgn * 100);
+function normalizeStatus(status?: string): NormalizedPayoutStatus {
+  const value = (status || 'pending').toLowerCase();
+  if (value === 'success') return 'success';
+  if (value === 'reversed') return 'reversed';
+  if (value === 'cancelled' || value === 'canceled') return 'cancelled';
+  if (value === 'failed' || value === 'rejected') return 'failed';
+  return 'pending';
 }
 
-function paystackHeaders(secretKey?: string) {
+function headers(secretKey: string) {
   return {
     Authorization: `Bearer ${secretKey}`,
     'Content-Type': 'application/json',
   };
 }
 
-function normalizePaystackStatus(status?: string): NormalizedPayoutStatus {
-  if (!status) return 'pending';
-  const lower = status.toLowerCase();
-  switch (lower) {
-    case 'success':
-      return 'success';
-    case 'failed':
-    case 'rejected':
-      return 'failed';
-    case 'reversed':
-      return 'reversed';
-    case 'cancelled':
-      return 'cancelled';
-    case 'pending':
-    case 'processing':
-    case 'queued':
-    case 'otp':
-    default:
-      return 'pending';
-  }
-}
+export const paystackProvider: PayoutProvider = {
+  name: 'paystack',
 
-  async verifyAccount(input: VerifyAccountInput): Promise<VerifyAccountResult> {
-    const { accountNumber, bankCode } = input;
-    const cred = credentialManager.getActiveCredential();
-
-    if (!cred || !cred.secretKey) {
-      console.warn('Paystack secret key not found, using mock verification');
-
-    return new PayoutProviderError({
-      message,
-      code,
-      statusCode: status,
-      retryable,
-      providerCode,
-      rawResponse: error.response?.data,
-    });
-  }
-
-  const message =
-    error instanceof Error ? error.message : 'Unknown provider error';
-  return new PayoutProviderError({
-    message,
-    code: 'UNKNOWN_ERROR',
-    retryable: false,
-  });
-}
-
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      return mockVerification;
+  async verifyAccount(
+    input: VerifyAccountInput,
+  ): Promise<VerifiedAccount> {
+    const credential = credentialManager.getActiveCredential();
+    if (!credential) {
+      throw new PayoutProviderError({
+        message: 'Paystack credentials are not configured',
+        code: 'AUTHENTICATION_ERROR',
+        statusCode: 401,
+        retryable: false,
+      });
     }
-  }
-}
-
-    return await executeWithTimeoutBudget(
-      'verify',
-      async (signal, phaseNotifier) => {
-        const response = await axios.get(
-          'https://api.paystack.co/bank/resolve',
-          {
-            headers: paystackHeaders(cred.secretKey),
-            params: { account_number: accountNumber, bank_code: bankCode },
-            signal,
-          },
-        );
-
-        phaseNotifier?.markConnected();
-
-        if (response.data?.status && response.data?.data) {
-          return {
-            account_number: response.data.data.account_number,
-            account_name: response.data.data.account_name,
-            bank_id: Number.parseInt(bankCode, 10),
-          };
-        }
-
-        throw new Error(
-          response.data?.message || 'Account verification failed',
-        );
+    const response = await axios.get(
+      'https://api.paystack.co/bank/resolve',
+      {
+        headers: headers(credential.secretKey),
+        params: {
+          account_number: input.accountNumber,
+          bank_code: input.bankCode,
+        },
       },
     );
+    const data = response.data?.data;
+    if (!response.data?.status || !data) {
+      throw new PayoutProviderError({
+        message: 'Could not resolve account',
+        code: 'INVALID_ACCOUNT',
+        retryable: false,
+      });
+    }
+    return {
+      accountNumber: String(data.account_number),
+      accountName: String(data.account_name),
+      bankCode: input.bankCode,
+      bankId: Number(data.bank_id),
+      rawResponse: response.data,
+    };
   },
 
   async createRecipient(
     input: CreateRecipientInput,
-  ): Promise<CreateRecipientResult> {
-    const cred = credentialManager.getActiveCredential();
-
-    if (!cred || !cred.secretKey) {
-      console.warn(
-        'Paystack secret key not found, using mock recipient creation',
-      );
-      return {
-        recipientCode: `RCP_${Math.random().toString(36).substring(2, 11)}`,
-        name: input.name,
-        accountNumber: input.account_number,
-        bankCode: input.bank_code,
-        currency,
-        type: input.type,
-        provider: 'paystack',
-        rawResponse: { mock: true },
-      };
-
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      return mockRecipient;
+  ): Promise<CreatedRecipient> {
+    const credential = credentialManager.getActiveCredential();
+    if (!credential) {
+      throw new PayoutProviderError({
+        message: 'Paystack credentials are not configured',
+        code: 'AUTHENTICATION_ERROR',
+        statusCode: 401,
+        retryable: false,
+      });
     }
-
-    return await executeWithTimeoutBudget(
-      'recipient',
-      async (signal, phaseNotifier) => {
-        const response = await axios.post(
-          'https://api.paystack.co/transferrecipient',
-          input,
-          {
-            headers: paystackHeaders(cred.secretKey),
-            signal,
-          },
-        );
-
-        phaseNotifier?.markConnected();
-
-        if (response.data?.status && response.data?.data) {
-          return response.data.data;
-        }
-
-        throw new Error(response.data?.message || 'Failed to create recipient');
+    const response = await axios.post(
+      'https://api.paystack.co/transferrecipient',
+      {
+        type: input.type,
+        name: input.name,
+        account_number: input.account_number,
+        bank_code: input.bank_code,
+        currency: input.currency,
       },
+      { headers: headers(credential.secretKey) },
     );
+    const data = response.data?.data;
+    if (!response.data?.status || !data?.recipient_code) {
+      throw new PayoutProviderError({
+        message: 'Could not create transfer recipient',
+        code: 'INVALID_REQUEST',
+        retryable: false,
+      });
+    }
+    return {
+      recipientCode: String(data.recipient_code),
+      name: input.name,
+      accountNumber: input.account_number,
+      bankCode: input.bank_code,
+      currency: input.currency,
+      type: input.type,
+      provider: 'paystack',
+      rawResponse: response.data,
+    };
   },
 
   async initiateTransfer(
     input: InitiateTransferInput,
-  ): Promise<InitiateTransferResult> {
-    const cred = credentialManager.getActiveCredential();
-    const credentialVersion = cred?.version || input.credentialVersion || 'v1';
-
-    if (!cred || !cred.secretKey) {
-      console.warn(
-        'Paystack secret key not found, using mock transfer initiation',
-      );
-      const mockResult: InitiatedTransfer = {
-        reference,
-        status: 'pending',
-        providerReference: `PROV_${reference}`,
-        transferCode: `TRF_${Math.random().toString(36).substring(2, 9)}`,
-        amountMinor,
-        currency,
-        recipientCode: input.recipient,
-        rawResponse: { mock: true },
-      };
-      adapterIdempotencyCache.set(reference, mockResult);
-      return mockResult;
+  ): Promise<InitiatedTransfer> {
+    const credential = credentialManager.getActiveCredential();
+    if (!credential) {
+      throw new PayoutProviderError({
+        message: 'Paystack credentials are not configured',
+        code: 'AUTHENTICATION_ERROR',
+        statusCode: 401,
+        retryable: false,
+      });
     }
-
-    return executeWithRetry(async () => {
-      const transferData = {
+    const amountMinor =
+      typeof input.amount === 'string'
+        ? BigInt(Math.round(Number(input.amount) * 100))
+        : BigInt(Math.round(input.amount * 100));
+    const response = await axios.post(
+      'https://api.paystack.co/transfer',
+      {
         source: input.source,
-        amount: Number(amountMinor), // Paystack requires amount in kobo/minor units as number
+        reason: input.reason,
+        amount: Number(amountMinor),
         recipient: input.recipient,
-        status: 'pending',
-        transfer_code: `TRF_${Math.random().toString(36).substr(2, 9)}`,
-        id: Math.floor(Math.random() * 1000000),
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        credentialVersion,
-      };
-
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      return mockTransfer;
-    }
-
-    const transferData = {
-      source: input.source,
-      amount: toKobo(input.amount),
-      recipient: input.recipient,
-      reason: input.reason || 'Crypto withdrawal',
-      reference: input.reference,
-    };
-
-    return await executeWithTimeoutBudget(
-      'initiate',
-      async (signal, phaseNotifier) => {
-        const response = await axios.post(
-          'https://api.paystack.co/transfer',
-          transferData,
-          {
-            headers: paystackHeaders(cred.secretKey),
-            signal,
-          },
-        );
-
-        phaseNotifier?.markConnected();
-
-        if (response.data?.status && response.data?.data) {
-          return {
-            ...response.data.data,
-            credentialVersion,
-          };
-        }
-
-        throw new Error(
-          response.data?.message || 'Failed to initiate transfer',
-        );
+        reference: input.reference,
       },
-      { reference: input.reference },
+      { headers: headers(credential.secretKey) },
     );
+    const data = response.data?.data;
+    if (!response.data?.status || !data) {
+      throw new PayoutProviderError({
+        message: 'Could not initiate transfer',
+        code: 'INVALID_REQUEST',
+        retryable: false,
+      });
+    }
+    return {
+      reference: String(data.reference || input.reference || ''),
+      status: normalizeStatus(data.status),
+      providerReference: data.transfer_code
+        ? String(data.transfer_code)
+        : undefined,
+      transferCode: data.transfer_code
+        ? String(data.transfer_code)
+        : undefined,
+      amountMinor,
+      currency: 'NGN',
+      recipientCode: input.recipient,
+      rawResponse: response.data,
+    };
   },
 
   async checkTransferStatus(
     input: TransferStatusInput,
-  ): Promise<TransferStatusResult> {
-    const { reference, credentialVersion } = input;
-    // Look up versioned credential for existing in-flight intent, or fallback to active
-    const cred = credentialManager.getCredential(credentialVersion);
-
-    if (!cred || !cred.secretKey) {
-      console.warn('Paystack secret key not found, using mock transfer status');
-
-      const mockStatus = {
-        status: true,
-        message: 'Transfer status retrieved (mock)',
-        data: {
-          reference,
-          status: 'pending',
-          credentialVersion: credentialVersion || 'v1',
-        },
-      };
-
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      return mockStatus;
-    }
-
-    return await executeWithTimeoutBudget(
-      'status',
-      async (signal, phaseNotifier) => {
-        const response = await axios.get(
-          `https://api.paystack.co/transfer/verify/${reference}`,
-          {
-            headers: paystackHeaders(cred.secretKey),
-            signal,
-          },
-        );
-
-        phaseNotifier?.markConnected();
-
-        if (response.data?.status && response.data?.data) {
-          return {
-            ...response.data.data,
-            credentialVersion: cred.version,
-          };
-        }
-
-        throw new Error(
-          response.data?.message || 'Failed to fetch transfer status',
-        );
-      },
-      { reference },
+  ): Promise<TransferStatus> {
+    const credential = credentialManager.getCredential(
+      input.credentialVersion,
     );
+    if (!credential) {
+      throw new PayoutProviderError({
+        message: 'Paystack credentials are not configured',
+        code: 'AUTHENTICATION_ERROR',
+        statusCode: 401,
+        retryable: false,
+      });
+    }
+    const response = await axios.get(
+      `https://api.paystack.co/transfer/reference/${encodeURIComponent(input.reference)}`,
+      { headers: headers(credential.secretKey) },
+    );
+    const data = response.data?.data;
+    if (!response.data?.status || !data) {
+      throw new PayoutProviderError({
+        message: 'Could not retrieve transfer status',
+        code: 'PROVIDER_UNAVAILABLE',
+        statusCode: response.status,
+        retryable: true,
+      });
+    }
+    return {
+      reference: String(data.reference || input.reference),
+      status: normalizeStatus(data.status),
+      providerReference: data.transfer_code
+        ? String(data.transfer_code)
+        : undefined,
+      transferCode: data.transfer_code
+        ? String(data.transfer_code)
+        : undefined,
+      amountMinor:
+        typeof data.amount === 'number'
+          ? BigInt(data.amount)
+          : undefined,
+      currency: 'NGN',
+      failureReason: data.fail_reason
+        ? String(data.fail_reason)
+        : undefined,
+      rawResponse: response.data,
+    };
   },
 
   async cancelTransfer(
     input: CancelTransferInput,
   ): Promise<CancelTransferResult> {
-    const { reference } = input;
-
-    if (!PAYSTACK_SECRET_KEY) {
-      console.warn('Paystack secret key not found, using mock transfer cancellation');
-      await new Promise((resolve) => setTimeout(resolve, 300));
-
+    const credential = credentialManager.getActiveCredential();
+    if (!credential) {
+      throw new PayoutProviderError({
+        message: 'Paystack credentials are not configured',
+        code: 'AUTHENTICATION_ERROR',
+        statusCode: 401,
+        retryable: false,
+      });
+    }
+    const status = await this.checkTransferStatus({
+      reference: input.reference,
+    });
+    if (status.status === 'success') {
       return {
-        status: 'confirmed',
-        cancellable: true,
-        message: 'Transfer cancellation confirmed by provider (mock)',
-        providerReference: reference,
+        status: 'settled',
+        cancellable: false,
+        message: 'Transfer settled at provider',
+        providerReference: status.providerReference,
       };
     }
-
-    try {
-      // Check whether transfer is already settled before attempting cancellation
-      const statusData = await this.checkTransferStatus({ reference });
-      const currentStatus = String((statusData as { status?: string }).status || '').toLowerCase();
-
-      if (currentStatus === 'success') {
-        return {
-          status: 'settled',
-          cancellable: false,
-          message: 'Transfer has already settled at provider and cannot be cancelled',
-          providerReference: reference,
-        };
-      }
-
-      if (currentStatus === 'failed' || currentStatus === 'reversed') {
-        return {
-          status: 'rejected',
-          cancellable: false,
-          message: `Transfer is already in final state: ${currentStatus}`,
-          providerReference: reference,
-        };
-      }
-
-      // If pending, request cancellation from Paystack (e.g. disable OTP / reverse pending transfer)
-      return {
-        status: 'confirmed',
-        cancellable: true,
-        message: 'Transfer cancellation confirmed by provider',
-        providerReference: reference,
-      };
-    } catch (error) {
-      console.error('Error contacting provider during cancellation:', error);
-      throw error;
-    }
+    return {
+      status: 'rejected',
+      cancellable: false,
+      message: 'Cancellation is not supported by this Paystack adapter',
+      providerReference: status.providerReference,
+    };
   },
 };

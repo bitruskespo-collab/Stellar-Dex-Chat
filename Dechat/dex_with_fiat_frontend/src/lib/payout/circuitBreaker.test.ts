@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   CircuitBreaker,
   CircuitBreakerTransition,
+  getProviderCircuitBreaker,
   isProviderOutage,
   ProviderOutageError,
+  resetCircuitBreakers,
 } from './circuitBreaker';
 
 vi.mock('server-only', () => ({}));
@@ -297,5 +299,62 @@ describe('CircuitBreaker with deterministic clock', () => {
     const result = await probePromise;
     expect(result).toBe('ok');
     expect(cb.getState()).toBe('CLOSED');
+  });
+});
+
+describe('provider operation isolation', () => {
+  it('opens only the failed provider operation', async () => {
+    resetCircuitBreakers();
+    const statusBreaker = getProviderCircuitBreaker(
+      'paystack-isolated',
+      'status_query',
+      { failureThreshold: 1, cooldownMs: 10_000 },
+    );
+    const verificationBreaker = getProviderCircuitBreaker(
+      'paystack-isolated',
+      'account_verification',
+      { failureThreshold: 1, cooldownMs: 10_000 },
+    );
+
+    await expect(
+      statusBreaker.execute(async () => {
+        throw { code: 'ETIMEDOUT' };
+      }),
+    ).rejects.toBeDefined();
+
+    expect(statusBreaker.getState()).toBe('OPEN');
+    expect(verificationBreaker.getState()).toBe('CLOSED');
+    await expect(
+      verificationBreaker.execute(async () => 'verified'),
+    ).resolves.toBe('verified');
+  });
+
+  it('isolates the same provider across initiation and polling', async () => {
+    resetCircuitBreakers();
+    const initiation = getProviderCircuitBreaker(
+      'paystack-isolated',
+      'transfer_initiation',
+    );
+    const polling = getProviderCircuitBreaker(
+      'paystack-isolated',
+      'status_query',
+    );
+
+    expect(initiation).not.toBe(polling);
+    expect(initiation.getMetrics().operation).toBe('transfer_initiation');
+    expect(polling.getMetrics().operation).toBe('status_query');
+  });
+
+  it('returns the same breaker for repeated calls in one operation', () => {
+    resetCircuitBreakers();
+    const first = getProviderCircuitBreaker(
+      'paystack-isolated',
+      'recipient_creation',
+    );
+    const second = getProviderCircuitBreaker(
+      'paystack-isolated',
+      'recipient_creation',
+    );
+    expect(first).toBe(second);
   });
 });

@@ -5,6 +5,7 @@ import {
   setTransferStatus,
   type TransferStatusRecord,
 } from '@/lib/transferStore';
+import { getProviderCircuitBreaker } from './circuitBreaker';
 
 /**
  * Saga outcomes modeled for payout cancellation.
@@ -158,9 +159,15 @@ export async function retryCompensationWork(
 
   try {
     const provider = getPayoutProvider();
-    const providerStatus = await provider.checkTransferStatus({
-      reference: work.payoutReference,
-    });
+    const statusBreaker = getProviderCircuitBreaker(
+      provider.name,
+      'status_query',
+    );
+    const providerStatus = await statusBreaker.execute(() =>
+      provider.checkTransferStatus({
+        reference: work.payoutReference,
+      }),
+    );
     const statusStr = String(
       (providerStatus as { status?: string }).status || '',
     ).toLowerCase();
@@ -380,6 +387,10 @@ export async function executeCancellationSaga(options: {
   const provider = getPayoutProvider();
 
   try {
+    const cancellationBreaker = getProviderCircuitBreaker(
+      provider.name,
+      'transfer_cancellation',
+    );
     let cancelResult: {
       status: string;
       cancellable?: boolean;
@@ -387,9 +398,17 @@ export async function executeCancellationSaga(options: {
     };
 
     if (typeof provider.cancelTransfer === 'function') {
-      cancelResult = await provider.cancelTransfer({ reference, reason });
+      cancelResult = await cancellationBreaker.execute(() =>
+        provider.cancelTransfer!({ reference, reason }),
+      );
     } else {
-      const statusRes = await provider.checkTransferStatus({ reference });
+      const statusBreaker = getProviderCircuitBreaker(
+        provider.name,
+        'status_query',
+      );
+      const statusRes = await statusBreaker.execute(() =>
+        provider.checkTransferStatus({ reference }),
+      );
       const statusStr = String(
         (statusRes as { status?: string }).status || '',
       ).toLowerCase();

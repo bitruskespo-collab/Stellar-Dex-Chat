@@ -1,9 +1,16 @@
 import { telemetry } from '@/lib/telemetry';
 
 export type CircuitBreakerState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
+export type PayoutProviderOperation =
+  | 'account_verification'
+  | 'recipient_creation'
+  | 'transfer_initiation'
+  | 'status_query'
+  | 'transfer_cancellation';
 
 export interface CircuitBreakerTransition {
   provider: string;
+  operation: PayoutProviderOperation;
   from: CircuitBreakerState;
   to: CircuitBreakerState;
   timestamp: number;
@@ -14,6 +21,7 @@ export interface CircuitBreakerTransition {
 
 export interface CircuitBreakerMetrics {
   state: CircuitBreakerState;
+  operation: PayoutProviderOperation;
   failureCount: number;
   totalRequests: number;
   totalFailures: number;
@@ -26,6 +34,7 @@ export interface CircuitBreakerMetrics {
 
 export interface CircuitBreakerConfig {
   provider?: string;
+  operation?: PayoutProviderOperation;
   failureThreshold?: number; // consecutive failures or threshold before opening
   cooldownMs?: number; // cooldown period before entering half-open
   halfOpenSuccessThreshold?: number; // successful probes needed to close
@@ -199,6 +208,7 @@ export function handlePayoutApiError(
 
 export class CircuitBreaker {
   private readonly provider: string;
+  private readonly operation: PayoutProviderOperation;
   private readonly failureThreshold: number;
   private readonly cooldownMs: number;
   private readonly halfOpenSuccessThreshold: number;
@@ -221,6 +231,7 @@ export class CircuitBreaker {
 
   constructor(config: CircuitBreakerConfig = {}) {
     this.provider = config.provider || 'default';
+    this.operation = config.operation || 'status_query';
     this.failureThreshold = config.failureThreshold ?? 5;
     this.cooldownMs = config.cooldownMs ?? 30_000;
     this.halfOpenSuccessThreshold = config.halfOpenSuccessThreshold ?? 1;
@@ -272,6 +283,7 @@ export class CircuitBreaker {
 
     const transition: CircuitBreakerTransition = {
       provider: this.provider,
+      operation: this.operation,
       from,
       to: newState,
       timestamp: now,
@@ -301,7 +313,7 @@ export class CircuitBreaker {
     if (this.state === 'OPEN') {
       const remainingSeconds = Math.ceil((this.openUntil - now) / 1000);
       throw new ProviderOutageError(
-        `Payout provider '${this.provider}' is currently experiencing an outage. Please try again in ${remainingSeconds}s.`,
+        `Payout provider '${this.provider}' ${this.operation} operation is currently experiencing an outage. Please try again in ${remainingSeconds}s.`,
         'OPEN',
         remainingSeconds,
       );
@@ -383,6 +395,7 @@ export class CircuitBreaker {
 
     return {
       state: this.state,
+      operation: this.operation,
       failureCount: this.failureCount,
       totalRequests: this.totalRequests,
       totalFailures: this.totalFailures,
@@ -408,21 +421,46 @@ export class CircuitBreaker {
   }
 }
 
-// Global registry of circuit breakers by provider name
+// Global registry of circuit breakers by provider and operation.
 const circuitBreakers = new Map<string, CircuitBreaker>();
 
 export function getProviderCircuitBreaker(
   provider: string = 'paystack',
-  config?: Partial<CircuitBreakerConfig>,
+  operationOrConfig:
+    | PayoutProviderOperation
+    | Partial<CircuitBreakerConfig> = 'status_query',
+  additionalConfig?: Partial<CircuitBreakerConfig>,
 ): CircuitBreaker {
-  let cb = circuitBreakers.get(provider);
+  const operation =
+    typeof operationOrConfig === 'string'
+      ? operationOrConfig
+      : (operationOrConfig.operation || 'status_query');
+  const config =
+    typeof operationOrConfig === 'string'
+      ? additionalConfig
+      : operationOrConfig;
+  const key = `${provider}:${operation}`;
+  let cb = circuitBreakers.get(key);
   if (!cb) {
-    cb = new CircuitBreaker({ provider, ...config });
-    circuitBreakers.set(provider, cb);
+    cb = new CircuitBreaker({ ...config, provider, operation });
+    circuitBreakers.set(key, cb);
   }
   return cb;
 }
 
 export function resetCircuitBreakers(): void {
   circuitBreakers.clear();
+}
+
+export function getProviderCircuitBreakerHealth(): Array<
+  CircuitBreakerMetrics & { provider: string }
+> {
+  return Array.from(circuitBreakers.entries()).map(([key, breaker]) => {
+    const separator = key.indexOf(':');
+    const provider = separator >= 0 ? key.slice(0, separator) : key;
+    return {
+      provider,
+      ...breaker.getMetrics(),
+    };
+  });
 }
