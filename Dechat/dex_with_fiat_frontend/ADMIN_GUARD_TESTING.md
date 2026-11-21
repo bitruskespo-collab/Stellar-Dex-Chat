@@ -89,6 +89,9 @@ Review triggers (a new revision is required when any of these occur):
 - **Authority:** payout is initiated by the API (B3) and settled via Soroban
   (B5) / payout provider (B6).
 - **Control:** admin authorization plus on-chain settlement as source of truth.
+  High-risk manual payout actions (retry, release, override) additionally
+  require **dual control**: an independent reviewer must approve the action
+  before it executes (see "Dual control for high-risk payout actions").
 
 ## Abuse-case register
 
@@ -100,6 +103,7 @@ Review triggers (a new revision is required when any of these occur):
 | AC4 | Prompt/tool data leakage to model provider | Medium | Medium | Server-side tool routing; minimal prompt data | API | Medium |
 | AC5 | Signature replay on signing flow | High | Low | Signature verification on API before state change | Contract | Low |
 | AC6 | Payout provider compromise | High | Low | On-chain settlement (Soroban) as source of truth | Contract | Medium |
+| AC7 | Single-actor abuse of high-risk manual payout action (retry/release/override) | High | Low | Dual control: independent reviewer approval; self-approval blocked; requester/approver/reason/before-after persisted | API | Low |
 
 ## Mitigation links
 
@@ -109,12 +113,86 @@ Review triggers (a new revision is required when any of these occur):
 - AC4 → server-side tool routing (tracked follow-up: document provider data handling)
 - AC5 → API signature verification (tracked follow-up: add replay-protection test)
 - AC6 → Soroban settlement (tracked follow-up: contract upgrade review checklist)
+- AC7 → dual-control approval flow (see "Dual control for high-risk payout actions")
 
 ## Validation
 
 Reviewed with contract, frontend, and API owners. Every high-risk flow (AC1,
-AC3, AC5, AC6) has an explicit control or a tracked follow-up gap recorded
+AC3, AC5, AC6, AC7) has an explicit control or a tracked follow-up gap recorded
 above.
+
+---
+
+# Dual control for high-risk payout actions
+
+High-risk manual payout actions — **retry**, **release**, and **override** —
+require independent reviewer approval before they execute (issue #229). This
+section documents the contract, API, and UI conventions for that flow.
+
+## Which actions require dual control
+
+Dual control is required for the configured high-risk actions:
+
+| Action    | Description                                              |
+| --------- | -------------------------------------------------------- |
+| `retry`   | Re-attempt a failed or stuck payout                       |
+| `release` | Release held funds to the recipient                       |
+| `override`| Override a payout state or amount decision                |
+
+Low-risk actions (e.g. read-only inspection) do not require approval.
+
+## Approval record
+
+Every dual-control action persists an approval record with:
+
+- **requester** — the admin who initiated the action.
+- **approver** — the independent admin who approved it.
+- **reason** — the written justification supplied by the requester.
+- **before state** — the payout state prior to the action.
+- **after state** — the intended payout state once approved and executed.
+- **timestamps** — requested-at and approved-at.
+
+The record is written atomically with the state transition so the audit trail
+cannot diverge from the applied change.
+
+## Self-approval prevention
+
+The requester **cannot** approve their own action. The API rejects an approval
+where `approver == requester` with `403` and applies no state change. The UI
+hides the approve control for the requester, but hiding the control is **not**
+the security boundary — the server enforces the check on every request.
+
+## Flow
+
+1. Requester submits the action with a reason; the action enters `pending`
+   with the before state captured.
+2. An independent reviewer (not the requester) approves or rejects.
+3. On approval, the action executes and the after state is recorded.
+4. On rejection, the payout state is unchanged and the rejection is audited.
+
+## Failure & boundary cases
+
+- **Self-approval** → `403`, no state change.
+- **Unauthorized approver** (not an admin) → `403`, no state change.
+- **Missing reason** → `400`, no state change.
+- **Already-approved / already-executed action** → `409`, no duplicate
+  execution.
+- **Stale before state** (payout changed since request) → rejected; the
+  requester must re-submit against the current state.
+
+## Prohibited
+
+- Do **not** allow a single admin to both request and approve a high-risk
+  action.
+- Do **not** execute a high-risk action without a persisted approval record.
+- Do **not** rely on hidden UI controls as the security boundary.
+
+## Validation
+
+Focused regression tests cover the normal path (request → independent
+approval → execution) and the failure/authorization edge cases above
+(self-approval, unauthorized approver, missing reason, duplicate execution,
+stale state).
 
 ---
 
