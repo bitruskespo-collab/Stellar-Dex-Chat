@@ -1,0 +1,355 @@
+name: Preview Environment — Deploy
+
+# ── Overview ──────────────────────────────────────────────────────────────────
+#
+# Provisions an isolated, ephemeral frontend preview for every pull request that
+# touches frontend sources or is labelled `preview`.  The environment is seeded
+# exclusively with synthetic, non-production data (no real user data, no
+# production credentials) so reviewers can inspect high-risk UI changes safely.
+#
+# Trigger matrix
+# ──────────────
+#   • PR opened / reopened / synchronised against main — when frontend paths change
+#   • `preview` label added to any PR
+#
+# What it does
+# ────────────
+#   1. Builds the Next.js app with synthetic env vars and the testnet RPC only.
+#   2. Deploys to Vercel as an isolated preview (never touches the production project).
+#   3. Posts (or updates) a single bot comment on the PR with the preview URL,
+#      the deployed git revision, build timestamp, and an expiry notice.
+#   4. Creates a GitHub Deployment record so the URL is visible in the PR
+#      Deployments panel.
+#   5. Labels the PR with `preview-deployed` once the URL is live.
+#
+# Safety properties
+# ─────────────────
+#   • All env vars are non-production placeholders or testnet endpoints.
+#     Real payment keys (PAYSTACK_SECRET_KEY) are replaced with a synthetic stub.
+#   • The CAPABILITY_WITHDRAWALS_ENABLED flag is forced OFF so the withdrawal
+#     flow cannot be exercised in preview — the financial path only runs in
+#     environments with real credentials and human sign-off.
+#   • The Vercel preview is deployed under a separate team/project scope
+#     (VERCEL_PROJECT_ID_PREVIEW) that has no access to production secrets.
+#   • Secrets are never written to the step summary or PR comment body.
+#
+# Required repository secrets (all scoped to the preview project, not prod)
+# ─────────────────────────────────────────────────────────────────────────
+#   VERCEL_TOKEN             — Vercel personal access token
+#   VERCEL_ORG_ID            — Vercel team/org ID
+#   VERCEL_PROJECT_ID_PREVIEW — Vercel project ID for preview deployments
+#                               (separate from the production project)
+#
+# Optional repository secrets (safe to omit; fallbacks are used)
+# ──────────────────────────────────────────────────────────────
+#   PREVIEW_STELLAR_RPC_URL  — Override RPC endpoint for preview (default: testnet)
+#   PREVIEW_CONTRACT_ID      — Synthetic contract address for preview (default: fixture value)
+#   PREVIEW_XLM_SAC_ID       — Synthetic SAC address for preview (default: fixture value)
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize, labeled]
+    paths:
+      - "Dechat/dex_with_fiat_frontend/**"
+      - ".github/workflows/preview-deploy.yml"
+
+# Serialise per-PR deployments so a rapid-fire push doesn't stack duplicate
+# environments.  Cancelling in-progress is safe because the previous deploy
+# would be superseded by the new commit anyway.
+concurrency:
+  group: preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  deployments: write
+
+env:
+  PNPM_VERSION: "8.15.9"
+  NODE_VERSION: "24"
+  # Preview expiry: environments are torn down automatically after this many days.
+  PREVIEW_TTL_DAYS: "3"
+  # Synthetic testnet values — none of these are real credentials.
+  PREVIEW_STELLAR_RPC_URL_DEFAULT: "https://soroban-testnet.stellar.org"
+  PREVIEW_CONTRACT_ID_DEFAULT: "CAWYXBN4PSVXD7NIYEWVFFIIIEUCC6PUN3IMG3J2WHKDB4NVIISMXBPR"
+  PREVIEW_XLM_SAC_ID_DEFAULT: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+
+jobs:
+  deploy-preview:
+    name: Deploy preview (PR #${{ github.event.pull_request.number }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      deployments: write
+
+    defaults:
+      run:
+        working-directory: Dechat/dex_with_fiat_frontend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # ── Validate required secrets ──────────────────────────────────────────
+      # Fail fast with a clear message rather than a cryptic Vercel CLI error.
+      - name: Validate required secrets are configured
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID_PREVIEW: ${{ secrets.VERCEL_PROJECT_ID_PREVIEW }}
+        run: |
+          set -euo pipefail
+          MISSING=""
+          [ -z "${VERCEL_TOKEN:-}"              ] && MISSING="${MISSING} VERCEL_TOKEN"
+          [ -z "${VERCEL_ORG_ID:-}"             ] && MISSING="${MISSING} VERCEL_ORG_ID"
+          [ -z "${VERCEL_PROJECT_ID_PREVIEW:-}" ] && MISSING="${MISSING} VERCEL_PROJECT_ID_PREVIEW"
+          if [ -n "$MISSING" ]; then
+            echo "::error::Missing required repository secrets:${MISSING}"
+            echo "::error::See docs/preview-environments.md for setup instructions."
+            exit 1
+          fi
+          echo "Required secrets present."
+
+      # ── pnpm / Node setup ──────────────────────────────────────────────────
+      - name: Set up pnpm
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node.js
+        id: setup-node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "pnpm"
+          cache-dependency-path: Dechat/dex_with_fiat_frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # ── Build with synthetic / non-production env vars ─────────────────────
+      # PAYSTACK_SECRET_KEY is a synthetic stub — not a real key.
+      # CAPABILITY_WITHDRAWALS_ENABLED=false disables the financial path so
+      # preview reviewers cannot inadvertently trigger real payment flows.
+      - name: Build with synthetic preview configuration
+        run: pnpm build
+        env:
+          NEXT_PUBLIC_STELLAR_RPC_URL: ${{ secrets.PREVIEW_STELLAR_RPC_URL || env.PREVIEW_STELLAR_RPC_URL_DEFAULT }}
+          NEXT_PUBLIC_STELLAR_CONTRACT_ID: ${{ secrets.PREVIEW_CONTRACT_ID || env.PREVIEW_CONTRACT_ID_DEFAULT }}
+          NEXT_PUBLIC_XLM_SAC_ID: ${{ secrets.PREVIEW_XLM_SAC_ID || env.PREVIEW_XLM_SAC_ID_DEFAULT }}
+          NEXT_PUBLIC_STELLAR_NETWORK: "TESTNET"
+          GEMINI_API_KEY: "PREVIEW_PLACEHOLDER"
+          PAYSTACK_SECRET_KEY: "PREVIEW_PLACEHOLDER_NOT_A_REAL_KEY"
+          PAYOUT_PROVIDER: "paystack"
+          # Force financial capability OFF for all preview environments.
+          CAPABILITY_WITHDRAWALS_ENABLED: "false"
+          CAPABILITY_PAYOUTS_API_ENABLED: "false"
+          CAPABILITY_ENV: "preview"
+          NODE_OPTIONS: "--max-old-space-size=4096"
+
+      # ── Install Vercel CLI ─────────────────────────────────────────────────
+      - name: Install Vercel CLI
+        run: pnpm add --global vercel@latest
+
+      # ── Create GitHub Deployment (pending) ────────────────────────────────
+      - name: Create GitHub Deployment record (pending)
+        id: gh-deployment
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { data } = await github.rest.repos.createDeployment({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              ref:   context.payload.pull_request.head.sha,
+              environment: `preview-pr-${ context.payload.pull_request.number }`,
+              description: `Preview for PR #${ context.payload.pull_request.number }`,
+              required_contexts: [],
+              auto_merge: false,
+              transient_environment: true,
+              production_environment: false,
+            });
+            core.setOutput('deployment_id', data.id.toString());
+            await github.rest.repos.createDeploymentStatus({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              deployment_id: data.id,
+              state: 'in_progress',
+              description: 'Building and deploying preview…',
+            });
+
+      # ── Deploy to Vercel preview project ──────────────────────────────────
+      - name: Deploy to Vercel (preview scope)
+        id: vercel-deploy
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID_PREVIEW }}
+        run: |
+          set -euo pipefail
+          # Pull Vercel project config (creates .vercel/project.json).
+          vercel pull --yes --environment=preview --token="$VERCEL_TOKEN"
+
+          # Deploy the pre-built .next output; --prebuilt skips a second build.
+          PREVIEW_URL=$(vercel deploy --prebuilt --token="$VERCEL_TOKEN" 2>&1 | tail -1)
+
+          # Validate the URL looks reasonable before writing outputs.
+          if ! echo "$PREVIEW_URL" | grep -qE '^https://'; then
+            echo "::error::Vercel deploy did not return a valid HTTPS URL: $PREVIEW_URL"
+            exit 1
+          fi
+
+          echo "preview_url=${PREVIEW_URL}" >> "$GITHUB_OUTPUT"
+          echo "deployed_sha=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+          echo "deployed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      # ── Update GitHub Deployment to success ───────────────────────────────
+      - name: Update GitHub Deployment status (success)
+        if: success()
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            await github.rest.repos.createDeploymentStatus({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              deployment_id: parseInt('${{ steps.gh-deployment.outputs.deployment_id }}'),
+              state: 'success',
+              environment_url: '${{ steps.vercel-deploy.outputs.preview_url }}',
+              description: 'Preview deployed successfully.',
+              log_url: `${ context.serverUrl }/${ context.repo.owner }/${ context.repo.repo }/actions/runs/${ context.runId }`,
+            });
+
+      # ── Post / update PR comment ──────────────────────────────────────────
+      # Find an existing bot comment and update it, or create a new one.
+      # This avoids accumulating a comment thread on rapid pushes.
+      - name: Post or update PR comment with preview URL
+        if: success()
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PREVIEW_URL: ${{ steps.vercel-deploy.outputs.preview_url }}
+          DEPLOYED_SHA: ${{ steps.vercel-deploy.outputs.deployed_sha }}
+          DEPLOYED_AT: ${{ steps.vercel-deploy.outputs.deployed_at }}
+        with:
+          script: |
+            const previewUrl  = process.env.PREVIEW_URL;
+            const deployedSha = process.env.DEPLOYED_SHA;
+            const deployedAt  = process.env.DEPLOYED_AT;
+            const ttlDays     = '${{ env.PREVIEW_TTL_DAYS }}';
+            const prNumber    = context.payload.pull_request.number;
+            const marker      = '<!-- preview-env-bot -->';
+
+            const body = [
+              marker,
+              '## 🔍 Preview environment',
+              '',
+              `**URL:** ${previewUrl}`,
+              '',
+              '| Field | Value |',
+              '| ----- | ----- |',
+              `| Revision | \`${deployedSha.slice(0, 8)}\` |`,
+              `| Deployed at | ${deployedAt} |`,
+              `| Expires | ${ttlDays} days after last push (auto-torn-down on PR close) |`,
+              `| Network | Stellar testnet (non-production) |`,
+              `| Financial flows | Disabled — \`CAPABILITY_WITHDRAWALS_ENABLED=false\` |`,
+              '',
+              '> **Note:** This environment uses synthetic data and non-production credentials.',
+              '> No real payments, withdrawals, or on-chain transactions are possible.',
+              '> The environment is automatically removed when the PR is closed or merged.',
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: prNumber,
+            });
+
+            const existing = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+              core.notice(`Updated existing preview comment #${existing.id}`);
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                issue_number: prNumber,
+                body,
+              });
+              core.notice('Created new preview comment');
+            }
+
+      # ── Label the PR ──────────────────────────────────────────────────────
+      - name: Label PR as preview-deployed
+        if: success()
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const prNumber = context.payload.pull_request.number;
+
+            // Ensure the label exists in the repo.
+            try {
+              await github.rest.issues.getLabel({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                name:  'preview-deployed',
+              });
+            } catch {
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                name:  'preview-deployed',
+                color: '0075ca',
+                description: 'A live preview environment is deployed for this PR',
+              });
+            }
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: prNumber,
+              labels: ['preview-deployed'],
+            });
+
+      # ── Write step summary ────────────────────────────────────────────────
+      - name: Write job summary
+        if: always()
+        env:
+          PREVIEW_URL: ${{ steps.vercel-deploy.outputs.preview_url || 'N/A — deploy failed' }}
+          DEPLOYED_SHA: ${{ steps.vercel-deploy.outputs.deployed_sha || 'N/A' }}
+          DEPLOYED_AT: ${{ steps.vercel-deploy.outputs.deployed_at || 'N/A' }}
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" << 'EOF'
+          ## Preview environment deploy
+
+          | Field | Value |
+          | ----- | ----- |
+          EOF
+          echo "| URL | $PREVIEW_URL |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Revision | \`$DEPLOYED_SHA\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Deployed at | $DEPLOYED_AT |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Network | Stellar testnet |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Withdrawals enabled | false |" >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Mark deployment failed if any step failed ──────────────────────────
+      - name: Update GitHub Deployment status (failure)
+        if: failure() && steps.gh-deployment.outputs.deployment_id != ''
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            await github.rest.repos.createDeploymentStatus({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              deployment_id: parseInt('${{ steps.gh-deployment.outputs.deployment_id }}'),
+              state: 'failure',
+              description: 'Preview deployment failed — see Actions log.',
+              log_url: `${ context.serverUrl }/${ context.repo.owner }/${ context.repo.repo }/actions/runs/${ context.runId }`,
+            });

@@ -62,3 +62,27 @@ policy was applied.
 - [ ] The CI drift check passes with no ABI diff.
 - [ ] Breaking changes are documented and versioned as described above.
 - [ ] Regeneration left unrelated files unchanged.
+
+## Preview environments
+
+Every pull request that touches `Dechat/dex_with_fiat_frontend/` automatically
+gets an ephemeral preview environment. The preview URL is posted as a PR
+comment once the deployment finishes.
+
+Key properties:
+
+- Runs against the **Stellar testnet** only — no mainnet interaction.
+- Financial flows (`CAPABILITY_WITHDRAWALS_ENABLED`, `CAPABILITY_PAYOUTS_API_ENABLED`)
+  are forced **off** at build time, so no real payment path can be exercised.
+- Uses synthetic fixture data from `fixtures/preview/preview-env.json` and
+  `fixtures/events/golden_events.json`. No real user data or credentials appear
+  in those files.
+- Deployed to an isolated Vercel project with no production secrets.
+- Torn down automatically when the PR closes/merges, or after 3 days without a
+  push (whichever comes first).
+
+Add the `preview` label to any PR to force a preview deployment regardless of
+which files changed.
+
+For setup instructions (required secrets, Vercel project creation) see
+[docs/preview-environments.md](docs/preview-environments.md).

@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "description": "Synthetic non-production configuration for ephemeral preview environments (issue #287). All values here are fabricated for review purposes only. No real credentials, real user data, real wallet addresses, or real payment keys appear in this file.",
+  "safety_properties": {
+    "CAPABILITY_WITHDRAWALS_ENABLED": false,
+    "CAPABILITY_PAYOUTS_API_ENABLED": false,
+    "CAPABILITY_ENV": "preview",
+    "note": "Financial flows are disabled in all preview environments. The withdrawal and payout paths require real credentials that are never present here."
+  },
+  "stellar": {
+    "network": "TESTNET",
+    "rpc_url": "https://soroban-testnet.stellar.org",
+    "contract_id": "CAWYXBN4PSVXD7NIYEWVFFIIIEUCC6PUN3IMG3J2WHKDB4NVIISMXBPR",
+    "xlm_sac_id": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+    "note": "Testnet contract addresses — identical to the existing golden_events.json fixtures. No mainnet addresses appear here."
+  },
+  "synthetic_accounts": [
+    {
+      "label": "preview-user-alice",
+      "public_key": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+      "note": "Testnet keypair used in existing golden_events fixtures. Not a real user account."
+    },
+    {
+      "label": "preview-operator",
+      "public_key": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      "note": "Testnet keypair used in existing golden_events fixtures. Not a real user account."
+    }
+  ],
+  "synthetic_transactions": [
+    {
+      "type": "deposit",
+      "amount_stroops": "1000000000",
+      "token": "CAWYXBN4PSVXD7NIYEWVFFIIIEUCC6PUN3IMG3J2WHKDB4NVIISMXBPR",
+      "from": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+      "receipt_id": "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd",
+      "ledger": 2000
+    },
+    {
+      "type": "withdrawal_requested",
+      "amount_stroops": "250000000",
+      "token": "CAWYXBN4PSVXD7NIYEWVFFIIIEUCC6PUN3IMG3J2WHKDB4NVIISMXBPR",
+      "to": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+      "request_id": 101,
+      "ledger": 2010
+    },
+    {
+      "type": "fee_accrued",
+      "amount_stroops": "5000000",
+      "token": "CAWYXBN4PSVXD7NIYEWVFFIIIEUCC6PUN3IMG3J2WHKDB4NVIISMXBPR",
+      "ledger": 2015
+    }
+  ],
+  "api_stubs": {
+    "gemini_api_key": "PREVIEW_PLACEHOLDER",
+    "paystack_secret_key": "PREVIEW_PLACEHOLDER_NOT_A_REAL_KEY",
+    "payout_provider": "paystack",
+    "note": "These are placeholder strings, not real API credentials. The payout provider stub returns a fixed success response in preview mode."
+  }
+}

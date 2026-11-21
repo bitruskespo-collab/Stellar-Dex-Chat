@@ -1,0 +1,427 @@
+name: Preview Environment — Teardown
+
+# ── Overview ──────────────────────────────────────────────────────────────────
+#
+# Removes ephemeral preview environments in two ways:
+#
+#   1. Event-driven teardown — fires when a PR is closed or merged.
+#      Immediately removes the Vercel deployment, marks the GitHub Deployment
+#      record as inactive, removes the `preview-deployed` label, and posts a
+#      closure notice on the PR.
+#
+#   2. Scheduled expiry sweep — runs daily and removes any preview deployment
+#      whose PR has been open (without a push) for longer than PREVIEW_TTL_DAYS.
+#      This guards against forgotten long-lived PRs that never get merged or
+#      closed but keep a preview environment running.
+#
+# Required repository secrets (same as preview-deploy.yml)
+# ─────────────────────────────────────────────────────────
+#   VERCEL_TOKEN             — Vercel personal access token
+#   VERCEL_ORG_ID            — Vercel team/org ID
+#   VERCEL_PROJECT_ID_PREVIEW — Vercel project ID for preview deployments
+
+on:
+  pull_request:
+    branches: [main]
+    types: [closed]
+
+  schedule:
+    # Daily at 02:00 UTC — sweep for expired previews.
+    - cron: "0 2 * * *"
+
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number whose preview should be torn down (leave blank for expiry sweep)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+  deployments: write
+
+env:
+  PREVIEW_TTL_DAYS: "3"
+
+jobs:
+  # ── Job 1: immediate teardown on PR close ─────────────────────────────────
+  teardown-on-close:
+    name: Teardown preview (PR #${{ github.event.pull_request.number }})
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      deployments: write
+
+    steps:
+      - name: Resolve PR number
+        id: pr
+        env:
+          INPUT_PR: ${{ inputs.pr_number }}
+          EVENT_PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          PR="${INPUT_PR:-${EVENT_PR:-}}"
+          if [ -z "$PR" ]; then
+            echo "::notice::No PR number provided; skipping event-driven teardown."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=${PR}" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate required secrets are configured
+        if: steps.pr.outputs.skip != 'true'
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID_PREVIEW: ${{ secrets.VERCEL_PROJECT_ID_PREVIEW }}
+        run: |
+          set -euo pipefail
+          MISSING=""
+          [ -z "${VERCEL_TOKEN:-}"              ] && MISSING="${MISSING} VERCEL_TOKEN"
+          [ -z "${VERCEL_ORG_ID:-}"             ] && MISSING="${MISSING} VERCEL_ORG_ID"
+          [ -z "${VERCEL_PROJECT_ID_PREVIEW:-}" ] && MISSING="${MISSING} VERCEL_PROJECT_ID_PREVIEW"
+          if [ -n "$MISSING" ]; then
+            echo "::error::Missing required repository secrets:${MISSING}"
+            exit 1
+          fi
+
+      # Remove all Vercel deployments whose meta.gitBranch matches this PR's
+      # head branch, scoping only to the preview project.
+      - name: Remove Vercel preview deployment(s)
+        if: steps.pr.outputs.skip != 'true'
+        id: vercel-remove
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID_PREVIEW: ${{ secrets.VERCEL_PROJECT_ID_PREVIEW }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref || '' }}
+        run: |
+          set -euo pipefail
+
+          # Install Vercel CLI.
+          npm install --global vercel@latest --silent
+
+          # List deployments for the preview project and filter by PR branch.
+          # The Vercel API returns a JSON array; we extract deployment URLs.
+          BRANCH="${HEAD_REF}"
+          if [ -z "$BRANCH" ]; then
+            # Fallback: derive branch name from PR number for dispatch triggers.
+            BRANCH="pr-${PR_NUMBER}"
+          fi
+
+          echo "Looking for Vercel deployments on branch: $BRANCH"
+
+          DEPLOYMENTS=$(curl -s \
+            -H "Authorization: Bearer $VERCEL_TOKEN" \
+            "https://api.vercel.com/v6/deployments?teamId=${VERCEL_ORG_ID}&projectId=${VERCEL_PROJECT_ID_PREVIEW}&limit=20" \
+            | jq -r --arg branch "$BRANCH" \
+              '.deployments[] | select(.meta.gitBranch == $branch) | .uid' 2>/dev/null || true)
+
+          if [ -z "$DEPLOYMENTS" ]; then
+            echo "No Vercel deployments found for branch ${BRANCH}; nothing to remove."
+            echo "removed_count=0" >> "$GITHUB_OUTPUT"
+          else
+            COUNT=0
+            while IFS= read -r UID; do
+              echo "Removing deployment: $UID"
+              curl -s -X DELETE \
+                -H "Authorization: Bearer $VERCEL_TOKEN" \
+                "https://api.vercel.com/v13/deployments/${UID}?teamId=${VERCEL_ORG_ID}" \
+                > /dev/null
+              COUNT=$((COUNT + 1))
+            done <<< "$DEPLOYMENTS"
+            echo "removed_count=${COUNT}" >> "$GITHUB_OUTPUT"
+            echo "Removed ${COUNT} deployment(s) for branch ${BRANCH}."
+          fi
+
+      # Mark GitHub Deployment records for this environment as inactive.
+      - name: Mark GitHub Deployment(s) as inactive
+        if: steps.pr.outputs.skip != 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const prNumber = '${{ steps.pr.outputs.number }}';
+            const envName  = `preview-pr-${prNumber}`;
+
+            const { data: deployments } = await github.rest.repos.listDeployments({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              environment: envName,
+              per_page: 10,
+            });
+
+            for (const dep of deployments) {
+              // Only update deployments that are not already inactive.
+              const { data: statuses } = await github.rest.repos.listDeploymentStatuses({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                deployment_id: dep.id,
+                per_page: 1,
+              });
+              if (statuses.length > 0 && statuses[0].state === 'inactive') continue;
+
+              await github.rest.repos.createDeploymentStatus({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                deployment_id: dep.id,
+                state: 'inactive',
+                description: 'Preview environment removed (PR closed).',
+              });
+              core.notice(`Marked deployment ${dep.id} as inactive`);
+            }
+
+      # Remove the `preview-deployed` label from the PR.
+      - name: Remove preview-deployed label
+        if: steps.pr.outputs.skip != 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const prNumber = parseInt('${{ steps.pr.outputs.number }}');
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                issue_number: prNumber,
+                name: 'preview-deployed',
+              });
+              core.notice('Removed preview-deployed label');
+            } catch (err) {
+              // 404 means the label was never added; not an error.
+              if (err.status !== 404) throw err;
+            }
+
+      # Post a closure notice on the PR (update the existing bot comment if present).
+      - name: Post teardown notice on PR
+        if: steps.pr.outputs.skip != 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const prNumber  = parseInt('${{ steps.pr.outputs.number }}');
+            const removedAt = new Date().toISOString();
+            const marker    = '<!-- preview-env-bot -->';
+
+            const body = [
+              marker,
+              '## 🔍 Preview environment',
+              '',
+              `**Status:** Removed — PR closed at ${removedAt}`,
+              '',
+              '> The ephemeral preview environment has been torn down.',
+              '> Re-open the PR or push a new commit to provision a fresh preview.',
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: prNumber,
+            });
+
+            const existing = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                issue_number: prNumber,
+                body,
+              });
+            }
+
+      - name: Write job summary
+        if: steps.pr.outputs.skip != 'true' && always()
+        env:
+          REMOVED_COUNT: ${{ steps.vercel-remove.outputs.removed_count || '0' }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          echo "## Preview teardown — PR #${PR_NUMBER}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Vercel deployments removed: **${REMOVED_COUNT}**" >> "$GITHUB_STEP_SUMMARY"
+          echo "GitHub Deployment records marked: inactive" >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Job 2: scheduled expiry sweep ─────────────────────────────────────────
+  expiry-sweep:
+    name: Expiry sweep — remove stale previews
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      deployments: write
+
+    steps:
+      - name: Validate required secrets are configured
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID_PREVIEW: ${{ secrets.VERCEL_PROJECT_ID_PREVIEW }}
+        run: |
+          set -euo pipefail
+          MISSING=""
+          [ -z "${VERCEL_TOKEN:-}"              ] && MISSING="${MISSING} VERCEL_TOKEN"
+          [ -z "${VERCEL_ORG_ID:-}"             ] && MISSING="${MISSING} VERCEL_ORG_ID"
+          [ -z "${VERCEL_PROJECT_ID_PREVIEW:-}" ] && MISSING="${MISSING} VERCEL_PROJECT_ID_PREVIEW"
+          if [ -n "$MISSING" ]; then
+            echo "::error::Missing required repository secrets:${MISSING}"
+            exit 1
+          fi
+
+      # Find all PRs with the `preview-deployed` label that have not received
+      # a push in the last PREVIEW_TTL_DAYS days and remove their previews.
+      - name: Identify and remove expired preview deployments
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID_PREVIEW: ${{ secrets.VERCEL_PROJECT_ID_PREVIEW }}
+          PREVIEW_TTL_DAYS: ${{ env.PREVIEW_TTL_DAYS }}
+        with:
+          script: |
+            const ttlMs = parseInt(process.env.PREVIEW_TTL_DAYS) * 24 * 60 * 60 * 1000;
+            const now   = Date.now();
+            const marker = '<!-- preview-env-bot -->';
+
+            // List open PRs with the preview-deployed label.
+            const { data: prs } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              state: 'open',
+              labels: 'preview-deployed',
+              per_page: 50,
+            });
+
+            core.notice(`Found ${prs.length} open PR(s) with preview-deployed label`);
+
+            let sweptCount = 0;
+
+            for (const issue of prs) {
+              // issues.listForRepo returns issue objects; map to PR number.
+              const prNumber = issue.number;
+
+              // Fetch full PR data to get the last-pushed timestamp.
+              const { data: pr } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                pull_number: prNumber,
+              });
+
+              const lastPush = new Date(pr.head.repo?.pushed_at || pr.updated_at).getTime();
+              const age      = now - lastPush;
+
+              if (age < ttlMs) {
+                core.notice(`PR #${prNumber}: last push ${Math.round(age / 86400000)}d ago — not expired`);
+                continue;
+              }
+
+              core.notice(`PR #${prNumber}: last push ${Math.round(age / 86400000)}d ago — EXPIRED, tearing down`);
+
+              // Remove Vercel deployments for this PR's branch.
+              const branch = pr.head.ref;
+              const vercelRes = await fetch(
+                `https://api.vercel.com/v6/deployments?teamId=${process.env.VERCEL_ORG_ID}&projectId=${process.env.VERCEL_PROJECT_ID_PREVIEW}&limit=20`,
+                { headers: { Authorization: `Bearer ${process.env.VERCEL_TOKEN}` } }
+              );
+              const vercelData = await vercelRes.json();
+              const toRemove = (vercelData.deployments || []).filter(
+                d => d.meta?.gitBranch === branch
+              );
+
+              for (const dep of toRemove) {
+                await fetch(
+                  `https://api.vercel.com/v13/deployments/${dep.uid}?teamId=${process.env.VERCEL_ORG_ID}`,
+                  { method: 'DELETE', headers: { Authorization: `Bearer ${process.env.VERCEL_TOKEN}` } }
+                );
+                core.notice(`  Removed Vercel deployment ${dep.uid}`);
+              }
+
+              // Mark GitHub Deployments as inactive.
+              const envName = `preview-pr-${prNumber}`;
+              const { data: ghDeps } = await github.rest.repos.listDeployments({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                environment: envName,
+                per_page: 10,
+              });
+              for (const dep of ghDeps) {
+                await github.rest.repos.createDeploymentStatus({
+                  owner: context.repo.owner,
+                  repo:  context.repo.repo,
+                  deployment_id: dep.id,
+                  state: 'inactive',
+                  description: `Preview expired after ${process.env.PREVIEW_TTL_DAYS} days without a push.`,
+                });
+              }
+
+              // Remove label.
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo:  context.repo.repo,
+                  issue_number: prNumber,
+                  name: 'preview-deployed',
+                });
+              } catch (e) { if (e.status !== 404) throw e; }
+
+              // Update PR comment.
+              const expiredAt = new Date().toISOString();
+              const body = [
+                marker,
+                '## 🔍 Preview environment',
+                '',
+                `**Status:** Expired — removed by scheduled sweep at ${expiredAt}`,
+                '',
+                `> The preview was inactive for more than ${process.env.PREVIEW_TTL_DAYS} days`,
+                '> and has been automatically torn down.',
+                '> Push a new commit to provision a fresh preview.',
+              ].join('\n');
+
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                issue_number: prNumber,
+              });
+              const existing = comments.find(c => c.user.type === 'Bot' && c.body.includes(marker));
+              if (existing) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo:  context.repo.repo,
+                  comment_id: existing.id,
+                  body,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo:  context.repo.repo,
+                  issue_number: prNumber,
+                  body,
+                });
+              }
+
+              sweptCount++;
+            }
+
+            core.notice(`Expiry sweep complete — removed ${sweptCount} expired preview(s)`);
+
+            // Write summary.
+            await core.summary
+              .addHeading('Preview expiry sweep')
+              .addTable([
+                [{ data: 'Metric', header: true }, { data: 'Value', header: true }],
+                ['PRs scanned', prs.length.toString()],
+                ['Previews expired and removed', sweptCount.toString()],
+                [`TTL (days)`, process.env.PREVIEW_TTL_DAYS],
+              ])
+              .write();
