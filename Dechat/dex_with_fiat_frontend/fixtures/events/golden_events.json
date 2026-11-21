@@ -236,6 +236,97 @@
       "data": {
         "id": 1
       }
+    },
+    {
+      "family": "PayoutReversedEvent",
+      "type": "payout_reversed",
+      "version": 1,
+      "topics": ["PayoutReversedEvent"],
+      "data": {
+        "version": 1,
+        "payout_id": "0101010101010101010101010101010101010101010101010101010101010101",
+        "receipt_id": "0101010101010101010101010101010101010101010101010101010101010101",
+        "token": "CAWYXBN4PSVXD7NIYEWVFFIIIEUCC6PUN3IMG3J2WHKDB4NVIISMXBPR",
+        "amount": "1000000000",
+        "reason": "provider_reversal",
+        "provider_ref": "synthetic-provider-ref-0001",
+        "previous_status": "settled",
+        "new_status": "reversed",
+        "by": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+        "ledger": 1200
+      }
+    },
+    {
+      "family": "PayoutDisputedEvent",
+      "type": "payout_disputed",
+      "version": 1,
+      "topics": ["PayoutDisputedEvent"],
+      "data": {
+        "version": 1,
+        "payout_id": "0101010101010101010101010101010101010101010101010101010101010101",
+        "receipt_id": "0101010101010101010101010101010101010101010101010101010101010101",
+        "token": "CAWYXBN4PSVXD7NIYEWVFFIIIEUCC6PUN3IMG3J2WHKDB4NVIISMXBPR",
+        "amount": "1000000000",
+        "reason": "chargeback",
+        "provider_ref": "synthetic-provider-ref-0002",
+        "previous_status": "settled",
+        "new_status": "disputed",
+        "by": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+        "ledger": 1210
+      }
+    },
+    {
+      "family": "PayoutDisputeResolvedEvent",
+      "type": "payout_dispute_resolved",
+      "version": 1,
+      "topics": ["PayoutDisputeResolvedEvent"],
+      "data": {
+        "version": 1,
+        "payout_id": "0101010101010101010101010101010101010101010101010101010101010101",
+        "receipt_id": "0101010101010101010101010101010101010101010101010101010101010101",
+        "token": "CAWYXBN4PSVXD7NIYEWVFFIIIEUCC6PUN3IMG3J2WHKDB4NVIISMXBPR",
+        "amount": "1000000000",
+        "resolution": "reversed",
+        "provider_ref": "synthetic-provider-ref-0002",
+        "previous_status": "disputed",
+        "new_status": "reversed",
+        "by": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+        "ledger": 1220
+      }
     }
-  ]
+  ],
+  "policyReplayFixtures": {
+    "version": 1,
+    "description": "Deterministic replay fixtures for policy decisions. Each fixture captures redacted inputs, schema versions, the expected policy decision, and tool outcomes so a reported classification can be reproduced without calling a live model. All identifiers are synthetic; no credentials or real user data are present.",
+    "schemaVersions": {
+      "fixture": 1,
+      "policyInput": 1,
+      "policyDecision": 1,
+      "toolOutcome": 1
+    },
+    "fixtures": [
+      {
+        "id": "policy-allow-low-risk",
+        "description": "Normal path: low-risk deposit within limits is allowed.",
+        "input": {
+          "schemaVersion": 1,
+          "action": "deposit",
+          "amount": "1000000000",
+          "token": "CAWYXBN4PSVXD7NIYEWVFFIIIEUCC6PUN3IMG3J2WHKDB4NVIISMXBPR",
+          "actor": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+          "riskSignals": {
+            "velocity": 1,
+            "sanctionsHit": false,
+            "jurisdiction": "XX"
+          }
+        },
+        "decision": {
+          "schemaVersion": 1,
+          "classification": "allow",
+          "reasonCode": "WITHIN_LIMITS",
+          "requiresReview": false
+        }
+      }
+    ]
+  }
 }
