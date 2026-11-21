@@ -2,6 +2,7 @@ import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { ChatMessage } from '@/types';
 import {
   DEFAULT_PAGE_SIZE,
+  MAX_VISIBLE_MESSAGES,
   getVisibleMessages,
   hasMoreMessages,
   getNextMessageCount,
@@ -14,9 +15,11 @@ import {
  */
 export const useChatPagination = (
   allMessages: ChatMessage[],
-  pageSize: number = DEFAULT_PAGE_SIZE
+  pageSize: number = DEFAULT_PAGE_SIZE,
+  maxVisible: number = MAX_VISIBLE_MESSAGES,
 ) => {
-  const [visibleCount, setVisibleCount] = useState(pageSize);
+  const initialVisible = Math.min(pageSize, maxVisible);
+  const [visibleCount, setVisibleCount] = useState(initialVisible);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -36,6 +39,7 @@ export const useChatPagination = (
   // `useChat`.
   const allMessagesRef = useRef(allMessages);
   const pageSizeRef = useRef(pageSize);
+  const maxVisibleRef = useRef(maxVisible);
 
   useEffect(() => {
     allMessagesRef.current = allMessages;
@@ -45,14 +49,21 @@ export const useChatPagination = (
     pageSizeRef.current = pageSize;
   }, [pageSize]);
 
+  useEffect(() => {
+    maxVisibleRef.current = maxVisible;
+  }, [maxVisible]);
+
   // Reset visible count when session changes (if we had a way to detect it)
   // Actually, useChat will manage messages per session, so we just react to allMessages length decreasing
   // (which happens on new chat or session switch)
   useEffect(() => {
-    if (allMessages.length <= pageSize) {
-      setVisibleCount(pageSize);
+    const bounded = Math.min(pageSize, maxVisible, Math.max(allMessages.length, 0) || pageSize);
+    if (allMessages.length <= bounded) {
+      setVisibleCount(Math.min(pageSize, maxVisible));
+    } else {
+      setVisibleCount((prev) => Math.min(prev, Math.min(maxVisible, allMessages.length)));
     }
-  }, [allMessages.length, pageSize]);
+  }, [allMessages.length, pageSize, maxVisible]);
 
   // Clear pending load-more timer on unmount to prevent state updates on an unmounted component.
   useEffect(() => {
@@ -69,8 +80,8 @@ export const useChatPagination = (
   }, [allMessages, visibleCount]);
 
   const hasMore = useMemo(() => {
-    return hasMoreMessages(allMessages, visibleCount);
-  }, [allMessages, visibleCount]);
+    return visibleCount < Math.min(allMessages.length, maxVisible);
+  }, [allMessages.length, visibleCount, maxVisible]);
 
   const loadMore = useCallback(() => {
     if (!hasMore || isLoadingMore) return;
@@ -80,7 +91,12 @@ export const useChatPagination = (
     timerRef.current = setTimeout(() => {
       timerRef.current = null;
       setVisibleCount((prev: number) =>
-        getNextMessageCount(allMessagesRef.current, prev, pageSizeRef.current),
+        getNextMessageCount(
+          allMessagesRef.current,
+          prev,
+          pageSizeRef.current,
+          maxVisibleRef.current,
+        ),
       );
       setIsLoadingMore(false);
     }, 400);

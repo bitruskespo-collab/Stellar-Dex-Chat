@@ -255,11 +255,13 @@ export default function AdminDashboard() {
   const exportAuditToCSV = async () => {
     try {
       setExportingCsv(true);
-      // Optimistic UI: show success state immediately
       setOptimisticExportSuccess(true);
       const allEntries: AdminAuditLogEntry[] = [];
+      const maxExportPages = 50; // bounded request count
+      const maxExportRows = 1000; // 50 pages * 20 rows
+      const pagesToFetch = Math.min(auditTotalPages, maxExportPages);
 
-      for (let page = 1; page <= auditTotalPages; page += 1) {
+      for (let page = 1; page <= pagesToFetch && allEntries.length < maxExportRows; page += 1) {
         const params = new URLSearchParams({
           page: String(page),
           action: actionFilter,
@@ -279,7 +281,9 @@ export default function AdminDashboard() {
         }
 
         const payload: AuditLogResponse = await response.json();
-        allEntries.push(...payload.entries);
+        const remaining = maxExportRows - allEntries.length;
+        allEntries.push(...payload.entries.slice(0, remaining));
+        if (payload.entries.length === 0) break;
       }
 
       const headers = [
@@ -313,7 +317,6 @@ export default function AdminDashboard() {
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
     } catch (error) {
-      // Rollback optimistic state on error
       setOptimisticExportSuccess(false);
       setAuditError(
         error instanceof Error
@@ -322,7 +325,6 @@ export default function AdminDashboard() {
       );
     } finally {
       setExportingCsv(false);
-      // Clear optimistic state after a short delay to show success
       if (optimisticExportSuccess) {
         setTimeout(() => setOptimisticExportSuccess(false), 2000);
       }

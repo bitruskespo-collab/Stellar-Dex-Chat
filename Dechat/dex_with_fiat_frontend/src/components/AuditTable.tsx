@@ -56,6 +56,8 @@ export default function AuditTable({}: AuditTableProps) {
   const [liveAnnouncement, setLiveAnnouncement] = useState('');
 
   const pageSize = 20;
+  const maxExportPages = 50;
+  const maxExportRows = pageSize * maxExportPages;
   const fetchAbortRef = useRef<AbortController | null>(null);
   // Guards the live region against announcing the empty initial state before
   // the first fetch has even started.
@@ -210,43 +212,42 @@ export default function AuditTable({}: AuditTableProps) {
       if (filters.txHash) params.append('txHash', filters.txHash);
       if (filters.startDate) params.append('startDate', filters.startDate);
       if (filters.endDate) params.append('endDate', filters.endDate);
-      params.append('limit', '10000');
-      params.append('offset', '0');
       params.append('sortKey', sortKey);
       params.append('sortOrder', sortOrder);
 
-      const response = await fetch(`/api/admin-audit?${params.toString()}`, {
-        credentials: 'include',
-      });
-      if (!response.ok) throw new Error(`Export failed: ${response.statusText}`);
-      const data = await response.json() as { entries: AuditEntry[]; total: number };
-
-      const CHUNK_SIZE = 500;
       const csvRows: string[] = [
         ['Timestamp', 'Admin Address', 'Action Type', 'Description', 'TX Hash', 'Status'].join(','),
       ];
+      let exportOffset = 0;
+      let exportTotal = Number.POSITIVE_INFINITY;
+      let exported = 0;
 
-      const processChunk = (start: number): Promise<void> =>
-        new Promise((resolve) => {
-          setTimeout(() => {
-            const end = Math.min(start + CHUNK_SIZE, data.entries.length);
-            for (let i = start; i < end; i++) {
-              const e = data.entries[i];
-              csvRows.push([
-                `"${formatTimestamp(new Date(e.timestamp))}"`,
-                `"${e.adminAddress}"`,
-                `"${getActionTypeDisplay(e.actionType)}"`,
-                `"${(e.actionDescription ?? '').replace(/"/g, '""')}"`,
-                `"${e.txHash ?? ''}"`,
-                `"${e.status}"`,
-              ].join(','));
-            }
-            resolve();
-          }, 0);
+      while (exportOffset < exportTotal && exported < maxExportRows && exportOffset / pageSize < maxExportPages) {
+        const pageParams = new URLSearchParams(params);
+        pageParams.set('limit', pageSize.toString());
+        pageParams.set('offset', exportOffset.toString());
+
+        const response = await fetch(`/api/admin-audit?${pageParams.toString()}`, {
+          credentials: 'include',
         });
+        if (!response.ok) throw new Error(`Export failed: ${response.statusText}`);
+        const data = await response.json() as { entries: AuditEntry[]; total: number };
+        exportTotal = data.total;
+        if (!data.entries.length) break;
 
-      for (let i = 0; i < data.entries.length; i += CHUNK_SIZE) {
-        await processChunk(i);
+        for (const e of data.entries) {
+          csvRows.push([
+            `"${formatTimestamp(new Date(e.timestamp))}"`,
+            `"${e.adminAddress}"`,
+            `"${getActionTypeDisplay(e.actionType)}"`,
+            `"${(e.actionDescription ?? '').replace(/"/g, '""')}"`,
+            `"${e.txHash ?? ''}"`,
+            `"${e.status}"`,
+          ].join(','));
+          exported += 1;
+          if (exported >= maxExportRows) break;
+        }
+        exportOffset += data.entries.length;
       }
 
       const dateLabel =

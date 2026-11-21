@@ -13,16 +13,19 @@ function dispatchSessionPaginationTelemetry(event: string, detail?: Record<strin
  * Generic list pagination hook following the same virtualisation pattern
  * used by `useChatPagination` but for arbitrary item lists (sessions).
  */
-export const useSessionPagination = <T,>(allItems: T[], pageSize: number = DEFAULT_PAGE_SIZE) => {
-  const [visibleCount, setVisibleCount] = useState(pageSize);
+export const useSessionPagination = <T,>(allItems: T[], pageSize: number = DEFAULT_PAGE_SIZE, maxVisible: number = 200) => {
+  const boundedInitial = Math.min(pageSize, maxVisible);
+  const [visibleCount, setVisibleCount] = useState(boundedInitial);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if (allItems.length <= pageSize) {
-      setVisibleCount(pageSize);
-    }
-  }, [allItems.length, pageSize]);
+    const cap = Math.min(maxVisible, allItems.length);
+    setVisibleCount((prev) => {
+      if (allItems.length <= pageSize) return Math.min(pageSize, maxVisible);
+      return Math.min(Math.max(prev, pageSize), cap);
+    });
+  }, [allItems.length, pageSize, maxVisible]);
 
   useEffect(() => {
     dispatchSessionPaginationTelemetry('session_pagination_initialized', {
@@ -46,8 +49,8 @@ export const useSessionPagination = <T,>(allItems: T[], pageSize: number = DEFAU
   }, [allItems, visibleCount]);
 
   const hasMore = useMemo(() => {
-    return allItems.length > visibleCount;
-  }, [allItems.length, visibleCount]);
+    return visibleCount < Math.min(allItems.length, maxVisible);
+  }, [allItems.length, visibleCount, maxVisible]);
 
   const loadMore = useCallback(() => {
     if (!hasMore || isLoadingMore) return;
@@ -56,7 +59,7 @@ export const useSessionPagination = <T,>(allItems: T[], pageSize: number = DEFAU
     // small delay for smoother UX, mirrors useChatPagination
     timeoutRef.current = setTimeout(() => {
       setVisibleCount((prev: number) => {
-        const next = Math.min(prev + pageSize, allItems.length);
+        const next = Math.min(prev + pageSize, allItems.length, maxVisible);
         dispatchSessionPaginationTelemetry('session_pagination_loaded_more', {
           previousVisibleCount: prev,
           nextVisibleCount: next,

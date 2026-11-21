@@ -91,6 +91,19 @@ describe('PayoutAuditLedger', () => {
     expect(csv).toContain('payout_succeeded');
   });
 
+  it('bounds CSV export size for large representative datasets (#275)', () => {
+    for (let i = 0; i < 250; i++) {
+      ledger.recordEvent({
+        payoutId: 'PO-BULK',
+        action: 'payout_succeeded',
+        actor: 'system',
+      });
+    }
+    const csv = ledger.exportCsv({ payoutId: 'PO-BULK' }, 120);
+    const lines = csv.trim().split('\n');
+    expect(lines.length).toBe(121); // header + bounded rows
+  });
+
   it('persists audit events across simulated process restarts', () => {
     ledger.recordEvent({
       payoutId: 'PO-RESTART',

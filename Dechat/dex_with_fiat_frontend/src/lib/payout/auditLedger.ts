@@ -255,8 +255,18 @@ export class PayoutAuditLedger {
   /**
    * Export audit log as CSV suitable for reconciliation.
    */
-  public exportCsv(filter?: PayoutAuditFilter): string {
-    const { entries } = this.getEntries(filter, { limit: 10000 });
+  public exportCsv(filter?: PayoutAuditFilter, maxRows = 10000): string {
+    const boundedMaxRows = Math.min(Math.max(Math.trunc(maxRows), 1), 10000);
+    const pageSize = 100; // matches getEntries max page limit
+    const maxPages = Math.ceil(boundedMaxRows / pageSize);
+    const entries: PayoutAuditEntry[] = [];
+
+    for (let page = 1; page <= maxPages && entries.length < boundedMaxRows; page += 1) {
+      const result = this.getEntries(filter, { page, limit: pageSize });
+      entries.push(...result.entries);
+      if (!result.hasMore || result.entries.length === 0) break;
+    }
+    const boundedEntries = entries.slice(0, boundedMaxRows);
     const headers = [
       'id',
       'sequenceNumber',
@@ -276,7 +286,7 @@ export class PayoutAuditLedger {
       return `"${str.replace(/"/g, '""')}"`;
     };
 
-    const rows = entries.map((e) =>
+    const rows = boundedEntries.map((e) =>
       [
         escapeCsv(e.id),
         escapeCsv(e.sequenceNumber),

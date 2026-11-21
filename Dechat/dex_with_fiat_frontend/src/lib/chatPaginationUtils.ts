@@ -6,6 +6,12 @@ import { ChatMessage } from '@/types';
 export const DEFAULT_PAGE_SIZE = 20;
 
 /**
+ * Upper bound for visible chat messages to keep DOM/memory bounded on long histories.
+ * Representative histories can exceed this; older messages remain accessible via pagination.
+ */
+export const MAX_VISIBLE_MESSAGES = 200;
+
+/**
  * Returns the most recent slice of chat messages based on requested target count.
  *
  * ### Boundary Safety
@@ -57,9 +63,11 @@ export const getNextMessageCount = <T>(
   allItems: T[] | number,
   currentVisibleCount: number,
   pageSize: number = DEFAULT_PAGE_SIZE,
+  maxVisible: number = Number.MAX_SAFE_INTEGER,
 ): number => {
   const totalCount = typeof allItems === 'number' ? allItems : allItems.length;
+  const boundedMax = Math.max(0, Math.min(totalCount, maxVisible));
   const nextCount = currentVisibleCount + pageSize;
-  return Math.min(nextCount, totalCount);
+  return Math.min(nextCount, boundedMax);
 };
 
