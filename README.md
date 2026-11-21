@@ -67,3 +67,6 @@ MIT
 
 <!-- handsoff-issue-13 -->
 - #13: feat(contract): reserve withdrawal amounts when requests are queued
+
+<!-- handsoff-issue-205 -->
+- #205: Make transaction status subscriptions reconnect without gaps

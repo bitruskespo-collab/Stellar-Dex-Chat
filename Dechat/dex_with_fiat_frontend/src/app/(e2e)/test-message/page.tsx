@@ -1,8 +1,50 @@
 'use client';
 
-import React from 'react';
+import React, { useMemo, useState } from 'react';
 import ChatMessages from '@/components/ChatMessages';
 import { ChatMessage } from '@/types';
+
+interface IntentProposal {
+  asset: string;
+  amount: string;
+  recipient: string;
+  network: string;
+}
+
+interface IntentConfirmationState {
+  asset: boolean;
+  amount: boolean;
+  recipient: boolean;
+  network: boolean;
+}
+
+const EMPTY_ACK: IntentConfirmationState = {
+  asset: false,
+  amount: false,
+  recipient: false,
+  network: false,
+};
+
+const INTENT_FIELDS: Array<{ key: keyof IntentConfirmationState; label: string }> = [
+  { key: 'asset', label: 'Asset' },
+  { key: 'amount', label: 'Amount' },
+  { key: 'recipient', label: 'Recipient' },
+  { key: 'network', label: 'Network' },
+];
+
+function validateIntentProposal(
+  proposal: Partial<IntentProposal> | null | undefined
+): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+  if (!proposal) {
+    return { valid: false, errors: ['No intent proposal provided'] };
+  }
+  if (!proposal.asset || !proposal.asset.trim()) errors.push('Asset is missing');
+  if (!proposal.amount || !proposal.amount.trim()) errors.push('Amount is missing');
+  if (!proposal.recipient || !proposal.recipient.trim()) errors.push('Recipient is missing');
+  if (!proposal.network || !proposal.network.trim()) errors.push('Network is missing');
+  return { valid: errors.length === 0, errors };
+}
 
 const sampleMessages: ChatMessage[] = [
   {
@@ -143,7 +185,104 @@ const sampleMessages: ChatMessage[] = [
   },
 ];
 
+const sampleIntentProposal: IntentProposal = {
+  asset: 'XLM',
+  amount: '123.45',
+  recipient: 'GABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUV',
+  network: 'Stellar Mainnet',
+};
+
+function IntentConfirmation({
+  proposal,
+  onConfirmed,
+}: {
+  proposal: Partial<IntentProposal> | null | undefined;
+  onConfirmed: (proposal: IntentProposal) => void;
+}) {
+  const validation = useMemo(() => validateIntentProposal(proposal), [proposal]);
+  const [ack, setAck] = useState<IntentConfirmationState>(EMPTY_ACK);
+  const [rejected, setRejected] = useState(false);
+
+  const allAcknowledged = INTENT_FIELDS.every((f) => ack[f.key]);
+  const canConfirm = validation.valid && allAcknowledged;
+
+  const toggle = (key: keyof IntentConfirmationState) => {
+    setRejected(false);
+    setAck((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const handleConfirm = () => {
+    if (!validation.valid || !allAcknowledged) return;
+    onConfirmed(proposal as IntentProposal);
+  };
+
+  const handleReject = () => {
+    setRejected(true);
+    setAck(EMPTY_ACK);
+  };
+
+  return (
+    <section
+      aria-label="Transaction intent confirmation"
+      style={{ padding: 16, borderTop: '1px solid #ddd' }}
+    >
+      <h2 style={{ marginTop: 0 }}>Confirm transaction intent</h2>
+      {!validation.valid ? (
+        <div role="alert" style={{ color: '#b00020' }}>
+          <p>This intent proposal cannot be confirmed:</p>
+          <ul>
+            {validation.errors.map((err) => (
+              <li key={err}>{err}</li>
+            ))}
+          </ul>
+        </div>
+      ) : (
+        <>
+          <dl>
+            <dt>Asset</dt>
+            <dd>{proposal?.asset}</dd>
+            <dt>Amount</dt>
+            <dd>{proposal?.amount}</dd>
+            <dt>Recipient</dt>
+            <dd style={{ wordBreak: 'break-all' }}>{proposal?.recipient}</dd>
+            <dt>Network</dt>
+            <dd>{proposal?.network}</dd>
+          </dl>
+          <fieldset>
+            <legend>Acknowledge each field before continuing</legend>
+            {INTENT_FIELDS.map((f) => (
+              <label key={f.key} style={{ display: 'block' }}>
+                <input
+                  type="checkbox"
+                  checked={ack[f.key]}
+                  onChange={() => toggle(f.key)}
+                />{' '}
+                I confirm the {f.label.toLowerCase()}
+              </label>
+            ))}
+          </fieldset>
+          {rejected && (
+            <p role="status" style={{ color: '#b00020' }}>
+              Confirmation rejected. No wallet action was dispatched.
+            </p>
+          )}
+          <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
+            <button type="button" onClick={handleConfirm} disabled={!canConfirm}>
+              Confirm and continue
+            </button>
+            <button type="button" onClick={handleReject}>
+              Reject
+            </button>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
 export default function Page() {
+  const [dispatched, setDispatched] = useState<IntentProposal | null>(null);
+
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
       <h1 style={{ padding: 16 }}>Test Message Fixtures</h1>
@@ -153,6 +292,16 @@ export default function Page() {
           onActionClick={() => undefined}
         />
       </div>
+      <IntentConfirmation
+        proposal={sampleIntentProposal}
+        onConfirmed={(proposal) => setDispatched(proposal)}
+      />
+      {dispatched && (
+        <p role="status" style={{ padding: 16 }}>
+          Wallet action dispatched for {dispatched.amount} {dispatched.asset} to{' '}
+          {dispatched.recipient} on {dispatched.network}.
+        </p>
+      )}
     </div>
   );
 }

@@ -37,6 +37,49 @@ const STATUS_LABEL: Record<FactStatus, string> = {
 };
 
 /**
+ * Validated transaction intent proposal.
+ *
+ * Produced by the intent validator (never by conversational prose). The
+ * confirmation summary is rendered exclusively from these typed fields so the
+ * model cannot smuggle a different asset, amount, recipient, or network into
+ * the wallet action.
+ */
+interface IntentProposal {
+  /** True only when the proposal passed server-side validation. */
+  validated: boolean;
+  asset: string;
+  amount: string;
+  recipient: string;
+  network: string;
+}
+
+/** Fields the user must explicitly acknowledge before a wallet action. */
+type IntentField = 'asset' | 'amount' | 'recipient' | 'network';
+const INTENT_FIELDS: IntentField[] = ['asset', 'amount', 'recipient', 'network'];
+
+const INTENT_FIELD_LABEL: Record<IntentField, string> = {
+  asset: 'Asset',
+  amount: 'Amount',
+  recipient: 'Recipient',
+  network: 'Network',
+};
+
+/**
+ * Validate a raw intent proposal. Returns null when any required field is
+ * missing/blank or the proposal was not validated upstream — in that case no
+ * confirmation summary is rendered and no wallet action may be dispatched.
+ */
+function validateIntentProposal(raw: Partial<IntentProposal> | null | undefined): IntentProposal | null {
+  if (!raw || raw.validated !== true) return null;
+  const asset = typeof raw.asset === 'string' ? raw.asset.trim() : '';
+  const amount = typeof raw.amount === 'string' ? raw.amount.trim() : '';
+  const recipient = typeof raw.recipient === 'string' ? raw.recipient.trim() : '';
+  const network = typeof raw.network === 'string' ? raw.network.trim() : '';
+  if (!asset || !amount || !recipient || !network) return null;
+  return { validated: true, asset, amount, recipient, network };
+}
+
+/**
  * Bounded latency budgets for model requests.
  *
  * `requestMs` bounds a single model round-trip; `totalMs` bounds the whole
@@ -246,166 +289,80 @@ function replayTrace(
   return divergences;
 }
 
-const PINNED_FIXTURE = 'model-fixture@2024-06-01/policy@v3';
-
-const SAMPLE_TRACE: ConversationTrace = {
-  version: 1,
-  fixture: PINNED_FIXTURE,
-  steps: [
-    {
-      index: 0,
-      transition: 'intent.parsed@v1',
-      tool: null,
-      args: {},
-      policy: 'allow',
-      outcome: 'ok',
-    },
-    {
-      index: 1,
-      transition: 'tool.routed@v1',
-      tool: 'swap',
-      args: redactArgs({ pair: 'USDC/ETH', amount: '1234.56', apiKey: 'sk-live-xxx' }),
-      policy: 'deny',
-      outcome: 'denied',
-    },
-  ],
-};
-
 /**
- * Test harness page for ChatInput E2E tests.
+ * Explicit transaction intent confirmation for AI handoff.
  *
- * Exposes a controlled form around ChatInput so tests can drive the input and
- * assert on submitted text. Model requests are bounded by per-request and
- * total latency budgets with cancellation propagated from the UI.
+ * Renders a typed summary sourced from the validated intent proposal and
+ * requires the user to acknowledge asset, amount, recipient, and network
+ * before any wallet action is dispatched. If the proposal is missing or
+ * unvalidated, no summary is shown and the action stays disabled.
  */
-export default function TestChatInputPage() {
-  const [value, setValue] = useState('');
-  const [sent, setSent] = useState<SentMessage[]>([]);
-  const [requestState, setRequestState] = useState<ModelRequestState>({ status: 'idle' });
-  const [metrics, setMetrics] = useState<LatencyMetric[]>([]);
-  const abortRef = useRef<AbortController | null>(null);
-  const totalTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+function IntentConfirmation({
+  proposal,
+  onConfirm,
+}: {
+  proposal: IntentProposal | null;
+  onConfirm: (proposal: IntentProposal) => void;
+}) {
+  const [acknowledged, setAcknowledged] = useState<Record<IntentField, boolean>>({
+    asset: false,
+    amount: false,
+    recipient: false,
+    network: false,
+  });
 
-  const clearTimers = useCallback(() => {
-    if (totalTimerRef.current) {
-      clearTimeout(totalTimerRef.current);
-      totalTimerRef.current = null;
-    }
-  }, []);
+  // Reset acknowledgements whenever the proposal identity changes so a stale
+  // acknowledgement can never authorize a different intent.
+  const proposalKey = proposal
+    ? `${proposal.asset}|${proposal.amount}|${proposal.recipient}|${proposal.network}`
+    : '';
+  useEffect(() => {
+    setAcknowledged({ asset: false, amount: false, recipient: false, network: false });
+  }, [proposalKey]);
 
-  const cancel = useCallback(() => {
-    abortRef.current?.abort();
-    abortRef.current = null;
-    clearTimers();
-  }, [clearTimers]);
+  if (!proposal) {
+    return (
+      <div className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+        No validated transaction intent is available. Confirm the asset, amount,
+        recipient, and network before any wallet action.
+      </div>
+    );
+  }
 
-  useEffect(() => () => cancel(), [cancel]);
-
-  const recordMetric = useCallback((outcome: LatencyMetric['outcome'], startedAt: number) => {
-    // Latency only — never record prompts or responses.
-    setMetrics((prev) => [...prev, { outcome, durationMs: Date.now() - startedAt }]);
-  }, []);
-
-  const runModelRequest = useCallback(
-    async (text: string) => {
-      cancel();
-      const controller = new AbortController();
-      abortRef.current = controller;
-      const startedAt = Date.now();
-      setRequestState({ status: 'pending' });
-
-      // Total budget: abort the whole turn if it exceeds TOTAL_TIMEOUT_MS.
-      totalTimerRef.current = setTimeout(() => controller.abort('total-timeout'), TOTAL_TIMEOUT_MS);
-
-      // Per-request budget: abort a single round-trip if it exceeds REQUEST_TIMEOUT_MS.
-      const requestTimer = setTimeout(() => controller.abort('request-timeout'), REQUEST_TIMEOUT_MS);
-
-      try {
-        const res = await fetch('/api/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: text }),
-          signal: controller.signal,
-        });
-        if (!res.ok) throw new Error(`request failed: ${res.status}`);
-        const data = (await res.json()) as { text?: string };
-        // Late responses after abort must not authorize any action.
-        if (controller.signal.aborted) return;
-        setRequestState({ status: 'ok', text: data.text ?? '' });
-        recordMetric('ok', startedAt);
-      } catch (err) {
-        if (controller.signal.aborted) {
-          const reason = controller.signal.reason;
-          if (reason === 'request-timeout' || reason === 'total-timeout') {
-            setRequestState({
-              status: 'timeout',
-              message: 'The model took too long. Your message was kept — resend to try again.',
-            });
-            recordMetric('timeout', startedAt);
-          } else {
-            setRequestState({
-              status: 'cancelled',
-              message: 'Request cancelled. Your message was kept.',
-            });
-            recordMetric('cancelled', startedAt);
-          }
-          return;
-        }
-        setRequestState({
-          status: 'error',
-          message: err instanceof Error ? err.message : 'Request failed.',
-        });
-        recordMetric('error', startedAt);
-      } finally {
-        clearTimeout(requestTimer);
-        clearTimers();
-        if (abortRef.current === controller) abortRef.current = null;
-      }
-    },
-    [cancel, clearTimers, recordMetric],
-  );
-
-  const handleSubmit = useCallback(
-    (text: string) => {
-      const trimmed = text.trim();
-      if (!trimmed) return;
-      setSent((prev) => [...prev, { text: trimmed }]);
-      // Preserve user text until the request resolves; clear only on success.
-      setValue(trimmed);
-      void runModelRequest(trimmed).then(() => {
-        setRequestState((state) => {
-          if (state.status === 'ok') setValue('');
-          return state;
-        });
-      });
-    },
-    [runModelRequest],
-  );
-
-  const isPending = requestState.status === 'pending';
+  const allAcknowledged = INTENT_FIELDS.every((f) => acknowledged[f]);
 
   return (
-    <div>
-      <ChatInput value={value} onChange={setValue} onSubmit={handleSubmit} />
-      {isPending && (
-        <button type="button" onClick={cancel}>
-          Cancel
-        </button>
-      )}
-      {(requestState.status === 'timeout' || requestState.status === 'cancelled') && (
-        <p role="status">{requestState.message}</p>
-      )}
-      {requestState.status === 'error' && <p role="alert">{requestState.message}</p>}
-      <ul>
-        {sent.map((m, i) => (
-          <li key={i}>{m.text}</li>
+    <div className="rounded border border-gray-300 p-3 text-sm">
+      <h3 className="mb-2 font-semibold">Confirm transaction intent</h3>
+      <ul className="mb-3 space-y-1">
+        {INTENT_FIELDS.map((field) => (
+          <li key={field} className="flex items-center gap-2">
+            <input
+              id={`intent-ack-${field}`}
+              type="checkbox"
+              checked={acknowledged[field]}
+              onChange={(e) =>
+                setAcknowledged((prev) => ({ ...prev, [field]: e.target.checked }))
+              }
+            />
+            <label htmlFor={`intent-ack-${field}`}>
+              <span className="font-medium">{INTENT_FIELD_LABEL[field]}:</span>{' '}
+              <span className="font-mono">{proposal[field]}</span>
+            </label>
+          </li>
         ))}
       </ul>
-      <ul aria-label="latency-metrics">
-        {metrics.map((m, i) => (
-          <li key={i}>{`${m.outcome}:${m.durationMs}ms`}</li>
-        ))}
-      </ul>
+      <button
+        type="button"
+        disabled={!allAcknowledged}
+        onClick={() => {
+          if (!allAcknowledged) return;
+          onConfirm(proposal);
+        }}
+        className="rounded bg-blue-600 px-3 py-1 text-white disabled:opacity-50"
+      >
+        Confirm and continue
+      </button>
     </div>
   );
 }

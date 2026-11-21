@@ -1,6 +1,52 @@
 {
   "version": 1,
   "description": "Golden contract event fixtures for Stellar Fiat Bridge contract indexer compatibility testing",
+  "cacheInvalidationPolicy": {
+    "description": "Client-side cache invalidation policy for wallet/network changes and contract events. Each event family maps to the cache scopes it invalidates. 'ordering' describes how out-of-order delivery is handled; 'recovery' describes how caches converge after missed events.",
+    "scopes": ["account", "balance", "quote", "transaction"],
+    "walletChanges": {
+      "account_changed": { "invalidates": ["account", "balance", "quote", "transaction"], "reason": "New account has different balances, quotes, and history" },
+      "network_changed": { "invalidates": ["account", "balance", "quote", "transaction"], "reason": "Contract addresses and token sets differ per network" },
+      "disconnected": { "invalidates": ["account", "balance", "quote"], "reason": "No signer; keep transaction history for reconnect" }
+    },
+    "eventPolicies": [
+      { "family": "DepositEvent", "invalidates": ["balance", "transaction"], "ordering": "ledger", "recovery": "resync_balance" },
+      { "family": "ReceiptIssuedEvent", "invalidates": ["transaction"], "ordering": "ledger", "recovery": "resync_transactions" },
+      { "family": "WithdrawEvent", "invalidates": ["balance", "transaction"], "ordering": "ledger", "recovery": "resync_balance" },
+      { "family": "WithdrawalRequestedEvent", "invalidates": ["transaction"], "ordering": "ledger", "recovery": "resync_transactions" },
+      { "family": "WithdrawalExecutedEvent", "invalidates": ["balance", "transaction"], "ordering": "ledger", "recovery": "resync_balance" },
+      { "family": "WithdrawalCancelledEvent", "invalidates": ["transaction"], "ordering": "ledger", "recovery": "resync_transactions" },
+      { "family": "WithdrawalExpiredEvent", "invalidates": ["transaction"], "ordering": "ledger", "recovery": "resync_transactions" },
+      { "family": "FeeAccruedEvent", "invalidates": ["balance"], "ordering": "ledger", "recovery": "resync_balance" },
+      { "family": "FeeWithdrawnEvent", "invalidates": ["balance"], "ordering": "ledger", "recovery": "resync_balance" },
+      { "family": "RefundEvent", "invalidates": ["balance", "transaction"], "ordering": "ledger", "recovery": "resync_balance" },
+      { "family": "PausedEvent", "invalidates": ["quote"], "ordering": "ledger", "recovery": "resync_quote" },
+      { "family": "UnpausedEvent", "invalidates": ["quote"], "ordering": "ledger", "recovery": "resync_quote" },
+      { "family": "SetLimitEvent", "invalidates": ["quote"], "ordering": "ledger", "recovery": "resync_quote" },
+      { "family": "SetOperatorEvent", "invalidates": ["account"], "ordering": "ledger", "recovery": "resync_account" },
+      { "family": "NonceConsumedEvent", "invalidates": ["account"], "ordering": "ledger", "recovery": "resync_account" },
+      { "family": "MigrationEvent", "invalidates": ["account", "balance", "quote", "transaction"], "ordering": "ledger", "recovery": "full_resync" },
+      { "family": "CircuitBreakerTrippedEvent", "invalidates": ["quote"], "ordering": "ledger", "recovery": "resync_quote" },
+      { "family": "upg_prop", "invalidates": ["account", "balance", "quote", "transaction"], "ordering": "ledger", "recovery": "full_resync" },
+      { "family": "upg_exec", "invalidates": ["account", "balance", "quote", "transaction"], "ordering": "ledger", "recovery": "full_resync" },
+      { "family": "multisig_proposed", "invalidates": ["account"], "ordering": "ledger", "recovery": "resync_account" }
+    ],
+    "orderingRules": {
+      "strategy": "ledger",
+      "description": "Events carry a monotonically increasing ledger. A per-scope high-water mark tracks the last applied ledger. Events with ledger <= high-water mark are treated as stale and ignored (no invalidation). Events with a gap (ledger > high-water mark + 1) trigger recovery before applying."
+    },
+    "recoveryRules": {
+      "gapDetection": "If an incoming event ledger exceeds the last-seen ledger by more than one, a gap is assumed and the affected scopes are resynced from the API before the event is applied.",
+      "missedEventRecovery": "On reconnect or subscription resume, compare the local high-water mark against the indexer cursor; if behind, perform a full resync of all scopes.",
+      "resyncTargets": {
+        "resync_account": ["account"],
+        "resync_balance": ["balance"],
+        "resync_quote": ["quote"],
+        "resync_transactions": ["transaction"],
+        "full_resync": ["account", "balance", "quote", "transaction"]
+      }
+    }
+  },
   "events": [
     {
       "family": "DepositEvent",
