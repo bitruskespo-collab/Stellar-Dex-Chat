@@ -121,3 +121,14 @@ jobs:
           grep -q "${{ github.sha }}" verify/provenance.json
           grep -q 'artifactDigest' verify/provenance.json
           echo 'Release SBOM and provenance verified.'
+
+      - name: Write failure runbook link
+        if: failure()
+        run: |
+          REPO="${{ github.repository }}"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
+          echo "### ❌ Release provenance validation failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Runbook:** [docs/runbooks/artifact-attestation.md](https://github.com/${REPO}/blob/main/docs/runbooks/artifact-attestation.md)" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Frontend deploy runbook:** [docs/runbooks/frontend-deploy.md](https://github.com/${REPO}/blob/main/docs/runbooks/frontend-deploy.md#25-release-validation--sbom--provenance-validation-failure)" >> "$GITHUB_STEP_SUMMARY"

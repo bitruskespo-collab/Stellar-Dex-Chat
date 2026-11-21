@@ -62,3 +62,20 @@ policy was applied.
 - [ ] The CI drift check passes with no ABI diff.
 - [ ] Breaking changes are documented and versioned as described above.
 - [ ] Regeneration left unrelated files unchanged.
+
+## Maintainer runbooks
+
+When a release or deployment workflow fails, the step summary includes a direct
+link to the relevant runbook. The full runbook index is at
+[docs/runbooks/README.md](docs/runbooks/README.md).
+
+| Runbook | When to use |
+|---------|-------------|
+| [Contract build](docs/runbooks/contract-build.md) | `contracts.yml` fails — fmt, clippy, test, WASM build, readiness gate |
+| [Frontend deploy](docs/runbooks/frontend-deploy.md) | `frontend.yml` or `frontend-build.yml` fails — lint, build, tests, release validation |
+| [Migration and deployment](docs/runbooks/migration.md) | `deploy-futurenet.yml` fails — readiness gate, canary, rollback |
+| [Artifact attestation and SBOM](docs/runbooks/artifact-attestation.md) | SBOM generation or provenance verification fails in any workflow |
+
+Each runbook covers diagnosis, safe retry, rollback, and escalation for every
+failure class. Never re-run a job to paper over a real failure — fix the root
+cause first.

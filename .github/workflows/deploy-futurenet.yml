@@ -301,11 +301,18 @@ jobs:
       - name: Notify on failure
         if: failure()
         run: |
+          REPO="${{ github.repository }}"
+          RUN_URL="${{ github.server_url }}/${REPO}/actions/runs/${{ github.run_id }}"
           echo "## ❌ Deployment Failed" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Environment: Futurenet" >> $GITHUB_STEP_SUMMARY
           echo "Branch: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "Check the logs for details." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Runbooks:**" >> $GITHUB_STEP_SUMMARY
+          echo "- [Migration / deployment failure](https://github.com/${REPO}/blob/main/docs/runbooks/migration.md)" >> $GITHUB_STEP_SUMMARY
+          echo "- [Artifact attestation failure](https://github.com/${REPO}/blob/main/docs/runbooks/artifact-attestation.md)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Failed run:** ${RUN_URL}" >> $GITHUB_STEP_SUMMARY
 
   release-validation:
     name: Verify release SBOM and provenance
@@ -326,6 +333,7 @@ jobs:
           for f in release-sbom/sbom-rust.cdx.json release-sbom/sbom-node.cdx.json; do
             if [ ! -s "$f" ]; then
               echo "::error::Missing or empty SBOM: $f"
+              echo "::error::See runbook: https://github.com/${{ github.repository }}/blob/main/docs/runbooks/artifact-attestation.md"
               exit 1
             fi
             jq -e '.bomFormat == "CycloneDX" and (.components | length > 0)' "$f" > /dev/null
@@ -335,6 +343,7 @@ jobs:
           PROV=release-sbom/provenance.json
           if [ ! -s "$PROV" ]; then
             echo "::error::Missing provenance file"
+            echo "::error::See runbook: https://github.com/${{ github.repository }}/blob/main/docs/runbooks/artifact-attestation.md#23-provenance-file-missing-or-malformed"
             exit 1
           fi
 
@@ -343,6 +352,16 @@ jobs:
           jq -e '.wasm_sha256 | test("^[0-9a-f]{64}$")' "$PROV" > /dev/null
 
           echo "✅ Provenance verified for revision ${{ github.sha }}"
+
+      - name: Write failure runbook link
+        if: failure()
+        run: |
+          REPO="${{ github.repository }}"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
+          echo "### ❌ Release validation failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Runbook:** [docs/runbooks/artifact-attestation.md](https://github.com/${REPO}/blob/main/docs/runbooks/artifact-attestation.md)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Post validation summary
         run: |

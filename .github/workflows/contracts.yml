@@ -234,6 +234,19 @@ jobs:
           STATUS=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$EXPECTED_RPC_URL")
           if [ "$STATUS" -lt 200 ] || [ "$STATUS" -ge 400 ]; then
             echo "::error::RPC provider health check failed (HTTP $STATUS)"
+            echo "::error::See runbook: https://github.com/${{ github.repository }}/blob/main/docs/runbooks/contract-build.md#25d-rpc-provider-health-check-failed"
             exit 1
           fi
           echo "Provider health OK (HTTP $STATUS)"
+
+      - name: Write failure runbook link
+        if: failure()
+        run: |
+          REPO="${{ github.repository }}"
+          RUN_URL="${{ github.server_url }}/${REPO}/actions/runs/${{ github.run_id }}"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
+          echo "### ❌ Readiness gate failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Runbook:** [docs/runbooks/contract-build.md](https://github.com/${REPO}/blob/main/docs/runbooks/contract-build.md)" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Failed run:** ${RUN_URL}" >> "$GITHUB_STEP_SUMMARY"

@@ -172,6 +172,16 @@ jobs:
           ls ./*.cdx.json >/dev/null
           echo "SBOM and provenance verified for ${GITHUB_SHA}"
 
+      - name: Write failure runbook link
+        if: failure()
+        run: |
+          REPO="${{ github.repository }}"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
+          echo "### ❌ Release SBOM / provenance verification failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Runbook:** [docs/runbooks/artifact-attestation.md](https://github.com/${REPO}/blob/main/docs/runbooks/artifact-attestation.md)" >> "$GITHUB_STEP_SUMMARY"
+
   open-tracking-issue:
     name: Open Tracking Issue
     runs-on: ubuntu-latest
