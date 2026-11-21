@@ -75,15 +75,15 @@ describe('PayoutReconciliationService', () => {
     );
   });
 
-  it('replays fixtures in multiple delivery orders and yields identical final state', () => {
+  it('replays synthetic seeded fixtures in multiple delivery orders and yields identical final state', () => {
     interface FixtureEvent {
       id: string;
       type: string;
     }
 
     const fixtures: FixtureEvent[] = [
-      { id: 'evt_succ', type: 'transfer.success' },
-      { id: 'evt_rev', type: 'transfer.reversed' },
+      { id: 'evt_syn_succ', type: 'transfer.success' },
+      { id: 'evt_syn_rev', type: 'transfer.reversed' },
     ];
 
     const replaySequence = (events: FixtureEvent[]): DomainPayoutStatus => {

@@ -47,14 +47,14 @@ function runSharedContractSuite(
 
       expect(result).toBeDefined();
       expect(result.accountNumber).toBe('0123456789');
-      expect(result.accountName).toBeTruthy();
+      expect(result.accountName).toBe('Ada Synthetic');
       expect(result.bankCode).toBe('058');
     });
 
     it('creates transfer recipients and returns normalized CreatedRecipient', async () => {
       const result = await provider.createRecipient({
         type: 'nuban',
-        name: 'John Doe',
+        name: 'Ada Synthetic',
         account_number: '0123456789',
         bank_code: '058',
         currency: 'NGN',
@@ -62,7 +62,7 @@ function runSharedContractSuite(
 
       expect(result).toBeDefined();
       expect(result.recipientCode).toMatch(/^RCP_/);
-      expect(result.name).toBe('John Doe');
+      expect(result.name).toBe('Ada Synthetic');
       expect(result.accountNumber).toBe('0123456789');
       expect(result.bankCode).toBe('058');
       expect(result.currency).toBe('NGN');
@@ -160,7 +160,7 @@ runSharedContractSuite(
             message: 'Account resolved',
             data: {
               account_number: '0123456789',
-              account_name: 'John Doe',
+              account_name: 'Ada Synthetic',
               bank_id: 58,
             },
           },

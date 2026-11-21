@@ -169,7 +169,7 @@ describe('BankDetailsModal - Telemetry Tracking', () => {
         ok: true,
         json: async () => ({
           success: true,
-          data: { account_name: 'John Doe' },
+          data: { account_name: 'Ada Synthetic' },
         }),
       });
 

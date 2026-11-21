@@ -111,7 +111,7 @@ describe('Issue #51: Payout PII Data-Retention and Verifiable Deletion Workflows
         status: 'pending',
         beneficiary: {
           account_number: '0123456789',
-          account_name: 'John Doe',
+          account_name: 'Ada Synthetic',
           bvn: '22334455667',
           phone_number: '+2348012345678',
           email: 'johndoe@example.com',
@@ -167,7 +167,7 @@ describe('Issue #51: Payout PII Data-Retention and Verifiable Deletion Workflows
         bankCode: '044',
         bankToken: 'tok_bank_abcdef1234567890',
         accountNumber: '0123456789',
-        accountName: 'Jane Smith',
+        accountName: 'Kojo Synthetic',
         bvn: '22334455667',
         recipientCode: 'RCP_xyz123',
         transferCode: 'TRF_abc789',

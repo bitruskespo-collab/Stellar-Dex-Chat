@@ -174,7 +174,7 @@ describe('BankDetailsModal - Zod saveCustomName inline error', () => {
         return { ok: true, json: async () => ({ success: true, data: [{ id: 1, name: 'Test Bank', code: '001', active: true }] }) } as Response;
       }
       if (String(url).includes('/api/verify-account')) {
-        return { ok: true, json: async () => ({ success: true, data: { account_name: 'John Doe' } }) } as Response;
+        return { ok: true, json: async () => ({ success: true, data: { account_name: 'Ada Synthetic' } }) } as Response;
       }
       throw new Error(`Unhandled: ${url}`);
     });
@@ -198,12 +198,12 @@ describe('BankDetailsModal - Zod saveCustomName inline error', () => {
     fireEvent.blur(accountInput);
 
     // Wait for account verification to complete
-    await waitFor(() => expect(screen.getByText(/John Doe/i)).toBeDefined());
+    await waitFor(() => expect(screen.getByText(/Ada Synthetic/i)).toBeDefined());
 
     // Open save beneficiary prompt
     fireEvent.click(screen.getByRole('button', { name: /save beneficiary/i }));
 
-    const nameInput = await screen.findByPlaceholderText(/John Doe/i);
+    const nameInput = await screen.findByPlaceholderText(/Ada Synthetic/i);
     fireEvent.change(nameInput, { target: { value: 'A'.repeat(51) } });
     fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
 
@@ -224,10 +224,10 @@ describe('BankDetailsModal - Zod saveCustomName inline error', () => {
     fireEvent.change(accountInput, { target: { value: '1234567890' } });
     fireEvent.blur(accountInput);
 
-    await waitFor(() => expect(screen.getByText(/John Doe/i)).toBeDefined());
+    await waitFor(() => expect(screen.getByText(/Ada Synthetic/i)).toBeDefined());
     fireEvent.click(screen.getByRole('button', { name: /save beneficiary/i }));
 
-    const nameInput = await screen.findByPlaceholderText(/John Doe/i);
+    const nameInput = await screen.findByPlaceholderText(/Ada Synthetic/i);
 
     // Trigger the error
     fireEvent.change(nameInput, { target: { value: 'A'.repeat(51) } });

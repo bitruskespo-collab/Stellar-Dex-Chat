@@ -31,12 +31,13 @@ export class FakePayoutProvider implements PayoutProvider {
   }
 
   private seedDefaultAccounts() {
+    // Centralized synthetic test identities (no real PII/credentials).
     this.accounts.set('0123456789:058', {
-      accountName: 'John Doe',
+      accountName: 'Ada Synthetic',
       bankId: 58,
     });
     this.accounts.set('0987654321:011', {
-      accountName: 'Jane Smith',
+      accountName: 'Kojo Synthetic',
       bankId: 11,
     });
   }

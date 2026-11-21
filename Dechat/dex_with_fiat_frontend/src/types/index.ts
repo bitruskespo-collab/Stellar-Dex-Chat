@@ -419,7 +419,7 @@ export interface AIAnalysisResult {
  *   bankCode: '058',
  *   bankName: 'GTBank',
  *   accountNumber: '0123456789',
- *   accountName: 'John Doe',
+ *   accountName: 'Ada Synthetic',
  * };
  * ```
  */

@@ -72,11 +72,11 @@ describe('beneficiaryStore', () => {
     it('creates recipient on first request and reuses reference on second request', async () => {
       const mockProvider = vi.fn().mockResolvedValue({
         recipient_code: 'RCP_test_123',
-        name: 'John Doe',
+        name: 'Ada Synthetic',
       });
 
       const input = {
-        name: 'John Doe',
+        name: 'Ada Synthetic',
         accountNumber: '0123456789',
         bankCode: '058',
         userScope: 'user_1',

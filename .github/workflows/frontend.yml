@@ -92,6 +92,9 @@ jobs:
       - name: Lint
         run: pnpm lint
 
+      - name: Fixture privacy guard
+        run: pnpm test:fixtures:privacy
+
   # ── 2. Next.js build (independent of unit tests) ──────────────────────────
   build:
     name: Build

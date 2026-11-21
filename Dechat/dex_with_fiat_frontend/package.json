@@ -25,7 +25,8 @@
     "test:coverage:merge": "vitest run --mergeReports --coverage --reporter=default",
     "sbom:node": "cyclonedx-npm --output-format json --output-file sbom-node.cdx.json",
     "sbom:rust": "cargo cyclonedx --format json --output-pattern package --output-cdx --manifest-path ../dex_with_fiat_backend/Cargo.toml",
-    "sbom": "pnpm sbom:node && pnpm sbom:rust"
+    "sbom": "pnpm sbom:node && pnpm sbom:rust",
+    "test:fixtures:privacy": "node scripts/check-fixture-privacy.mjs"
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
