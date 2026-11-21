@@ -182,6 +182,22 @@ headers: {
 
 **Example:** `payout_confirm_1234567890_abc123def`
 
+### Provider-accepted requests with timed-out responses
+
+An initiation timeout after the provider connection is established is an
+ambiguous outcome: the provider may already have accepted the transfer.
+Recovery must query the provider using the original reference and credential
+version. A missing status result is still ambiguous, not evidence that the
+provider rejected the transfer, so it remains pending for later reconciliation.
+Neither case is added to the automatic initiation retry queue; only a proven
+pre-connection rejection may be retried.
+
+The deterministic sandbox contract tests at
+`src/lib/payout/providers/__tests__/sandboxAmbiguousOutcomes.test.ts` cover
+accepted-but-timeout recovery, duplicate references, status-not-found, and
+delayed webhook ordering. They assert that reconciliation does not initiate a
+second transfer.
+
 ### Backend Implementation (Recommended)
 
 API routes should:

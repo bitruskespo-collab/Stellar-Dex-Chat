@@ -1,13 +1,72 @@
 import fs from 'fs';
 import path from 'path';
 import { payoutAuditLedger, PayoutAuditLedger } from './auditLedger';
+import type { PayoutProvider, TransferStatus } from './providers/types';
+import { PayoutProviderError } from './providers/types';
+import { canTransitionPayoutStatus } from './payoutLifecycle';
+import { getTransferStatus, setTransferStatus } from '../transferStore';
+
+export interface AmbiguousInitiationReconciliationResult {
+  reconciled: boolean;
+  outcome: 'known' | 'not_found' | 'conflict';
+  record?: ReturnType<typeof getTransferStatus>;
+}
+
+/**
+ * Resolves an uncertain initiation using provider status lookup only.
+ * This deliberately never calls initiateTransfer: a status miss is not proof
+ * that the provider did not accept the original request.
+ */
+export async function reconcileAmbiguousInitiation(
+  reference: string,
+  credentialVersion?: string,
+  provider?: PayoutProvider,
+): Promise<AmbiguousInitiationReconciliationResult> {
+  const record = getTransferStatus(reference);
+  if (!record) {
+    return { reconciled: false, outcome: 'not_found' };
+  }
+
+  const providerAdapter =
+    provider ?? (await import('./providers/registry')).getPayoutProvider();
+  let providerStatus: TransferStatus;
+  try {
+    providerStatus = await providerAdapter.checkTransferStatus({
+      reference,
+      credentialVersion,
+    });
+  } catch (error: unknown) {
+    if (
+      error instanceof PayoutProviderError &&
+      (error.statusCode === 404 || error.code === 'ACCOUNT_NOT_FOUND')
+    ) {
+      return { reconciled: false, outcome: 'not_found', record };
+    }
+    throw error;
+  }
+
+  if (!canTransitionPayoutStatus(record.status, providerStatus.status)) {
+    return { reconciled: false, outcome: 'conflict', record };
+  }
+
+  const reconciledRecord = setTransferStatus({
+    ...record,
+    status: providerStatus.status,
+    updatedAt: new Date().toISOString(),
+    credentialVersion,
+    timeoutOutcome: 'known',
+    reconciled: true,
+  });
+
+  return {
+    reconciled: true,
+    outcome: 'known',
+    record: reconciledRecord,
+  };
+}
 
 export type DomainPayoutStatus =
-  | 'pending'
-  | 'success'
-  | 'failed'
-  | 'reversed'
-  | 'cancelled';
+  'pending' | 'success' | 'failed' | 'reversed' | 'cancelled';
 
 export interface RejectedEventRecord {
   id: string;

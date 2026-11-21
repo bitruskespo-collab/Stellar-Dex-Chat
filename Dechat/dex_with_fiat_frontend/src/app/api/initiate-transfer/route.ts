@@ -123,19 +123,6 @@ export async function POST(request: NextRequest) {
       typeof bodyRecord.currency === 'string' ? bodyRecord.currency : 'NGN';
     const validatedAmount = validatePayoutAmount(amount, currency);
 
-    // Resolve idempotency key: X-Idempotency-Key header, body reference, or generated
-    const headerIdempotencyKey = request.headers.get('X-Idempotency-Key');
-    const idempotencyKey =
-      headerIdempotencyKey ||
-      (typeof bodyRecord.reference === 'string' && bodyRecord.reference
-        ? bodyRecord.reference
-        : `idemp_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`);
-
-    const cached = idempotencyCache.get(idempotencyKey);
-    if (cached && Date.now() - cached.timestamp < IDEMPOTENCY_TTL_MS) {
-      return NextResponse.json({ success: true, data: cached.result });
-    }
-
     telemetry.addLog(span.spanId, 'info', 'Request validated', {
       hasSource: !!source,
       hasAmount: !!amount,
@@ -205,6 +192,43 @@ export async function POST(request: NextRequest) {
         data,
       });
     } catch (providerError: unknown) {
+      if (providerError instanceof AmbiguousInitiationError) {
+        const existingRecord = getTransferStatus(idempotencyKey);
+        setTransferStatus({
+          ...existingRecord,
+          reference: idempotencyKey,
+          status: existingRecord?.status ?? 'pending',
+          amount: existingRecord?.amount ?? Number(amount),
+          updatedAt: new Date().toISOString(),
+          clientSessionId: existingRecord?.clientSessionId ?? clientSessionId,
+          credentialVersion:
+            existingRecord?.credentialVersion ?? credentialVersion,
+          timeoutOutcome: existingRecord?.timeoutOutcome ?? 'ambiguous',
+          reconciled: existingRecord?.reconciled ?? false,
+        });
+
+        const reconciliation = await reconcileAmbiguousInitiation(
+          idempotencyKey,
+          credentialVersion,
+          provider,
+        );
+
+        return NextResponse.json(
+          {
+            success: true,
+            status: reconciliation.reconciled
+              ? reconciliation.record?.status
+              : 'reconciliation_pending',
+            reference: idempotencyKey,
+            reconciled: reconciliation.reconciled,
+            message: reconciliation.reconciled
+              ? 'Transfer status reconciled with provider.'
+              : 'Transfer status is still unknown. Do not submit a second transfer.',
+          },
+          { status: 202 },
+        );
+      }
+
       const errorMessage =
         providerError instanceof Error
           ? providerError.message
