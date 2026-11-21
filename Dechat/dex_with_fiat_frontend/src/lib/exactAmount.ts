@@ -64,12 +64,40 @@ export type ParseAmountResult = ParseAmountSuccess | ParseAmountError;
  * @param metadata - Token precision configuration (decimals, maxAmount, symbol).
  * @returns Result object with `success: true` and `stroops: bigint`, or `success: false` and `error: string`.
  */
+export interface ParseAssetAmountOptions extends Partial<TokenPrecisionMetadata> {
+  locale?: string;
+}
+
+function normalizeLocalizedAmountInput(raw: string, locale?: string): string {
+  const value = raw.trim();
+  if (!locale) return value;
+  const compact = value.replace(/[\s\u00A0]/g, '');
+  const hasDot = compact.includes('.');
+  const hasComma = compact.includes(',');
+  if (!hasDot && hasComma) {
+    const commaDecimalLocales = /^(fr|de|es|it|pt|nl|pl|ru|tr|id|vi)(-|$)/i;
+    const parts = compact.split(',');
+    if (parts.length === 2 && (commaDecimalLocales.test(locale) || parts[1].length !== 3)) return `${parts[0]}.${parts[1]}`;
+    if (parts.slice(1).every((p) => p.length === 3)) return parts.join('');
+  }
+  if (hasDot && hasComma) {
+    const lastDot = compact.lastIndexOf('.');
+    const lastComma = compact.lastIndexOf(',');
+    const decimalSep = lastDot > lastComma ? '.' : ',';
+    const groupSep = decimalSep === '.' ? ',' : '.';
+    const split = compact.split(decimalSep);
+    if (split.length === 2) return `${split[0].split(groupSep).join('')}.${split[1]}`;
+  }
+  return compact;
+}
+
 export function parseAssetAmount(
   input: string | number,
-  metadata?: Partial<TokenPrecisionMetadata>,
+  metadata?: ParseAssetAmountOptions,
 ): ParseAmountResult {
   const decimals = metadata?.decimals ?? STELLAR_NATIVE_DECIMALS;
   const maxAmount = metadata?.maxAmount ?? MAX_I128;
+  const locale = metadata?.locale;
 
   if (decimals < 0 || decimals > 18 || !Number.isInteger(decimals)) {
     return {
@@ -79,7 +107,7 @@ export function parseAssetAmount(
     };
   }
 
-  const raw = String(input).trim();
+  const raw = normalizeLocalizedAmountInput(String(input), locale);
 
   if (!raw) {
     return {

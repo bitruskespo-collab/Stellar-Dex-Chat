@@ -143,6 +143,17 @@ describe('Exact Asset Amount Arithmetic', () => {
   describe('Property-based round-trip testing across varied precisions', () => {
     const precisions = [0, 2, 4, 6, 7, 9, 12, 18];
 
+    it('normalizes locale comma-decimal input while preserving canonical stroops (#274)', () => {
+      const fr = parseAssetAmount('12,34', { decimals: 7, locale: 'fr-FR' });
+      const us = parseAssetAmount('12.34', { decimals: 7, locale: 'en-US' });
+      expect(fr.success).toBe(true);
+      expect(us.success).toBe(true);
+      if (fr.success && us.success) {
+        expect(fr.stroops).toBe(us.stroops);
+        expect(fr.canonical).toBe(us.canonical);
+      }
+    });
+
     it('round-trips boundary values across all precisions', () => {
       for (const dec of precisions) {
         const meta: TokenPrecisionMetadata = { decimals: dec };
