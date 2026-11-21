@@ -1,6 +1,13 @@
 import fs from 'fs';
 import path from 'path';
 import { payoutAuditLedger, PayoutAuditLedger } from './auditLedger';
+import {
+  PayoutEvidence,
+  PayoutEvidenceResolution,
+  payoutEvidenceConflictResolver,
+} from './evidenceConflictResolver';
+import { getAllTransfers, setTransferStatus } from '../transferStore';
+import { getPayoutProvider } from './providers/registry';
 
 export type DomainPayoutStatus =
   | 'pending'
@@ -297,6 +304,39 @@ export class PayoutReconciliationService {
     return result;
   }
 
+  /**
+   * Resolves signed webhook, provider polling, and imported statement evidence.
+   * Conflicting evidence is persisted for review and never silently overwrites
+   * the effective status.
+   */
+  public reconcileEvidence(params: {
+    payoutReference: string;
+    evidence: PayoutEvidence[];
+  }): PayoutEvidenceResolution {
+    const resolution = payoutEvidenceConflictResolver.resolve(params);
+    if (resolution.conflict) {
+      this.auditLedger.recordEvent({
+        payoutId: params.payoutReference,
+        action: 'payout_event_rejected',
+        actor: 'system:evidence-resolution',
+        requestCorrelationId: resolution.conflictId,
+        providerReference: resolution.effectiveStatus,
+        metadata: {
+          conflictId: resolution.conflictId,
+          effectiveStatus: resolution.effectiveStatus,
+          precedenceSource: resolution.precedenceSource,
+          evidenceSources: params.evidence.map((item) => item.source),
+          reason: resolution.reason,
+        },
+      });
+    }
+    return resolution;
+  }
+
+  public getEvidenceConflicts(payoutReference?: string) {
+    return payoutEvidenceConflictResolver.getConflicts(payoutReference);
+  }
+
   public _resetForTest(newDir?: string): void {
     this.rejectedEvents = [];
     this.storageFilePath = null;
@@ -307,3 +347,137 @@ export class PayoutReconciliationService {
 }
 
 export const payoutReconciliationService = new PayoutReconciliationService();
+
+export function reconcileEvidence(params: {
+  payoutReference: string;
+  evidence: PayoutEvidence[];
+}): PayoutEvidenceResolution {
+  return payoutReconciliationService.reconcileEvidence(params);
+}
+
+export async function reconcileStalePayouts(params?: {
+  staleAgeMs?: number;
+  batchSize?: number;
+}): Promise<{
+  processed: number;
+  transitioned: number;
+  noChange: number;
+  providerUnavailable: number;
+  conflicts: number;
+  errors: number;
+  results: Array<{
+    payoutReference: string;
+    outcome:
+      | 'transitioned'
+      | 'no_change'
+      | 'provider_unavailable'
+      | 'conflict'
+      | 'error';
+  }>;
+  timestamp: number;
+}> {
+  const staleAgeMs = params?.staleAgeMs ?? 5 * 60 * 1000;
+  const batchSize = params?.batchSize ?? 25;
+  const now = Date.now();
+  const candidates = getAllTransfers()
+    .filter(
+      (record) =>
+        record.status !== 'success' &&
+        record.status !== 'failed' &&
+        record.status !== 'reversed' &&
+        record.status !== 'cancelled' &&
+        now - Date.parse(record.updatedAt) >= staleAgeMs,
+    )
+    .slice(0, batchSize);
+
+  const summary = {
+    processed: candidates.length,
+    transitioned: 0,
+    noChange: 0,
+    providerUnavailable: 0,
+    conflicts: 0,
+    errors: 0,
+    results: [] as Array<{
+      payoutReference: string;
+      outcome:
+        | 'transitioned'
+        | 'no_change'
+        | 'provider_unavailable'
+        | 'conflict'
+        | 'error';
+    }>,
+    timestamp: now,
+  };
+
+  for (const record of candidates) {
+    try {
+      const provider = getPayoutProvider();
+      const providerStatus = await provider.checkTransferStatus({
+        reference: record.reference,
+      });
+      const resolution = payoutReconciliationService.reconcileEvidence({
+        payoutReference: record.reference,
+        evidence: [
+          {
+            source: 'provider_poll',
+            status: providerStatus.status,
+            observedAt: new Date().toISOString(),
+            reference: record.reference,
+            evidenceId: providerStatus.providerReference || record.reference,
+            amountMinor: providerStatus.amountMinor?.toString(),
+            currency: providerStatus.currency,
+          },
+        ],
+      });
+
+      if (resolution.conflict) {
+        summary.conflicts++;
+        summary.results.push({
+          payoutReference: record.reference,
+          outcome: 'conflict',
+        });
+        continue;
+      }
+
+      if (resolution.effectiveStatus === record.status) {
+        summary.noChange++;
+        summary.results.push({
+          payoutReference: record.reference,
+          outcome: 'no_change',
+        });
+        continue;
+      }
+
+      setTransferStatus({
+        ...record,
+        status: resolution.effectiveStatus,
+        updatedAt: new Date().toISOString(),
+      });
+      summary.transitioned++;
+      summary.results.push({
+        payoutReference: record.reference,
+        outcome: 'transitioned',
+      });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        (error.message.toLowerCase().includes('unavailable') ||
+          error.message.toLowerCase().includes('timeout'))
+      ) {
+        summary.providerUnavailable++;
+        summary.results.push({
+          payoutReference: record.reference,
+          outcome: 'provider_unavailable',
+        });
+      } else {
+        summary.errors++;
+        summary.results.push({
+          payoutReference: record.reference,
+          outcome: 'error',
+        });
+      }
+    }
+  }
+
+  return summary;
+}

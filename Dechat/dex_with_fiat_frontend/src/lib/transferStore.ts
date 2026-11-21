@@ -79,6 +79,7 @@ export interface TransferStatusRecord {
     | 'invalid_transition'
     | 'error';
   nextRetryAt?: number;
+  history?: PayoutTransitionRecord[];
 }
 
 // Key is the transfer reference
@@ -99,6 +100,54 @@ export function setTransferStatus(
 
 export function getAllTransfers(): TransferStatusRecord[] {
   return Array.from(transferStore.values());
+}
+
+export function transitionPayoutStatus(params: {
+  reference: string;
+  targetStatus: PayoutStatus;
+  actor: PayoutActor | string;
+  providerReference?: string;
+  reason?: string;
+  amount?: number;
+  updatedAt?: string;
+  clientSessionId?: string;
+  failureReason?: string;
+}): TransferStatusRecord {
+  const existing = transferStore.get(params.reference);
+  const currentStatus = existing?.status;
+  validatePayoutTransition(
+    currentStatus || 'none',
+    params.targetStatus,
+    params.reference,
+  );
+
+  if (currentStatus === params.targetStatus) {
+    return existing!;
+  }
+
+  const timestamp = params.updatedAt || new Date().toISOString();
+  const record: TransferStatusRecord = {
+    reference: params.reference,
+    status: params.targetStatus,
+    amount: params.amount ?? existing?.amount ?? 0,
+    updatedAt: timestamp,
+    clientSessionId: params.clientSessionId ?? existing?.clientSessionId,
+    failureReason: params.failureReason ?? existing?.failureReason,
+    history: [
+      ...(existing?.history || []),
+      {
+        fromStatus: currentStatus || 'none',
+        toStatus: params.targetStatus,
+        actor: params.actor,
+        providerReference: params.providerReference,
+        timestamp,
+        reason: params.reason,
+      },
+    ],
+  };
+
+  transferStore.set(params.reference, record);
+  return record;
 }
 
 export function clearTransferStore(): void {

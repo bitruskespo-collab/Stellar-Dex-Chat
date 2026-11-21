@@ -17,10 +17,12 @@ import { payoutReconciliationService } from '@/lib/payout/reconciliation';
 // ---------------------------------------------------------------------------
 // We mock the env module so we can swap PAYSTACK_SECRET_KEY per test.
 // ---------------------------------------------------------------------------
-const mockEnv = {
-  PAYSTACK_SECRET_KEY: 'test-secret',
-  PAYOUT_PROVIDER: 'paystack',
-} as Record<string, string | undefined>;
+const { mockEnv } = vi.hoisted(() => ({
+  mockEnv: {
+    PAYSTACK_SECRET_KEY: 'test-secret',
+    PAYOUT_PROVIDER: 'paystack',
+  } as Record<string, string | undefined>,
+}));
 vi.mock('@/lib/serverEnv', () => ({
   get serverEnv() {
     return mockEnv;

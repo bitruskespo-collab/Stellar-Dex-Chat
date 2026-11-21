@@ -3,12 +3,17 @@ import { telemetry } from '@/lib/telemetry';
 import {
   isReplayEvent,
   getTransferStatus,
+  setTransferStatus,
   transitionPayoutStatus,
   InvalidPayoutTransitionError,
 } from '@/lib/transferStore';
 import { publishPaymentStatus } from '@/lib/paymentStatusEvents';
 import { webhookDeduplicationService } from '@/lib/payout/webhookDeduplication';
 import { payoutReconciliationService } from '@/lib/payout/reconciliation';
+import { serverEnv as env } from '@/lib/serverEnv';
+import crypto from 'crypto';
+import { credentialManager } from '@/lib/payout/credentialManager';
+import { applyRateLimit, getClientIp, ROUTE_COST_BUCKETS } from '@/lib/rateLimit';
 
 interface PaystackWebhookData {
   id?: string | number;
@@ -129,14 +134,13 @@ export async function POST(request: NextRequest) {
       });
       telemetry.finishSpan(span.spanId, {
         success: false,
-        error: verification.message ?? 'Invalid signature',
+        error: 'Invalid signature',
       });
 
-      console.error('Webhook signature verification failed:', verification.message);
-      const status = verification.error === 'missing_secret' ? 400 : 401;
+      console.error('Webhook signature verification failed');
       return NextResponse.json(
-        { message: verification.message ?? 'Invalid signature' },
-        { status },
+        { message: 'Invalid signature' },
+        { status: 401 },
       );
     }
     // Signature verified: request is recognized as a trusted provider callback and excluded from rate limiting
@@ -250,10 +254,37 @@ export async function POST(request: NextRequest) {
         eventId: dedupeEventId,
         payoutReference,
         eventType: event.event,
-        currentStatus: existingRecord?.status,
+        currentStatus:
+          existingRecord?.status && existingRecord.status !== 'initiated'
+            ? existingRecord.status
+            : undefined,
         payload: data as Record<string, unknown>,
         correlationId: traceContext.traceId,
       });
+
+      const evidenceStatus = payoutReconciliationService.mapEventToStatus(
+        event.event,
+      );
+      if (evidenceStatus) {
+        payoutReconciliationService.reconcileEvidence({
+          payoutReference,
+          evidence: [
+            {
+              source: 'signed_webhook',
+              status: evidenceStatus,
+              observedAt: new Date().toISOString(),
+              reference: payoutReference,
+              evidenceId: dedupeEventId,
+              signatureVerified: true,
+              amountMinor:
+                typeof data.amount === 'number'
+                  ? String(data.amount)
+                  : undefined,
+              payload: data as Record<string, unknown>,
+            },
+          ],
+        });
+      }
 
       if (reconciliation.decision === 'REJECTED_OUT_OF_ORDER') {
         telemetry.addLog(

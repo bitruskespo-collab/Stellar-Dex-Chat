@@ -118,6 +118,17 @@ export interface InitiateTransferInput {
   credentialVersion?: string;
 }
 
+export interface InitiatedTransfer {
+  reference: string;
+  status: NormalizedPayoutStatus;
+  providerReference?: string;
+  transferCode?: string;
+  amountMinor: bigint;
+  currency: string;
+  recipientCode: string;
+  rawResponse?: unknown;
+}
+
 // Backward compatibility alias
 export type InitiateTransferResult = InitiatedTransfer;
 

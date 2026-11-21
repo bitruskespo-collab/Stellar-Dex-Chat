@@ -12,6 +12,16 @@
 2. `GET /v1/payouts/{reference}/status`
    - Returns real-time status mapped from provider webhooks and contract events.
 
+### Evidence reconciliation
+`POST /api/admin/reconciliation` polls stale pending payouts. Its response includes
+`conflicts` and per-payout outcomes. `GET /api/admin/reconciliation?format=report`
+returns reconciliation records and includes persisted evidence conflicts for
+authorized operators.
+
+The effective status follows the documented [payout evidence precedence model](../payout/EVIDENCE_PRECEDENCE.md).
+An evidence conflict is persisted for review; it does not silently replace the
+highest-precedence status.
+
 ## Error Model
 Standard RFC 7807 Problem Details are returned for non-2xx responses:
 ```json

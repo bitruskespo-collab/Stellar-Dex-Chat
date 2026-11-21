@@ -134,4 +134,73 @@ describe('PayoutReconciliationService', () => {
     expect(rejected[0].eventId).toBe('evt_delayed');
     expect(rejected[0].payload).toEqual({ note: 'delayed webhook callback' });
   });
+
+  it('prefers verified webhook evidence and persists polling conflicts', () => {
+    const resolution = service.reconcileEvidence({
+      payoutReference: 'ref_conflict',
+      evidence: [
+        {
+          source: 'signed_webhook',
+          status: 'failed',
+          observedAt: '2026-11-21T12:00:00Z',
+          reference: 'ref_conflict',
+          evidenceId: 'evt_failed',
+          signatureVerified: true,
+        },
+        {
+          source: 'provider_poll',
+          status: 'success',
+          observedAt: '2026-11-21T12:01:00Z',
+          reference: 'ref_conflict',
+          evidenceId: 'poll_success',
+        },
+        {
+          source: 'imported_statement',
+          status: 'success',
+          observedAt: '2026-11-21T12:02:00Z',
+          reference: 'ref_conflict',
+          evidenceId: 'statement_success',
+        },
+      ],
+    });
+
+    expect(resolution.conflict).toBe(true);
+    expect(resolution.effectiveStatus).toBe('failed');
+    expect(resolution.precedenceSource).toBe('signed_webhook');
+    expect(service.getEvidenceConflicts('ref_conflict')).toHaveLength(1);
+  });
+
+  it('rejects unverified webhook evidence and recovers with verified evidence', () => {
+    expect(() =>
+      service.reconcileEvidence({
+        payoutReference: 'ref_unverified',
+        evidence: [
+          {
+            source: 'signed_webhook',
+            status: 'success',
+            observedAt: '2026-11-21T12:00:00Z',
+            reference: 'ref_unverified',
+            evidenceId: 'evt_unverified',
+            signatureVerified: false,
+          },
+        ],
+      }),
+    ).toThrow(/unverified/i);
+
+    const recovered = service.reconcileEvidence({
+      payoutReference: 'ref_unverified',
+      evidence: [
+        {
+          source: 'signed_webhook',
+          status: 'success',
+          observedAt: '2026-11-21T12:03:00Z',
+          reference: 'ref_unverified',
+          evidenceId: 'evt_verified',
+          signatureVerified: true,
+        },
+      ],
+    });
+    expect(recovered.conflict).toBe(false);
+    expect(recovered.effectiveStatus).toBe('success');
+  });
 });
