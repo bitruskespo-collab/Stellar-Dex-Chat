@@ -61,7 +61,12 @@ describe('/api/admin/payout-retry', () => {
       new Request('http://localhost/api/admin/payout-retry', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ jobId: job.id, action: 'replay' }),
+        body: JSON.stringify({
+          jobId: job.id,
+          action: 'replay',
+          actor: 'operator:admin_user',
+          reason: 'Provider key rotated; original transfer never landed',
+        }),
       }),
     );
 
@@ -72,6 +77,84 @@ describe('/api/admin/payout-retry', () => {
     expect(data.success).toBe(true);
     expect(data.job.status).toBe('pending');
     expect(data.job.idempotencyKey).toBe('idem-dl-2');
+  });
+
+  it('previews affected records without mutating the job', async () => {
+    const job = payoutRetryQueue.enqueueJob({
+      payoutId: 'PO-PREVIEW',
+      idempotencyKey: 'idem-preview',
+      payload: { source: 'balance', amount: 999, recipient: 'RCP-PREVIEW' },
+    });
+    job.status = 'dead_letter';
+
+    const req = new NextRequest(
+      new Request('http://localhost/api/admin/payout-retry', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ jobId: job.id, action: 'preview' }),
+      }),
+    );
+
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+
+    const data = await res.json();
+    expect(data.preview.eligible).toBe(true);
+    expect(data.preview.idempotencyKey).toBe('idem-preview');
+    expect(data.preview.affectedRecords).toHaveLength(3);
+    // Preview is a dry run: job stays dead-letter
+    expect(job.status).toBe('dead_letter');
+  });
+
+  it('rejects replay without a reason', async () => {
+    const job = payoutRetryQueue.enqueueJob({
+      payoutId: 'PO-NOREASON',
+      idempotencyKey: 'idem-noreason',
+      payload: { source: 'balance', amount: 100, recipient: 'RCP-NOREASON' },
+    });
+    job.status = 'dead_letter';
+
+    const req = new NextRequest(
+      new Request('http://localhost/api/admin/payout-retry', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ jobId: job.id, action: 'replay' }),
+      }),
+    );
+
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(data.error).toMatch(/reason/);
+    // Job must remain dead-letter
+    expect(job.status).toBe('dead_letter');
+  });
+
+  it('rejects replay of a job that is not dead-letter, keeping the action idempotent', async () => {
+    const job = payoutRetryQueue.enqueueJob({
+      payoutId: 'PO-NOTDL',
+      idempotencyKey: 'idem-notdl',
+      payload: { source: 'balance', amount: 100, recipient: 'RCP-NOTDL' },
+    });
+    job.status = 'pending';
+
+    const req = new NextRequest(
+      new Request('http://localhost/api/admin/payout-retry', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          jobId: job.id,
+          action: 'replay',
+          reason: 'duplicate click',
+        }),
+      }),
+    );
+
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+    // State is unchanged: no second provider call is ever made
+    expect(job.status).toBe('pending');
+    expect(job.attempts).toBe(0);
   });
 
   it('returns 400 for non-replay action or missing jobId', async () => {

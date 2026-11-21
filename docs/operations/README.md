@@ -4,6 +4,11 @@ Operational procedures for the DEX-with-fiat payout stack. This document covers
 observability, alerting, and — per issue #122 — backup and disaster recovery
 (DR) rehearsal for durable payout state.
 
+## Related runbooks
+
+- [Dead-letter replay](dead-letter-replay.md) — bounded, audited, idempotent
+  operator replay of exhausted dead-letter payout jobs (issue #237).
+
 ## Scope of durable payout state
 
 The following data is considered authoritative payout state and MUST be covered

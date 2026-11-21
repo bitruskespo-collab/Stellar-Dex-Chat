@@ -33,6 +33,31 @@ export interface BackoffConfig {
   jitterFactor: number;
 }
 
+export interface AffectedRecord {
+  kind: 'retry_job' | 'payout_intent' | 'idempotency_record';
+  id: string;
+  detail: string;
+}
+
+/**
+ * Dry-run preview of the records a dead-letter replay would touch. Returned
+ * without mutating any state so the operator can confirm scope before
+ * committing to a replay that reuses the original idempotency key.
+ */
+export interface DeadLetterReplayPreview {
+  jobId: string;
+  eligible: boolean;
+  ineligibleReason?: string;
+  payoutId: string;
+  idempotencyKey: string;
+  payload: RetryJobPayload;
+  attempts: number;
+  maxAttempts: number;
+  lastError?: string;
+  affectedRecords: AffectedRecord[];
+  note: string;
+}
+
 export const DEFAULT_BACKOFF_CONFIG: BackoffConfig = {
   baseDelayMs: 1000,
   maxDelayMs: 60000,
@@ -307,14 +332,73 @@ export class PayoutRetryQueue {
   }
 
   /**
+   * Operator action (dry-run): Preview the records a dead-letter replay would
+   * affect without mutating any state. Lets the operator confirm scope before
+   * committing to a replay that reuses the original idempotency key.
+   */
+  public previewDeadLetterReplay(jobId: string): DeadLetterReplayPreview {
+    const job = this.jobs.get(jobId);
+    if (!job) {
+      throw new Error(`Retry job not found: ${jobId}`);
+    }
+
+    const eligible = job.status === 'dead_letter';
+
+    return {
+      jobId: job.id,
+      eligible,
+      ineligibleReason: eligible
+        ? undefined
+        : `Only dead-letter jobs can be replayed. Current status: ${job.status}`,
+      payoutId: job.payoutId,
+      idempotencyKey: job.idempotencyKey,
+      payload: job.payload,
+      attempts: job.attempts,
+      maxAttempts: job.maxAttempts,
+      lastError: job.lastError,
+      affectedRecords: [
+        {
+          kind: 'retry_job',
+          id: job.id,
+          detail: `Retry job ${job.id} (status: ${job.status}) will be rescheduled for immediate execution`,
+        },
+        {
+          kind: 'payout_intent',
+          id: job.payoutId,
+          detail: `Payout ${job.payoutId} for ${job.payload.amount} to ${job.payload.recipient}`,
+        },
+        {
+          kind: 'idempotency_record',
+          id: job.idempotencyKey,
+          detail: `Original idempotency key ${job.idempotencyKey} will be reused, preserving provider dedupe`,
+        },
+      ],
+      note: 'Replay reschedules this job using its original idempotency key. The provider dedupes on that key, so the operator action cannot cause a duplicate transfer.',
+    };
+  }
+
+  /**
    * Operator action: Replay an exhausted dead-letter job.
-   * Resets status to pending with immediate execution schedule,
-   * reusing the original idempotency key to prevent double transfers.
+   *
+   * Requires a non-empty `reason` so every replay is attributable. Resets
+   * status to pending with immediate execution schedule, reusing the original
+   * idempotency key to prevent double transfers. Records the operator and the
+   * resulting provider state in the append-only audit ledger.
+   *
+   * Idempotent: only dead-letter jobs are eligible, so a repeated replay is a
+   * no-op error rather than a second provider call.
    */
   public replayDeadLetterJob(
     jobId: string,
     actor = 'operator:admin',
+    reason?: string,
   ): RetryJob {
+    if (!reason || !reason.trim()) {
+      throw new Error(
+        'A non-empty reason is required to replay a dead-letter job',
+      );
+    }
+
     const job = this.jobs.get(jobId);
     if (!job) {
       throw new Error(`Retry job not found: ${jobId}`);
@@ -340,7 +424,10 @@ export class PayoutRetryQueue {
       metadata: {
         jobId: job.id,
         action: 'operator_replay',
+        reason,
         originalIdempotencyKey: job.idempotencyKey,
+        resultingStatus: job.status,
+        nextRunAt: new Date(job.nextRunAt).toISOString(),
       },
     });
 

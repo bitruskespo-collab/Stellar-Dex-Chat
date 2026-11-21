@@ -176,6 +176,7 @@ describe('PayoutRetryQueue', () => {
     const replayedJob = retryQueue.replayDeadLetterJob(
       job.id,
       'operator:admin_user',
+      'Provider API key rotated; original transfer never reached the provider',
     );
     expect(replayedJob.status).toBe('pending');
     expect(replayedJob.attempts).toBe(0);
@@ -197,8 +198,103 @@ describe('PayoutRetryQueue', () => {
     const auditEntries = auditLedger.getEntries({
       payoutId: 'PO-OPERATOR',
     }).entries;
-    expect(auditEntries.some((e) => e.action === 'dead_letter_replayed')).toBe(
-      true,
+    const replayedEntry = auditEntries.find(
+      (e) => e.action === 'dead_letter_replayed',
     );
+    expect(replayedEntry).toBeDefined();
+    expect(replayedEntry?.actor).toBe('operator:admin_user');
+    // Audit records the required reason and the resulting provider state
+    expect(replayedEntry?.metadata.reason).toBe(
+      'Provider API key rotated; original transfer never reached the provider',
+    );
+    expect(replayedEntry?.metadata.originalIdempotencyKey).toBe(
+      'idem-operator-key',
+    );
+    expect(replayedEntry?.metadata.resultingStatus).toBe('pending');
+  });
+
+  it('previews affected records for a dead-letter replay without mutating state', () => {
+    const job = retryQueue.enqueueJob({
+      payoutId: 'PO-PREVIEW',
+      idempotencyKey: 'idem-preview-key',
+      payload: { source: 'balance', amount: 4200, recipient: 'RCP-PREVIEW' },
+      initialDelayMs: 0,
+    });
+    job.status = 'dead_letter';
+
+    const preview = retryQueue.previewDeadLetterReplay(job.id);
+    expect(preview.eligible).toBe(true);
+    expect(preview.jobId).toBe(job.id);
+    expect(preview.idempotencyKey).toBe('idem-preview-key');
+    expect(preview.payoutId).toBe('PO-PREVIEW');
+    expect(preview.affectedRecords).toHaveLength(3);
+    expect(preview.affectedRecords.map((r) => r.kind)).toEqual([
+      'retry_job',
+      'payout_intent',
+      'idempotency_record',
+    ]);
+    // Preview must not mutate the job
+    expect(job.status).toBe('dead_letter');
+    expect(job.attempts).toBe(0);
+  });
+
+  it('marks non-dead-letter jobs as ineligible in the preview', () => {
+    const job = retryQueue.enqueueJob({
+      payoutId: 'PO-PENDING',
+      idempotencyKey: 'idem-pending-key',
+      payload: { source: 'balance', amount: 100, recipient: 'RCP-PENDING' },
+      initialDelayMs: 0,
+    });
+    // job is still pending, not dead_letter
+
+    const preview = retryQueue.previewDeadLetterReplay(job.id);
+    expect(preview.eligible).toBe(false);
+    expect(preview.ineligibleReason).toMatch(/Only dead-letter jobs/);
+  });
+
+  it('throws when previewing an unknown job', () => {
+    expect(() => retryQueue.previewDeadLetterReplay('missing-id')).toThrow(
+      /Retry job not found/,
+    );
+  });
+
+  it('requires a non-empty reason to replay a dead-letter job', async () => {
+    const job = retryQueue.enqueueJob({
+      payoutId: 'PO-REASON',
+      idempotencyKey: 'idem-reason-key',
+      payload: { source: 'balance', amount: 300, recipient: 'RCP-REASON' },
+      initialDelayMs: 0,
+    });
+    job.status = 'dead_letter';
+
+    expect(() => retryQueue.replayDeadLetterJob(job.id)).toThrow(
+      /A non-empty reason is required/,
+    );
+    expect(() =>
+      retryQueue.replayDeadLetterJob(job.id, 'operator:admin', '   '),
+    ).toThrow(/A non-empty reason is required/);
+
+    // Job must remain dead-letter when reason is missing
+    expect(job.status).toBe('dead_letter');
+    expect(
+      auditLedger
+        .getEntries({ payoutId: 'PO-REASON' })
+        .entries.some((e) => e.action === 'dead_letter_replayed'),
+    ).toBe(false);
+  });
+
+  it('refuses to replay a job that is not dead-letter, keeping the action idempotent', () => {
+    const job = retryQueue.enqueueJob({
+      payoutId: 'PO-IDEMPOTENT',
+      idempotencyKey: 'idem-idempotent-key',
+      payload: { source: 'balance', amount: 800, recipient: 'RCP-IDEMPOTENT' },
+      initialDelayMs: 0,
+    });
+    job.status = 'pending';
+
+    expect(() =>
+      retryQueue.replayDeadLetterJob(job.id, 'operator:admin', 'retry'),
+    ).toThrow(/Only dead-letter jobs can be replayed/);
+    expect(job.status).toBe('pending');
   });
 });
