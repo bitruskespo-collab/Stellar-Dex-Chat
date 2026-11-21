@@ -58,7 +58,37 @@ policy was applied.
 
 ## Pull request checklist
 
+Every pull request is prefilled with the [PR template](../.github/PULL_REQUEST_TEMPLATE.md).
+Complete all sections that apply; a CI job (`PR Checklist Validation`) will
+fail if required items are left unchecked when the corresponding paths change.
+
+### Contract / ABI changes
+
 - [ ] Contract interface changes include regenerated bindings.
 - [ ] The CI drift check passes with no ABI diff.
 - [ ] Breaking changes are documented and versioned as described above.
 - [ ] Regeneration left unrelated files unchanged.
+- [ ] A storage migration script or `upgrade()` entry-point is included if
+      persistent storage layout changed.
+- [ ] A rollback strategy is documented (or the change is explicitly declared
+      irreversible and justified) in the PR description or in `MIGRATIONS.md`.
+
+### Frontend changes
+
+- [ ] UI changes are covered by unit tests or E2E tests.
+- [ ] No secrets, API keys, or real user data were added to fixtures.
+- [ ] `pnpm bundle-budget` passes.
+
+## Storage migrations and rollback
+
+When a contract upgrade changes the on-chain storage layout (key names, value
+types, or added/removed fields), include a migration in the same PR:
+
+1. Add an `upgrade(new_wasm_hash)` or `migrate()` entry-point that transforms
+   existing storage to the new layout.
+2. Document pre- and post-upgrade steps in `Dechat/stellar-contracts/MIGRATIONS.md`.
+3. Describe the rollback path in the PR body. If the migration is irreversible,
+   say so explicitly and explain why.
+
+The `readiness-gate` CI job checks for the presence of a migrations document
+when contract files change and emits a warning if none is found.

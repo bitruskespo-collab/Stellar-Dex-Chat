@@ -1,0 +1,183 @@
+name: PR Checklist Validation
+
+# Validates that the contract-upgrade section of the PR template is filled in
+# whenever contract or binding files are touched.  Fails fast with an
+# actionable message so authors don't discover a gap late in review.
+#
+# Checks performed:
+#   1. If contract sources changed  → the ABI / migration / rollback / bindings
+#      items must each be explicitly checked (- [x]) or the "not applicable"
+#      box must be checked.
+#   2. If frontend sources changed  → the frontend "not applicable" box or the
+#      individual frontend items must each be checked.
+#   3. The PR body must not be empty and must still contain the section headers
+#      (guards against accidentally deleting the template).
+#
+# This job is intentionally advisory on PRs that only touch non-contract paths
+# so it never blocks unrelated work.  It becomes required (exit 1) only when
+# the changed paths intersect the guarded sections.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  validate-checklist:
+    name: Validate PR checklist
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed paths
+        id: paths
+        run: |
+          set -euo pipefail
+          git fetch origin "${{ github.base_ref }}" --depth=1
+
+          CONTRACT_CHANGED=false
+          FRONTEND_CHANGED=false
+
+          if git diff --name-only "origin/${{ github.base_ref }}...HEAD" \
+               -- 'Dechat/stellar-contracts/**' | grep -q .; then
+            CONTRACT_CHANGED=true
+          fi
+
+          if git diff --name-only "origin/${{ github.base_ref }}...HEAD" \
+               -- 'Dechat/dex_with_fiat_frontend/**' | grep -q .; then
+            FRONTEND_CHANGED=true
+          fi
+
+          echo "contract_changed=${CONTRACT_CHANGED}" >> "$GITHUB_OUTPUT"
+          echo "frontend_changed=${FRONTEND_CHANGED}"  >> "$GITHUB_OUTPUT"
+          echo "Contract files changed: ${CONTRACT_CHANGED}"
+          echo "Frontend files changed: ${FRONTEND_CHANGED}"
+
+      - name: Validate PR body
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          CONTRACT_CHANGED: ${{ steps.paths.outputs.contract_changed }}
+          FRONTEND_CHANGED: ${{ steps.paths.outputs.frontend_changed }}
+        run: |
+          set -euo pipefail
+
+          ERRORS=0
+
+          # ── Guard: non-empty body ──────────────────────────────────────────
+          if [ -z "${PR_BODY:-}" ]; then
+            echo "::error::PR body is empty. Please fill in the pull request template."
+            exit 1
+          fi
+
+          # ── Guard: template section headers present ────────────────────────
+          for HEADER in \
+            "Contract / ABI changes" \
+            "Frontend changes" \
+            "Checklist"; do
+            if ! echo "$PR_BODY" | grep -qF "$HEADER"; then
+              echo "::error::PR body is missing the '${HEADER}' section. Do not remove template headings."
+              ERRORS=$((ERRORS + 1))
+            fi
+          done
+
+          if [ "$ERRORS" -gt 0 ]; then
+            exit 1
+          fi
+
+          # ── Helper: check whether a markdown checkbox is ticked ───────────
+          # Usage: is_checked "checkbox label substring"
+          is_checked() {
+            echo "$PR_BODY" | grep -qE "^\s*-\s*\[x\].*${1}" || \
+            echo "$PR_BODY" | grep -qE "^\s*-\s*\[X\].*${1}"
+          }
+
+          # ── Contract section validation ───────────────────────────────────
+          if [ "$CONTRACT_CHANGED" = "true" ]; then
+            echo "Contract files changed — validating contract checklist items…"
+
+            NOT_APPLICABLE_CONTRACT=false
+            is_checked "Not applicable.*no contract source" && NOT_APPLICABLE_CONTRACT=true
+
+            if [ "$NOT_APPLICABLE_CONTRACT" = "true" ]; then
+              echo "::notice::Contract 'Not applicable' box is checked; skipping detailed contract checks."
+            else
+              MISSING=""
+
+              is_checked "ABI compatibility" || \
+                MISSING="${MISSING}\n  - ABI compatibility"
+
+              is_checked "Storage migration" || \
+                MISSING="${MISSING}\n  - Storage migration"
+
+              is_checked "Rollback strategy" || \
+                MISSING="${MISSING}\n  - Rollback strategy"
+
+              is_checked "Generated bindings" || \
+                MISSING="${MISSING}\n  - Generated bindings"
+
+              is_checked "Tests.*contract" || is_checked "contract.*Tests" || \
+              is_checked "new or updated contract tests" || \
+              is_checked "Tests — new or updated" || \
+                MISSING="${MISSING}\n  - Tests"
+
+              if [ -n "$MISSING" ]; then
+                printf "::error::Contract files changed but the following checklist items are unchecked in the PR body:%b\n\nCheck each item (- [x]) or check '- [x] Not applicable' if no contract code was truly modified." "$MISSING"
+                ERRORS=$((ERRORS + 1))
+              else
+                echo "All required contract checklist items are checked."
+              fi
+            fi
+          else
+            echo "No contract files changed — skipping contract checklist validation."
+          fi
+
+          # ── Frontend section validation ───────────────────────────────────
+          if [ "$FRONTEND_CHANGED" = "true" ]; then
+            echo "Frontend files changed — validating frontend checklist items…"
+
+            NOT_APPLICABLE_FRONTEND=false
+            is_checked "Not applicable.*no frontend source" && NOT_APPLICABLE_FRONTEND=true
+
+            if [ "$NOT_APPLICABLE_FRONTEND" = "true" ]; then
+              echo "::notice::Frontend 'Not applicable' box is checked; skipping detailed frontend checks."
+            else
+              MISSING_FE=""
+
+              is_checked "UI changes are covered" || \
+                MISSING_FE="${MISSING_FE}\n  - UI test coverage"
+
+              is_checked "No secrets" || \
+                MISSING_FE="${MISSING_FE}\n  - Secrets / fixtures acknowledgement"
+
+              is_checked "Bundle-size budget" || \
+                MISSING_FE="${MISSING_FE}\n  - Bundle-size budget"
+
+              if [ -n "$MISSING_FE" ]; then
+                printf "::error::Frontend files changed but the following checklist items are unchecked in the PR body:%b\n\nCheck each item (- [x]) or check '- [x] Not applicable' if no frontend code was truly modified." "$MISSING_FE"
+                ERRORS=$((ERRORS + 1))
+              else
+                echo "All required frontend checklist items are checked."
+              fi
+            fi
+          else
+            echo "No frontend files changed — skipping frontend checklist validation."
+          fi
+
+          # ── Final result ──────────────────────────────────────────────────
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "::error::PR checklist validation failed. See the errors above."
+            exit 1
+          fi
+
+          echo "PR checklist validation passed."
