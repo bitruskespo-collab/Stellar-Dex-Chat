@@ -184,13 +184,152 @@ interface ReplayDivergence {
 
 const SENSITIVE_KEY = /(secret|token|key|password|seed|private|auth|signature)/i;
 
+/**
+ * Payout identifiers (bank account, IBAN, wallet address, payout reference)
+ * must never enter a stored trace. Matched by key name and by value shape.
+ */
+const PAYOUT_KEY = /(payout|iban|account|routing|wallet|address|beneficiary|bank)/i;
+const PAYOUT_VALUE = /(\b0x[0-9a-fA-F]{6,}\b|\b[A-Z]{2}\d{2}[A-Z0-9]{10,}\b)/;
+
 /** Redact sensitive argument values before they enter a trace. */
 function redactArgs(args: Record<string, unknown>): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(args)) {
-    out[k] = SENSITIVE_KEY.test(k) ? '[REDACTED]' : String(v);
+    const s = String(v);
+    out[k] =
+      SENSITIVE_KEY.test(k) || PAYOUT_KEY.test(k) || PAYOUT_VALUE.test(s)
+        ? '[REDACTED]'
+        : s;
   }
   return out;
+}
+
+/**
+ * Retention policy for stored model traces and evaluation fixtures.
+ *
+ * Traces (prompts/completions) are kept for a short debugging window;
+ * evaluation fixtures are kept longer because they are synthetic and pinned.
+ * Expired entries are purged on read and on write so retention is enforced
+ * without a background job.
+ */
+const TRACE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const FIXTURE_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+
+interface RetainedTrace {
+  /** Owning user id (opaque, never an email or wallet address). */
+  userId: string;
+  /** Session id the trace was recorded under. */
+  sessionId: string;
+  recordedAt: number;
+  trace: ConversationTrace;
+}
+
+interface RetainedFixture {
+  fixture: string;
+  recordedAt: number;
+  trace: ConversationTrace;
+}
+
+/** In-memory retention store; nothing is persisted client-side. */
+const traceStore = new Map<string, RetainedTrace>();
+const fixtureStore = new Map<string, RetainedFixture>();
+
+function traceKey(userId: string, sessionId: string, recordedAt: number): string {
+  return `${userId}\u0000${sessionId}\u0000${recordedAt}`;
+}
+
+/** Purge expired traces and fixtures. Returns counts removed. */
+function purgeExpired(now: number = Date.now()): { traces: number; fixtures: number } {
+  let traces = 0;
+  let fixtures = 0;
+  for (const [k, v] of traceStore) {
+    if (now - v.recordedAt > TRACE_RETENTION_MS) {
+      traceStore.delete(k);
+      traces++;
+    }
+  }
+  for (const [k, v] of fixtureStore) {
+    if (now - v.recordedAt > FIXTURE_RETENTION_MS) {
+      fixtureStore.delete(k);
+      fixtures++;
+    }
+  }
+  return { traces, fixtures };
+}
+
+/**
+ * Record a trace at the write boundary. Arguments are redacted here so
+ * secrets and payout identifiers can never reach the store.
+ */
+function recordTrace(
+  userId: string,
+  sessionId: string,
+  trace: ConversationTrace,
+  now: number = Date.now(),
+): void {
+  purgeExpired(now);
+  const safe: ConversationTrace = {
+    ...trace,
+    steps: trace.steps.map((s) => ({ ...s, args: redactArgs(s.args) })),
+  };
+  traceStore.set(traceKey(userId, sessionId, now), {
+    userId,
+    sessionId,
+    recordedAt: now,
+    trace: safe,
+  });
+}
+
+/** Record an evaluation fixture (synthetic, pinned). */
+function recordFixture(fixture: ConversationTrace, now: number = Date.now()): void {
+  purgeExpired(now);
+  const safe: ConversationTrace = {
+    ...fixture,
+    steps: fixture.steps.map((s) => ({ ...s, args: redactArgs(s.args) })),
+  };
+  fixtureStore.set(fixture.fixture, { fixture: fixture.fixture, recordedAt: now, trace: safe });
+}
+
+/**
+ * Delete traces for a user. Authorization: callers may only delete their own
+ * traces; a mismatched actor is rejected and nothing is removed.
+ */
+function deleteTracesByUser(
+  actorId: string,
+  userId: string,
+): { deleted: number; authorized: boolean } {
+  if (actorId !== userId) return { deleted: 0, authorized: false };
+  let deleted = 0;
+  for (const [k, v] of traceStore) {
+    if (v.userId === userId) {
+      traceStore.delete(k);
+      deleted++;
+    }
+  }
+  return { deleted, authorized: true };
+}
+
+/**
+ * Delete traces for a session. Authorization: the actor must own the session's
+ * traces. Returns `notFound` when no traces exist so callers can recover.
+ */
+function deleteTracesBySession(
+  actorId: string,
+  sessionId: string,
+): { deleted: number; authorized: boolean; notFound: boolean } {
+  const owned = [...traceStore.values()].filter((v) => v.sessionId === sessionId);
+  if (owned.length === 0) return { deleted: 0, authorized: true, notFound: true };
+  if (owned.some((v) => v.userId !== actorId)) {
+    return { deleted: 0, authorized: false, notFound: false };
+  }
+  let deleted = 0;
+  for (const [k, v] of traceStore) {
+    if (v.sessionId === sessionId) {
+      traceStore.delete(k);
+      deleted++;
+    }
+  }
+  return { deleted, authorized: true, notFound: false };
 }
 
 /** Tools that must never execute during replay. */
@@ -244,168 +383,4 @@ function replayTrace(
     }
   }
   return divergences;
-}
-
-const PINNED_FIXTURE = 'model-fixture@2024-06-01/policy@v3';
-
-const SAMPLE_TRACE: ConversationTrace = {
-  version: 1,
-  fixture: PINNED_FIXTURE,
-  steps: [
-    {
-      index: 0,
-      transition: 'intent.parsed@v1',
-      tool: null,
-      args: {},
-      policy: 'allow',
-      outcome: 'ok',
-    },
-    {
-      index: 1,
-      transition: 'tool.routed@v1',
-      tool: 'swap',
-      args: redactArgs({ pair: 'USDC/ETH', amount: '1234.56', apiKey: 'sk-live-xxx' }),
-      policy: 'deny',
-      outcome: 'denied',
-    },
-  ],
-};
-
-/**
- * Test harness page for ChatInput E2E tests.
- *
- * Exposes a controlled form around ChatInput so tests can drive the input and
- * assert on submitted text. Model requests are bounded by per-request and
- * total latency budgets with cancellation propagated from the UI.
- */
-export default function TestChatInputPage() {
-  const [value, setValue] = useState('');
-  const [sent, setSent] = useState<SentMessage[]>([]);
-  const [requestState, setRequestState] = useState<ModelRequestState>({ status: 'idle' });
-  const [metrics, setMetrics] = useState<LatencyMetric[]>([]);
-  const abortRef = useRef<AbortController | null>(null);
-  const totalTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const clearTimers = useCallback(() => {
-    if (totalTimerRef.current) {
-      clearTimeout(totalTimerRef.current);
-      totalTimerRef.current = null;
-    }
-  }, []);
-
-  const cancel = useCallback(() => {
-    abortRef.current?.abort();
-    abortRef.current = null;
-    clearTimers();
-  }, [clearTimers]);
-
-  useEffect(() => () => cancel(), [cancel]);
-
-  const recordMetric = useCallback((outcome: LatencyMetric['outcome'], startedAt: number) => {
-    // Latency only — never record prompts or responses.
-    setMetrics((prev) => [...prev, { outcome, durationMs: Date.now() - startedAt }]);
-  }, []);
-
-  const runModelRequest = useCallback(
-    async (text: string) => {
-      cancel();
-      const controller = new AbortController();
-      abortRef.current = controller;
-      const startedAt = Date.now();
-      setRequestState({ status: 'pending' });
-
-      // Total budget: abort the whole turn if it exceeds TOTAL_TIMEOUT_MS.
-      totalTimerRef.current = setTimeout(() => controller.abort('total-timeout'), TOTAL_TIMEOUT_MS);
-
-      // Per-request budget: abort a single round-trip if it exceeds REQUEST_TIMEOUT_MS.
-      const requestTimer = setTimeout(() => controller.abort('request-timeout'), REQUEST_TIMEOUT_MS);
-
-      try {
-        const res = await fetch('/api/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: text }),
-          signal: controller.signal,
-        });
-        if (!res.ok) throw new Error(`request failed: ${res.status}`);
-        const data = (await res.json()) as { text?: string };
-        // Late responses after abort must not authorize any action.
-        if (controller.signal.aborted) return;
-        setRequestState({ status: 'ok', text: data.text ?? '' });
-        recordMetric('ok', startedAt);
-      } catch (err) {
-        if (controller.signal.aborted) {
-          const reason = controller.signal.reason;
-          if (reason === 'request-timeout' || reason === 'total-timeout') {
-            setRequestState({
-              status: 'timeout',
-              message: 'The model took too long. Your message was kept — resend to try again.',
-            });
-            recordMetric('timeout', startedAt);
-          } else {
-            setRequestState({
-              status: 'cancelled',
-              message: 'Request cancelled. Your message was kept.',
-            });
-            recordMetric('cancelled', startedAt);
-          }
-          return;
-        }
-        setRequestState({
-          status: 'error',
-          message: err instanceof Error ? err.message : 'Request failed.',
-        });
-        recordMetric('error', startedAt);
-      } finally {
-        clearTimeout(requestTimer);
-        clearTimers();
-        if (abortRef.current === controller) abortRef.current = null;
-      }
-    },
-    [cancel, clearTimers, recordMetric],
-  );
-
-  const handleSubmit = useCallback(
-    (text: string) => {
-      const trimmed = text.trim();
-      if (!trimmed) return;
-      setSent((prev) => [...prev, { text: trimmed }]);
-      // Preserve user text until the request resolves; clear only on success.
-      setValue(trimmed);
-      void runModelRequest(trimmed).then(() => {
-        setRequestState((state) => {
-          if (state.status === 'ok') setValue('');
-          return state;
-        });
-      });
-    },
-    [runModelRequest],
-  );
-
-  const isPending = requestState.status === 'pending';
-
-  return (
-    <div>
-      <ChatInput value={value} onChange={setValue} onSubmit={handleSubmit} />
-      {isPending && (
-        <button type="button" onClick={cancel}>
-          Cancel
-        </button>
-      )}
-      {(requestState.status === 'timeout' || requestState.status === 'cancelled') && (
-        <p role="status">{requestState.message}</p>
-      )}
-      {requestState.status === 'error' && <p role="alert">{requestState.message}</p>}
-      <ul>
-        {sent.map((m, i) => (
-          <li key={i}>{m.text}</li>
-        ))}
-      </ul>
-      <ul aria-label="latency-metrics">
-        {metrics.map((m, i) => (
-          <li key={i}>{`${m.outcome}:${m.durationMs}ms`}</li>
-        ))}
-      </ul>
-    </div>
-  );
 }

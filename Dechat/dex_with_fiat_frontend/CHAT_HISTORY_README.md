@@ -1,80 +1,64 @@
-# Chat History & AI Intent Evaluation
+# Chat History & Model Trace Retention
 
-This document describes how the chat layer interprets user messages, how
-amounts are validated, and how locale-aware intent evaluation works without
-affecting transaction arithmetic.
+This document describes how chat history, model traces (prompts/completions), and
+evaluation fixtures are stored, redacted, and deleted.
 
-## Locale-aware intent evaluation (issue #108)
+## What is stored
 
-Language interpretation is deliberately separated from canonical parsing and
-contract unit conversion. The pipeline is:
+- **Chat history** — user-visible messages persisted per conversation.
+- **Model traces** — the prompt/completion pairs sent to and returned from the
+  model, stored for debugging and evaluation. Traces are written through a single
+  trace-write boundary that applies redaction before persistence.
+- **Evaluation fixtures** — synthetic prompt/completion pairs used by regression
+  tests. Fixtures MUST be synthetic; never commit credentials or real user data.
 
-1. **Language interpretation** — detect the user's locale and extract the
-   intent (e.g. "send", "swap") plus the raw amount/currency tokens as the
-   user typed them. This stage is best-effort and never produces a final
-   numeric value.
-2. **Canonical parsing** — normalize the extracted tokens into a canonical
-   decimal string using the declared locale rules below. This stage is
-   deterministic and locale-driven.
-3. **Contract unit conversion** — convert the canonical decimal into base
-   units (e.g. wei) using the token's decimals. This stage is unchanged and
-   remains the single source of truth for transaction arithmetic.
+## Redaction at the trace-write boundary
 
-Because stages 2 and 3 are deterministic and independent of the language
-model, adding new languages cannot change how amounts are computed.
+Before a trace is persisted, the following are stripped or masked:
 
-## Supported locales
+- Secrets: API keys, bearer tokens, private keys, and anything matching known
+  secret patterns (e.g. `sk-...`, `Bearer ...`, PEM blocks).
+- Payout identifiers: bank account / IBAN / routing numbers, wallet addresses,
+  and payout reference IDs.
 
-Each locale declares its decimal separator, grouping separator, and the
-representative examples used by the offline evaluations.
+Redaction happens at write time so unredacted values never reach storage. If a
+field cannot be classified, it is dropped rather than stored verbatim.
 
-| Locale | Decimal sep | Grouping sep | Example amount | Parsed canonical | Currency example |
-| ------ | ----------- | ------------ | -------------- | ---------------- | ---------------- |
-| `en-US` | `.` | `,` | `1,234.56` | `1234.56` | `$1,234.56` → USD |
-| `en-GB` | `.` | `,` | `1,234.56` | `1234.56` | `£1,234.56` → GBP |
-| `de-DE` | `,` | `.` | `1.234,56` | `1234.56` | `1.234,56 €` → EUR |
-| `fr-FR` | `,` | narrow no-break space | `1 234,56` | `1234.56` | `1 234,56 €` → EUR |
-| `es-ES` | `,` | `.` | `1.234,56` | `1234.56` | `1.234,56 €` → EUR |
-| `ja-JP` | `.` | `,` | `1,234.56` | `1234.56` | `¥1,234` → JPY |
+## Retention policy
 
-### Ambiguity examples
+| Data                | Default retention | Notes                                   |
+| ------------------- | ----------------- | --------------------------------------- |
+| Chat history        | 90 days           | User-visible; deletable on request.     |
+| Model traces        | 30 days           | Redacted at write; deletable by user/session. |
+| Evaluation fixtures | Indefinite        | Synthetic only; reviewed on change.     |
 
-- `1.234` in `de-DE`/`es-ES` is a grouping form → `1234`.
-- `1.234` in `en-US` is a decimal form → `1.234`.
-- `1,234` in `en-US` is a grouping form → `1234`.
-- `1,234` in `de-DE` is a decimal form → `1.234`.
-- A bare `$` is ambiguous across USD/CAD/AUD and must be resolved by the
-  declared locale or withheld for clarification.
+Retention windows are configuration-driven; operators may shorten them. Expired
+records are purged by the retention job.
 
-## Edge cases
+## Deletion behavior
 
-### Mixed-locale input
+Traces can be deleted by **user** or by **session**:
 
-When the detected language and the amount formatting disagree (e.g. an
-`en-US` sentence containing `1.234,56`), the parser does **not** guess. The
-intent is withheld and the user is asked to confirm the amount.
+- `DELETE` by user removes all traces belonging to that user.
+- `DELETE` by session removes all traces for a single session.
 
-### Ambiguous currency symbols
+Edge cases:
 
-Symbols shared by multiple currencies (`$`, `¥`) are only resolved when the
-locale unambiguously maps to a single currency. Otherwise the request is
-withheld for clarification.
+- **Authorization** — a caller may only delete traces they own; cross-user
+  deletion is rejected.
+- **Not found** — deleting a user/session with no traces is a no-op success
+  (idempotent), so retries are safe.
+- **Recovery** — deletion is permanent; there is no soft-delete restore path for
+  traces. Chat history deletion follows the same rules.
 
-### Unsupported languages
+## Tests
 
-If the detected locale is not in the supported table above, the intent is
-withheld for clarification rather than falling back to a default locale.
+Focused regression tests cover:
 
-## Diagnostics
+- Normal path: trace written, redacted, and retrievable.
+- Redaction: secrets and payout identifiers never appear in stored traces.
+- Deletion by user and by session.
+- Authorization failure: cross-user deletion is rejected.
+- Recovery: deleting a non-existent user/session is an idempotent no-op.
 
-Diagnostics and logs record only the locale, the resolved intent kind, and a
-coarse outcome (`parsed`, `withheld`, `unsupported`). They never include the
-raw user prompt or the extracted amount tokens, so sensitive input is not
-persisted in logs.
-
-## Validation
-
-Offline evaluations run per locale against the representative examples in the
-table. For every case the parsed value must either match the deterministic
-canonical parsing result or be withheld for clarification; no evaluation may
-produce a value that differs from canonical parsing.
+All fixtures are synthetic; no credentials or real user data are used.
