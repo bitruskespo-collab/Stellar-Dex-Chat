@@ -71,10 +71,6 @@ export function usePaystackWebhookStatus() {
       }
     };
 
-    eventSource.onerror = () => {
-      eventSource.close();
-    };
-
     return () => {
       eventSource.close();
     };

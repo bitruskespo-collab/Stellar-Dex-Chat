@@ -95,6 +95,11 @@ export const paymentStatusStreamQuerySchema = z.object({
     .string()
     .min(1, 'sessionId is required')
     .max(200, 'sessionId is too long'),
+  lastEventId: z
+    .string()
+    .regex(/^\d+$/, 'lastEventId must contain only digits')
+    .max(100, 'lastEventId is too long')
+    .optional(),
 });
 
 export type PaymentStatusStreamQuery = z.infer<

@@ -178,26 +178,34 @@ What would you like to do today? I'm here to make your XLM-to-fiat journey smoot
       }
     };
 
+    const pollStatus = async () => {
+      const reference =
+        machineRef.current.getState().context.pendingTransactionData?.transactionId;
+      if (!reference) return;
+      try {
+        const res = await fetch(
+          `/api/transfer-status/${encodeURIComponent(reference)}`,
+        );
+        if (res.ok) {
+          const json = (await res.json()) as { success: boolean; data?: PaymentStatusEvent };
+          if (json.success && json.data) {
+            handleStatusEvent(json.data);
+          }
+        }
+      } catch {
+        // network failure during polling — retry on next tick
+      }
+    };
+
     const startPolling = () => {
       stopPolling();
-      pollIntervalRef.current = setInterval(async () => {
-        const reference =
-          machineRef.current.getState().context.pendingTransactionData?.transactionId;
-        if (!reference) return;
-        try {
-          const res = await fetch(
-            `/api/transfer-status/${encodeURIComponent(reference)}`,
-          );
-          if (res.ok) {
-            const json = (await res.json()) as { success: boolean; data?: PaymentStatusEvent };
-            if (json.success && json.data) {
-              handleStatusEvent(json.data);
-            }
-          }
-        } catch {
-          // network failure during polling — retry on next tick
-        }
+      pollIntervalRef.current = setInterval(() => {
+        void pollStatus();
       }, POLL_INTERVAL_MS);
+    };
+
+    const handleReplayGap = () => {
+      void pollStatus();
     };
 
     if (typeof EventSource === 'undefined') {
@@ -216,21 +224,22 @@ What would you like to do today? I'm here to make your XLM-to-fiat journey smoot
         }
       };
 
+      es.onopen = stopPolling;
+      es.addEventListener('resync', handleReplayGap);
+
       es.onerror = () => {
-        es.close();
-        sseRef.current = null;
-        // SSE failed — fall back to polling
+        // EventSource reconnects automatically; polling bridges the gap.
         startPolling();
       };
     }
 
     return () => {
+      sseRef.current?.removeEventListener('resync', handleReplayGap);
       sseRef.current?.close();
       sseRef.current = null;
       stopPolling();
     };
   // Re-run only when the session changes so the connection tracks the right session.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentSessionId]);
 
   const appendCancelledMessage = useCallback((content: string) => {

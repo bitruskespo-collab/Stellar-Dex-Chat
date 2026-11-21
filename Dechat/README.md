@@ -116,9 +116,17 @@ Once the withdrawal clears its timelock, the frontend's API routes coordinate th
 1. **Verify** the user's bank account (`/api/verify-account`)
 2. **Create** a transfer recipient (`/api/create-recipient`)
 3. **Initiate** the bank transfer (`/api/initiate-transfer`)
-4. **Poll** transfer status until settlement (`/api/transfer-status`)
+4. **Track** transfer status over the payment-status SSE stream, with
+   `/api/transfer-status` polling as a reconnect/recovery fallback
 
 The user sees a real-time transfer timeline in the chat interface and can download a PDF receipt when the payout completes.
+
+The SSE stream uses per-session event IDs and replays retained updates after
+`Last-Event-ID`. Its replay history and each connection's pending queue are
+bounded to 100 events; slow connections are closed so EventSource can reconnect
+without holding up payout processing. Idle connections receive a heartbeat
+every 15 seconds. Replay is process-local, so a `resync` event or deployment
+restart falls back to querying the active transfer's current status.
 
 ## 📋 Prerequisites
 
