@@ -141,6 +141,55 @@ const sampleMessages: ChatMessage[] = [
       },
     },
   },
+  {
+    id: 'm10',
+    role: 'assistant',
+    content: 'The current XLM/USD rate is 0.1234 USD per XLM.',
+    timestamp: new Date(),
+    metadata: {
+      status: 'sent',
+      financialFact: {
+        kind: 'rate',
+        pair: 'XLM/USD',
+        value: '0.1234',
+        freshness: 'unsupported',
+      },
+    },
+  },
+  {
+    id: 'm11',
+    role: 'assistant',
+    content: 'The network fee for this transfer is 0.00001 XLM.',
+    timestamp: new Date(),
+    metadata: {
+      status: 'sent',
+      financialFact: {
+        kind: 'fee',
+        value: '0.00001',
+        source: {
+          name: 'Stellar network fee stats',
+          url: 'https://example.com/fees',
+        },
+        observedAt: new Date(Date.now() - 15 * 1000),
+        validUntil: new Date(Date.now() + 45 * 1000),
+        freshness: 'fresh',
+      },
+    },
+  },
+  {
+    id: 'm12',
+    role: 'assistant',
+    content: 'The network fee for this transfer is 0.00001 XLM.',
+    timestamp: new Date(),
+    metadata: {
+      status: 'sent',
+      financialFact: {
+        kind: 'fee',
+        value: '0.00001',
+        freshness: 'unsupported',
+      },
+    },
+  },
 ];
 
 export default function Page() {

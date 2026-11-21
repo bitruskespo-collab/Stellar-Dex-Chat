@@ -67,3 +67,6 @@ MIT
 
 <!-- handsoff-issue-13 -->
 - #13: feat(contract): reserve withdrawal amounts when requests are queued
+
+<!-- handsoff-issue-213 -->
+- #213: Evaluate multi-turn intent retention and correction handling

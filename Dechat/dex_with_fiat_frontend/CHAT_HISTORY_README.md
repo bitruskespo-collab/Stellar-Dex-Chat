@@ -65,6 +65,51 @@ withheld for clarification.
 If the detected locale is not in the supported table above, the intent is
 withheld for clarification rather than falling back to a default locale.
 
+## Provenance for AI-generated financial claims (issue #216)
+
+Rate and fee figures that originate from the language model are never
+presented as current facts on their own. Every such claim must carry
+user-visible provenance so the user can judge how fresh and how reliable it
+is.
+
+### Rate and fee claims must cite their source
+
+When the assistant surfaces a rate or fee, the response must include the
+underlying quote/provider timestamp it was derived from, for example:
+
+> 1 ETH ≈ 3,120.45 USD — quote from *ExampleSwap* at 2024-05-01T12:00:00Z.
+
+A rate or fee claim without an attached quote/provider timestamp is treated
+as unsupported and is not shown as a current fact (see the refusal path
+below). The timestamp is rendered from the quote record, not from the model
+output, so the model cannot fabricate freshness.
+
+### Estimates are labelled as estimates
+
+Values that are approximate, projected, or derived from a model estimate are
+labelled explicitly as estimates rather than presented as current facts:
+
+> Estimated network fee: ~0.00042 ETH (estimate, not a live quote).
+
+Labels are applied by the presentation layer based on the claim kind, so an
+estimate can never be rendered with the same styling as a live quote.
+
+### Unsupported numeric values are declined
+
+If the model produces a numeric rate or fee that cannot be tied to a quote or
+provider record, the assistant declines to present it as a current fact. It
+instead explains that it cannot confirm the value and points the user to the
+live quote source. This mirrors the existing "withheld for clarification"
+behavior used for ambiguous amounts: the safe path is to withhold rather than
+guess.
+
+### Diagnostics
+
+Provenance diagnostics record only the claim kind (`rate`, `fee`), whether a
+quote/provider timestamp was attached, and the coarse outcome (`cited`,
+`estimate`, `declined`). They never include the raw model output or the
+numeric value, consistent with the logging rules above.
+
 ## Diagnostics
 
 Diagnostics and logs record only the locale, the resolved intent kind, and a
@@ -78,3 +123,8 @@ Offline evaluations run per locale against the representative examples in the
 table. For every case the parsed value must either match the deterministic
 canonical parsing result or be withheld for clarification; no evaluation may
 produce a value that differs from canonical parsing.
+
+Provenance evaluations additionally cover the normal path (a rate/fee claim
+with a quote timestamp is cited), the estimate path (approximate values are
+labelled), and the failure path (a numeric claim without a quote is declined
+rather than shown as a current fact).
