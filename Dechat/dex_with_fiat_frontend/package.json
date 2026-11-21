@@ -20,6 +20,8 @@
     "test:e2e:install": "playwright install",
     "test:e2e:fullstack": "playwright test --project=fullstack",
     "test:a11y": "playwright test --project=a11y",
+    "test:visual": "playwright test --project=visual-mobile --project=visual-desktop",
+    "test:visual:update": "playwright test --project=visual-mobile --project=visual-desktop --update-snapshots",
     "test:unit:watch": "vitest",
     "test:coverage": "vitest run --coverage --maxWorkers=1 --pool=forks --no-file-parallelism",
     "test:coverage:merge": "vitest run --mergeReports --coverage --reporter=default",

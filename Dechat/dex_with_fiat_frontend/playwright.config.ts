@@ -58,6 +58,10 @@ const e2eEnv: Record<string, string> = {
     process.env.E2E_PAYOUT_PROVIDER_URL ?? 'http://127.0.0.1:8787',
 };
 
+// Issue #211: visual regression baselines are committed per viewport. Keep the
+// snapshot path stable and deterministic so CI diffs are reviewable.
+const VISUAL_SNAPSHOT_PATH = process.env.VISUAL_SNAPSHOT_PATH ?? './tests/visual/__screenshots__';
+
 export default defineConfig({
   testDir: './tests/e2e',
   fullyParallel: true,
@@ -73,6 +77,15 @@ export default defineConfig({
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
   },
+  expect: {
+    toHaveScreenshot: {
+      // Allow tiny anti-aliasing drift while still catching real regressions.
+      maxDiffPixelRatio: 0.01,
+      animations: 'disabled',
+      caret: 'hide',
+    },
+  },
+  snapshotPathTemplate: `${VISUAL_SNAPSHOT_PATH}/{testFilePath}/{arg}-{projectName}{ext}`,
   projects: [
     {
       name: 'chromium',
@@ -97,6 +110,18 @@ export default defineConfig({
       testDir: './tests/a11y',
       testMatch: /.*\.(spec|test)\.ts$/,
       use: { ...devices['Desktop Chrome'] },
+    },
+    {
+      name: 'visual-desktop',
+      testDir: './tests/visual',
+      testMatch: /.*\.visual\.ts$/,
+      use: { ...devices['Desktop Chrome'], viewport: { width: 1280, height: 800 } },
+    },
+    {
+      name: 'visual-mobile',
+      testDir: './tests/visual',
+      testMatch: /.*\.visual\.ts$/,
+      use: { ...devices['Pixel 7'] },
     },
   ],
   webServer: {

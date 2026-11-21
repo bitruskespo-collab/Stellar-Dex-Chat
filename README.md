@@ -67,3 +67,6 @@ MIT
 
 <!-- handsoff-issue-13 -->
 - #13: feat(contract): reserve withdrawal amounts when requests are queued
+
+<!-- handsoff-issue-210 -->
+- #210: Replace legacy admin page code with a supported route boundary

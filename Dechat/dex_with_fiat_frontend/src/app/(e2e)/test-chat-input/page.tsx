@@ -37,6 +37,110 @@ const STATUS_LABEL: Record<FactStatus, string> = {
 };
 
 /**
+ * Typed, versioned schema for AI tool-call proposals.
+ *
+ * Model output is validated against this strict schema before it reaches any
+ * transaction code. Unknown fields and unsupported operations are rejected,
+ * and a safe, sanitized explanation is preserved for user-facing
+ * clarification. The schema version is explicit so future revisions can be
+ * detected and rejected rather than silently misinterpreted.
+ */
+const TOOL_CALL_SCHEMA_VERSION = 1 as const;
+
+/** Operations the client is allowed to propose. Anything else is rejected. */
+const SUPPORTED_OPERATIONS = ['swap', 'send'] as const;
+type SupportedOperation = (typeof SUPPORTED_OPERATIONS)[number];
+
+interface ToolCallProposal {
+  schemaVersion: typeof TOOL_CALL_SCHEMA_VERSION;
+  operation: SupportedOperation;
+  /** Canonical amount after deterministic parsing; never a raw utterance. */
+  amount: number;
+  /** ISO 4217 or token symbol resolved from the utterance. */
+  currency: string;
+  /** Optional destination for `send`; must be absent for `swap`. */
+  recipient?: string;
+  /** Safe, sanitized explanation for user-facing clarification. */
+  explanation: string;
+}
+
+type ToolCallValidation =
+  | { ok: true; proposal: ToolCallProposal }
+  | { ok: false; reason: string; explanation: string };
+
+const TOOL_CALL_FIELDS = new Set([
+  'schemaVersion',
+  'operation',
+  'amount',
+  'currency',
+  'recipient',
+  'explanation',
+]);
+
+/** Strip control characters and cap length so explanations stay safe to render. */
+function sanitizeExplanation(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  // eslint-disable-next-line no-control-regex
+  const cleaned = raw.replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+  return cleaned.slice(0, 280);
+}
+
+/**
+ * Validate untrusted model output against the strict, versioned tool-call
+ * schema. Rejects unknown fields, unsupported operations, wrong schema
+ * versions, and malformed values. Never throws; always returns a safe
+ * explanation on failure.
+ */
+function validateToolCallProposal(raw: unknown): ToolCallValidation {
+  const fallback = 'I could not safely interpret that request. Please rephrase it.';
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return { ok: false, reason: 'not-an-object', explanation: fallback };
+  }
+  const obj = raw as Record<string, unknown>;
+  for (const key of Object.keys(obj)) {
+    if (!TOOL_CALL_FIELDS.has(key)) {
+      return { ok: false, reason: `unknown-field:${key}`, explanation: fallback };
+    }
+  }
+  if (obj.schemaVersion !== TOOL_CALL_SCHEMA_VERSION) {
+    return { ok: false, reason: 'unsupported-schema-version', explanation: fallback };
+  }
+  if (
+    typeof obj.operation !== 'string' ||
+    !(SUPPORTED_OPERATIONS as readonly string[]).includes(obj.operation)
+  ) {
+    return { ok: false, reason: 'unsupported-operation', explanation: fallback };
+  }
+  if (typeof obj.amount !== 'number' || !Number.isFinite(obj.amount) || obj.amount <= 0) {
+    return { ok: false, reason: 'invalid-amount', explanation: fallback };
+  }
+  if (typeof obj.currency !== 'string' || obj.currency.trim() === '') {
+    return { ok: false, reason: 'invalid-currency', explanation: fallback };
+  }
+  if (obj.recipient !== undefined && typeof obj.recipient !== 'string') {
+    return { ok: false, reason: 'invalid-recipient', explanation: fallback };
+  }
+  if (obj.operation === 'swap' && obj.recipient !== undefined) {
+    return { ok: false, reason: 'unexpected-recipient', explanation: fallback };
+  }
+  const explanation = sanitizeExplanation(obj.explanation);
+  if (explanation === '') {
+    return { ok: false, reason: 'missing-explanation', explanation: fallback };
+  }
+  return {
+    ok: true,
+    proposal: {
+      schemaVersion: TOOL_CALL_SCHEMA_VERSION,
+      operation: obj.operation as SupportedOperation,
+      amount: obj.amount,
+      currency: obj.currency,
+      recipient: obj.recipient as string | undefined,
+      explanation,
+    },
+  };
+}
+
+/**
  * Bounded latency budgets for model requests.
  *
  * `requestMs` bounds a single model round-trip; `totalMs` bounds the whole
@@ -244,168 +348,4 @@ function replayTrace(
     }
   }
   return divergences;
-}
-
-const PINNED_FIXTURE = 'model-fixture@2024-06-01/policy@v3';
-
-const SAMPLE_TRACE: ConversationTrace = {
-  version: 1,
-  fixture: PINNED_FIXTURE,
-  steps: [
-    {
-      index: 0,
-      transition: 'intent.parsed@v1',
-      tool: null,
-      args: {},
-      policy: 'allow',
-      outcome: 'ok',
-    },
-    {
-      index: 1,
-      transition: 'tool.routed@v1',
-      tool: 'swap',
-      args: redactArgs({ pair: 'USDC/ETH', amount: '1234.56', apiKey: 'sk-live-xxx' }),
-      policy: 'deny',
-      outcome: 'denied',
-    },
-  ],
-};
-
-/**
- * Test harness page for ChatInput E2E tests.
- *
- * Exposes a controlled form around ChatInput so tests can drive the input and
- * assert on submitted text. Model requests are bounded by per-request and
- * total latency budgets with cancellation propagated from the UI.
- */
-export default function TestChatInputPage() {
-  const [value, setValue] = useState('');
-  const [sent, setSent] = useState<SentMessage[]>([]);
-  const [requestState, setRequestState] = useState<ModelRequestState>({ status: 'idle' });
-  const [metrics, setMetrics] = useState<LatencyMetric[]>([]);
-  const abortRef = useRef<AbortController | null>(null);
-  const totalTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const clearTimers = useCallback(() => {
-    if (totalTimerRef.current) {
-      clearTimeout(totalTimerRef.current);
-      totalTimerRef.current = null;
-    }
-  }, []);
-
-  const cancel = useCallback(() => {
-    abortRef.current?.abort();
-    abortRef.current = null;
-    clearTimers();
-  }, [clearTimers]);
-
-  useEffect(() => () => cancel(), [cancel]);
-
-  const recordMetric = useCallback((outcome: LatencyMetric['outcome'], startedAt: number) => {
-    // Latency only — never record prompts or responses.
-    setMetrics((prev) => [...prev, { outcome, durationMs: Date.now() - startedAt }]);
-  }, []);
-
-  const runModelRequest = useCallback(
-    async (text: string) => {
-      cancel();
-      const controller = new AbortController();
-      abortRef.current = controller;
-      const startedAt = Date.now();
-      setRequestState({ status: 'pending' });
-
-      // Total budget: abort the whole turn if it exceeds TOTAL_TIMEOUT_MS.
-      totalTimerRef.current = setTimeout(() => controller.abort('total-timeout'), TOTAL_TIMEOUT_MS);
-
-      // Per-request budget: abort a single round-trip if it exceeds REQUEST_TIMEOUT_MS.
-      const requestTimer = setTimeout(() => controller.abort('request-timeout'), REQUEST_TIMEOUT_MS);
-
-      try {
-        const res = await fetch('/api/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: text }),
-          signal: controller.signal,
-        });
-        if (!res.ok) throw new Error(`request failed: ${res.status}`);
-        const data = (await res.json()) as { text?: string };
-        // Late responses after abort must not authorize any action.
-        if (controller.signal.aborted) return;
-        setRequestState({ status: 'ok', text: data.text ?? '' });
-        recordMetric('ok', startedAt);
-      } catch (err) {
-        if (controller.signal.aborted) {
-          const reason = controller.signal.reason;
-          if (reason === 'request-timeout' || reason === 'total-timeout') {
-            setRequestState({
-              status: 'timeout',
-              message: 'The model took too long. Your message was kept — resend to try again.',
-            });
-            recordMetric('timeout', startedAt);
-          } else {
-            setRequestState({
-              status: 'cancelled',
-              message: 'Request cancelled. Your message was kept.',
-            });
-            recordMetric('cancelled', startedAt);
-          }
-          return;
-        }
-        setRequestState({
-          status: 'error',
-          message: err instanceof Error ? err.message : 'Request failed.',
-        });
-        recordMetric('error', startedAt);
-      } finally {
-        clearTimeout(requestTimer);
-        clearTimers();
-        if (abortRef.current === controller) abortRef.current = null;
-      }
-    },
-    [cancel, clearTimers, recordMetric],
-  );
-
-  const handleSubmit = useCallback(
-    (text: string) => {
-      const trimmed = text.trim();
-      if (!trimmed) return;
-      setSent((prev) => [...prev, { text: trimmed }]);
-      // Preserve user text until the request resolves; clear only on success.
-      setValue(trimmed);
-      void runModelRequest(trimmed).then(() => {
-        setRequestState((state) => {
-          if (state.status === 'ok') setValue('');
-          return state;
-        });
-      });
-    },
-    [runModelRequest],
-  );
-
-  const isPending = requestState.status === 'pending';
-
-  return (
-    <div>
-      <ChatInput value={value} onChange={setValue} onSubmit={handleSubmit} />
-      {isPending && (
-        <button type="button" onClick={cancel}>
-          Cancel
-        </button>
-      )}
-      {(requestState.status === 'timeout' || requestState.status === 'cancelled') && (
-        <p role="status">{requestState.message}</p>
-      )}
-      {requestState.status === 'error' && <p role="alert">{requestState.message}</p>}
-      <ul>
-        {sent.map((m, i) => (
-          <li key={i}>{m.text}</li>
-        ))}
-      </ul>
-      <ul aria-label="latency-metrics">
-        {metrics.map((m, i) => (
-          <li key={i}>{`${m.outcome}:${m.durationMs}ms`}</li>
-        ))}
-      </ul>
-    </div>
-  );
 }
