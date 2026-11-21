@@ -19,6 +19,19 @@ name: Frontend CI
 # These shared paths are intentionally NOT excluded so they cannot bypass
 # required checks.  Job names below are stable and referenced by branch
 # protection — do not rename without updating the protection rules.
+#
+# ── Caching strategy (issue #285) ────────────────────────────────────────────
+# pnpm dependency caching is handled by actions/setup-node's built-in pnpm
+# integration, which keys on the lockfile path.  pnpm-lock.yaml changes
+# therefore bust the cache automatically.
+#
+# In addition, each job that installs dependencies exposes the cache-hit output
+# from setup-node and echoes it to the job summary so cache hit/miss is visible
+# in the Actions UI without opening individual step logs.
+#
+# Secrets (API keys, contract IDs, payout keys) are passed to build/test steps
+# at runtime only and are never written into cached node_modules or the step
+# summary.
 
 on:
   pull_request:
@@ -46,6 +59,8 @@ permissions:
   contents: read
 
 # Shared env block referenced by build, unit-tests and e2e.
+# NOTE: secrets are injected at runtime and are NOT embedded in cached
+# node_modules or written to the step summary.
 env:
   NEXT_PUBLIC_STELLAR_CONTRACT_ID: ${{ secrets.NEXT_PUBLIC_STELLAR_CONTRACT_ID || 'PLACEHOLDER' }}
   NEXT_PUBLIC_XLM_SAC_ID: ${{ secrets.NEXT_PUBLIC_XLM_SAC_ID || 'PLACEHOLDER' }}
@@ -54,6 +69,9 @@ env:
   GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY || 'PLACEHOLDER' }}
   PAYSTACK_SECRET_KEY: ${{ secrets.PAYSTACK_SECRET_KEY || 'PLACEHOLDER' }}
   PAYOUT_PROVIDER: ${{ secrets.PAYOUT_PROVIDER || 'paystack' }}
+  # Pinned pnpm version; changing this invalidates the pnpm store cache.
+  PNPM_VERSION: "8.15.9"
+  NODE_VERSION: "24"
 
 jobs:
   # ── 1. Lint & type-check ──────────────────────────────────────────────────
@@ -72,16 +90,28 @@ jobs:
 
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
-          version: 8.15.9
+          version: ${{ env.PNPM_VERSION }}
 
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      # cache: "pnpm" keys on the lockfile hash automatically; pnpm-lock.yaml
+      # changes bust the cache.  The id lets us read cache-hit below.
+      - name: Set up Node.js
+        id: setup-node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24"
+          node-version: ${{ env.NODE_VERSION }}
           cache: "pnpm"
           cache-dependency-path: Dechat/dex_with_fiat_frontend/pnpm-lock.yaml
 
+      - name: Report pnpm cache status
+        run: |
+          if [ "${{ steps.setup-node.outputs.cache-hit }}" = "true" ]; then
+            echo "pnpm-cache: HIT" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "pnpm-cache: MISS (store will be populated)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Prettier check
         run: pnpm check
@@ -108,16 +138,26 @@ jobs:
 
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
-          version: 8.15.9
+          version: ${{ env.PNPM_VERSION }}
 
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - name: Set up Node.js
+        id: setup-node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24"
+          node-version: ${{ env.NODE_VERSION }}
           cache: "pnpm"
           cache-dependency-path: Dechat/dex_with_fiat_frontend/pnpm-lock.yaml
 
+      - name: Report pnpm cache status
+        run: |
+          if [ "${{ steps.setup-node.outputs.cache-hit }}" = "true" ]; then
+            echo "pnpm-cache: HIT" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "pnpm-cache: MISS (store will be populated)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Build
         run: pnpm build
@@ -145,16 +185,26 @@ jobs:
 
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
-          version: 8.15.9
+          version: ${{ env.PNPM_VERSION }}
 
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - name: Set up Node.js
+        id: setup-node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24"
+          node-version: ${{ env.NODE_VERSION }}
           cache: "pnpm"
           cache-dependency-path: Dechat/dex_with_fiat_frontend/pnpm-lock.yaml
 
+      - name: Report pnpm cache status
+        run: |
+          if [ "${{ steps.setup-node.outputs.cache-hit }}" = "true" ]; then
+            echo "pnpm-cache (shard ${{ matrix.shard }}): HIT" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "pnpm-cache (shard ${{ matrix.shard }}): MISS (store will be populated)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Run unit tests (shard ${{ matrix.shard }}/4)
         run: |
@@ -211,16 +261,26 @@ jobs:
 
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
-          version: 8.15.9
+          version: ${{ env.PNPM_VERSION }}
 
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - name: Set up Node.js
+        id: setup-node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24"
+          node-version: ${{ env.NODE_VERSION }}
           cache: "pnpm"
           cache-dependency-path: Dechat/dex_with_fiat_frontend/pnpm-lock.yaml
 
+      - name: Report pnpm cache status
+        run: |
+          if [ "${{ steps.setup-node.outputs.cache-hit }}" = "true" ]; then
+            echo "pnpm-cache: HIT" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "pnpm-cache: MISS (store will be populated)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       # Download all four blob artifacts into .vitest-reports/ so vitest can
       # find them with its default --mergeReports path.
@@ -292,16 +352,26 @@ jobs:
 
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
-          version: 8.15.9
+          version: ${{ env.PNPM_VERSION }}
 
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - name: Set up Node.js
+        id: setup-node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24"
+          node-version: ${{ env.NODE_VERSION }}
           cache: "pnpm"
           cache-dependency-path: Dechat/dex_with_fiat_frontend/pnpm-lock.yaml
 
+      - name: Report pnpm cache status
+        run: |
+          if [ "${{ steps.setup-node.outputs.cache-hit }}" = "true" ]; then
+            echo "pnpm-cache: HIT" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "pnpm-cache: MISS (store will be populated)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Install Playwright browsers
         run: pnpm exec playwright install --with-deps chromium

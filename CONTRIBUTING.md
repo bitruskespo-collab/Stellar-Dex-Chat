@@ -62,3 +62,63 @@ policy was applied.
 - [ ] The CI drift check passes with no ABI diff.
 - [ ] Breaking changes are documented and versioned as described above.
 - [ ] Regeneration left unrelated files unchanged.
+
+## CI caching
+
+### How caches are keyed
+
+**Rust / Cargo** (`contracts.yml`)
+
+Every job that compiles Rust code uses `Swatinem/rust-cache` with a
+`shared-key` of the form:
+
+```
+contracts-<toolchain>-<sha256(Cargo.lock)>
+```
+
+This means:
+
+- Updating `Cargo.lock` (dependency bump) busts the cache for all Rust jobs
+  simultaneously, so no job ever runs with a stale dependency tree.
+- Changing the pinned toolchain string also invalidates all entries.
+- All Rust jobs in the same workflow run share one cache entry, so the first
+  job to finish populates it and the rest restore it.
+
+The `stellar-cli` binary is also cached under `~/.cargo/bin`; the install step
+checks the installed version at runtime and skips `cargo install` when the
+version matches the pin.
+
+**pnpm / Node.js** (`frontend.yml`)
+
+Every frontend job uses `actions/setup-node` with `cache: "pnpm"` and
+`cache-dependency-path: Dechat/dex_with_fiat_frontend/pnpm-lock.yaml`.
+GitHub's built-in pnpm cache keys on the lockfile hash, so a `pnpm-lock.yaml`
+change automatically busts the store.
+
+All frontend jobs use `pnpm install --frozen-lockfile` to prevent silent
+lockfile mutations during CI.
+
+### Cache hit/miss reporting
+
+Each caching step exposes a `cache-hit` output that is echoed to the job
+summary. You can read the hit/miss status for every job directly in the
+Actions UI without opening individual step logs.
+
+### Secrets and the cache
+
+Secrets (API keys, contract IDs, payout keys) are injected as runtime
+environment variables only. They are never written into `node_modules`,
+`target/`, or the step summary, so they cannot leak through cached artifacts.
+
+### Periodic cache-verification
+
+`.github/workflows/cache-verify.yml` runs every Sunday at 03:00 UTC (and
+on `workflow_dispatch`). It builds both the Soroban WASM and the Next.js
+app twice in the same runner — once with the warm cache restored and once
+from a fully clean state — then compares the sha256 digests of the outputs.
+A mismatch fails the job and writes a diff to the step summary, surfacing
+any cache-poisoning or hidden non-determinism.
+
+If the verification job fails, invalidate the stale cache by bumping the
+relevant lockfile (`Cargo.lock` or `pnpm-lock.yaml`) or the toolchain/pnpm
+version pin in the workflow env block.

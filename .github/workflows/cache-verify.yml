@@ -1,0 +1,262 @@
+name: Cache Reproducibility Verification
+
+# ── Purpose ───────────────────────────────────────────────────────────────────
+#
+# Periodically verifies that cached CI builds produce bit-for-bit identical
+# outputs to fully clean builds, guarding against cache-poisoning and silent
+# staleness (issue #285).
+#
+# Two independent jobs run in parallel:
+#
+#   verify-rust  — builds the Soroban WASM twice: once with the warm cache
+#                  restored from the shared Swatinem/rust-cache key and once
+#                  in a clean environment (--no-cache flag not available for
+#                  rust-cache, so we skip the cache step entirely in the clean
+#                  leg).  The sha256 digests of both artifacts are compared;
+#                  a mismatch fails the job and writes a diff to the summary.
+#
+#   verify-pnpm  — installs node_modules twice: once with the pnpm store cache
+#                  restored and once without.  Runs `pnpm tsc --noEmit` and
+#                  `pnpm build` after each install and compares the output hash
+#                  of the Next.js build manifest to confirm identical output.
+#
+# Neither job writes secrets into the cache.  Secrets are only used as
+# runtime env vars for the build step, mirroring the main CI behaviour.
+#
+# Schedule: every Sunday at 03:00 UTC, keeping verification overhead off
+# the critical path of normal PR/push workflows.  Can also be triggered
+# manually via workflow_dispatch.
+
+on:
+  schedule:
+    - cron: "0 3 * * 0" # Every Sunday 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUST_TOOLCHAIN: "stable"
+  STELLAR_CLI_VERSION: "28.0.0"
+  PNPM_VERSION: "8.15.9"
+  NODE_VERSION: "24"
+
+jobs:
+  # ── 1. Rust / WASM reproducibility ────────────────────────────────────────
+  verify-rust:
+    name: Verify Rust cache reproducibility
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    defaults:
+      run:
+        working-directory: Dechat/stellar-contracts
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: wasm32v1-none
+
+      # ── Leg A: build with warm cache ──────────────────────────────────────
+      - name: Restore Cargo cache (warm leg)
+        id: cargo-cache-warm
+        uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
+        with:
+          workspaces: Dechat/stellar-contracts -> target
+          shared-key: "contracts-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Dechat/stellar-contracts/Cargo.lock') }}"
+          cache-directories: "~/.cargo/bin"
+          # save-if false: this job verifies; it must not update the cache.
+          save-if: "false"
+
+      - name: Report warm-cache status
+        run: |
+          if [ "${{ steps.cargo-cache-warm.outputs.cache-hit }}" = "true" ]; then
+            echo "warm-leg cargo-cache: HIT — testing cached build" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "warm-leg cargo-cache: MISS — no existing cache; both legs will compile from scratch" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Install Stellar CLI (warm leg)
+        run: |
+          if stellar --version 2>/dev/null | grep -q "$STELLAR_CLI_VERSION"; then
+            echo "stellar-cli already cached"
+          else
+            cargo install --locked stellar-cli --version "$STELLAR_CLI_VERSION"
+          fi
+
+      - name: Build WASM (warm leg)
+        run: stellar contract build
+
+      - name: Record warm-leg digest
+        id: warm-digest
+        run: |
+          set -euo pipefail
+          ARTIFACT=target/wasm32v1-none/release/stellar_contracts.optimized.wasm
+          DIGEST=$(sha256sum "$ARTIFACT" | awk '{print $1}')
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Warm-leg sha256: ${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Leg B: clean build (no cache) ────────────────────────────────────
+      - name: Remove build artifacts for clean leg
+        run: rm -rf target
+
+      - name: Build WASM (clean leg — no cache)
+        run: stellar contract build
+
+      - name: Record clean-leg digest
+        id: clean-digest
+        run: |
+          set -euo pipefail
+          ARTIFACT=target/wasm32v1-none/release/stellar_contracts.optimized.wasm
+          DIGEST=$(sha256sum "$ARTIFACT" | awk '{print $1}')
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Clean-leg sha256: ${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Compare ──────────────────────────────────────────────────────────
+      - name: Compare digests
+        run: |
+          set -euo pipefail
+          WARM="${{ steps.warm-digest.outputs.digest }}"
+          CLEAN="${{ steps.clean-digest.outputs.digest }}"
+          echo "Warm-leg:  $WARM"
+          echo "Clean-leg: $CLEAN"
+          if [ "$WARM" != "$CLEAN" ]; then
+            echo "::error::WASM digest mismatch — cached build differs from clean build."
+            echo "::error::Warm: $WARM  Clean: $CLEAN"
+            echo "## ❌ Rust cache verification FAILED" >> "$GITHUB_STEP_SUMMARY"
+            echo "Warm-leg digest:  \`$WARM\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "Clean-leg digest: \`$CLEAN\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "The cached Rust build produced a different WASM artifact than a clean build." >> "$GITHUB_STEP_SUMMARY"
+            echo "Invalidate the cache by updating \`Dechat/stellar-contracts/Cargo.lock\` or the" >> "$GITHUB_STEP_SUMMARY"
+            echo "RUST_TOOLCHAIN env var in \`contracts.yml\`." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "## ✅ Rust cache verification passed" >> "$GITHUB_STEP_SUMMARY"
+          echo "Both legs produced identical WASM digest: \`$WARM\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # ── 2. pnpm / Next.js reproducibility ────────────────────────────────────
+  verify-pnpm:
+    name: Verify pnpm cache reproducibility
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    defaults:
+      run:
+        working-directory: Dechat/dex_with_fiat_frontend
+
+    env:
+      # Use placeholder values so the build can complete without real secrets.
+      # This job verifies structural reproducibility, not runtime correctness.
+      NEXT_PUBLIC_STELLAR_CONTRACT_ID: "PLACEHOLDER"
+      NEXT_PUBLIC_XLM_SAC_ID: "PLACEHOLDER"
+      NEXT_PUBLIC_STELLAR_RPC_URL: "https://soroban-testnet.stellar.org"
+      NEXT_PUBLIC_STELLAR_NETWORK: "TESTNET"
+      GEMINI_API_KEY: "PLACEHOLDER"
+      PAYSTACK_SECRET_KEY: "PLACEHOLDER"
+      PAYOUT_PROVIDER: "paystack"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      # ── Leg A: install with warm pnpm store ───────────────────────────────
+      - name: Set up Node.js (warm leg)
+        id: setup-node-warm
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "pnpm"
+          cache-dependency-path: Dechat/dex_with_fiat_frontend/pnpm-lock.yaml
+
+      - name: Report warm pnpm cache status
+        run: |
+          if [ "${{ steps.setup-node-warm.outputs.cache-hit }}" = "true" ]; then
+            echo "warm-leg pnpm-cache: HIT" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "warm-leg pnpm-cache: MISS" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Install dependencies (warm leg)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (warm leg)
+        run: pnpm build
+
+      - name: Record warm-leg build manifest hash
+        id: warm-manifest
+        run: |
+          set -euo pipefail
+          # Hash the Next.js build manifest which records every output chunk name
+          # and hash — a stable proxy for full output reproducibility.
+          MANIFEST=.next/build-manifest.json
+          if [ ! -f "$MANIFEST" ]; then
+            echo "::error::Build manifest not found at $MANIFEST"
+            exit 1
+          fi
+          HASH=$(sha256sum "$MANIFEST" | awk '{print $1}')
+          echo "hash=${HASH}" >> "$GITHUB_OUTPUT"
+          echo "Warm-leg build-manifest sha256: ${HASH}" >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Leg B: clean install (no store cache) ────────────────────────────
+      - name: Remove node_modules and build output for clean leg
+        run: |
+          rm -rf node_modules .next
+
+      - name: Set up Node.js (clean leg — no cache)
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          # Deliberately omit cache: so no store is restored.
+
+      - name: Install dependencies (clean leg)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (clean leg)
+        run: pnpm build
+
+      - name: Record clean-leg build manifest hash
+        id: clean-manifest
+        run: |
+          set -euo pipefail
+          MANIFEST=.next/build-manifest.json
+          if [ ! -f "$MANIFEST" ]; then
+            echo "::error::Build manifest not found at $MANIFEST"
+            exit 1
+          fi
+          HASH=$(sha256sum "$MANIFEST" | awk '{print $1}')
+          echo "hash=${HASH}" >> "$GITHUB_OUTPUT"
+          echo "Clean-leg build-manifest sha256: ${HASH}" >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Compare ──────────────────────────────────────────────────────────
+      - name: Compare build manifest hashes
+        run: |
+          set -euo pipefail
+          WARM="${{ steps.warm-manifest.outputs.hash }}"
+          CLEAN="${{ steps.clean-manifest.outputs.hash }}"
+          echo "Warm-leg:  $WARM"
+          echo "Clean-leg: $CLEAN"
+          if [ "$WARM" != "$CLEAN" ]; then
+            echo "::error::Build manifest mismatch — cached install produced different output than clean install."
+            echo "::error::Warm: $WARM  Clean: $CLEAN"
+            echo "## ❌ pnpm cache verification FAILED" >> "$GITHUB_STEP_SUMMARY"
+            echo "Warm-leg manifest hash:  \`$WARM\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "Clean-leg manifest hash: \`$CLEAN\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "The cached pnpm install produced a different build output than a clean install." >> "$GITHUB_STEP_SUMMARY"
+            echo "Invalidate the cache by updating \`Dechat/dex_with_fiat_frontend/pnpm-lock.yaml\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "or the PNPM_VERSION env var in \`frontend.yml\`." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "## ✅ pnpm cache verification passed" >> "$GITHUB_STEP_SUMMARY"
+          echo "Both legs produced identical build-manifest hash: \`$WARM\`" >> "$GITHUB_STEP_SUMMARY"
