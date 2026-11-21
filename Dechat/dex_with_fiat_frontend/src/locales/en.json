@@ -68,6 +68,21 @@
     "yesterday": "Yesterday"
   },
   "errors": {
+    "wallet": {
+      "disconnected": "Your wallet is not connected. Connect Freighter to continue.",
+      "session_expired": "Your wallet session has expired. Reconnect Freighter to continue.",
+      "user_declined": "You declined the transaction in Freighter. Review and approve it when ready.",
+      "context_changed": "Your wallet account or network changed during the transaction. Confirm the new context and rebuild.",
+      "unknown": "An unexpected wallet error occurred. Please try again."
+    },
+    "api": {
+      "network": "The network request failed. Check your connection and retry.",
+      "rate_limited": "Too many requests. Wait a moment and retry.",
+      "server": "The server encountered an error. Try again or contact support.",
+      "unauthorized": "You are not authorized. Reconnect your wallet and try again.",
+      "validation": "The submitted data was invalid. Check the form and retry.",
+      "unknown": "An unexpected error occurred. Please try again."
+    },
     "101": "The contract has not been initialized.",
     "102": "The contract has already been initialized.",
     "103": "An internal invariant was violated.",

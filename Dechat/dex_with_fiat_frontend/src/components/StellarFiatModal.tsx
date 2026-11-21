@@ -16,6 +16,8 @@ import {
 } from 'lucide-react';
 import EmptyState from '@/components/ui/EmptyState';
 import CopyButton from '@/components/ui/CopyButton';
+import ErrorSummary from '@/components/ErrorSummary';
+import { classifyError, type AccessibleError } from '@/lib/errorMessages';
 import { useStellarWallet } from '@/contexts/StellarWalletContext';
 import { useUserPreferences } from '@/contexts/UserPreferencesContext';
 import {
@@ -150,6 +152,7 @@ export default function StellarFiatModal({
   const [status, setStatus] = useState<TxStatus>('idle');
   const [txHash, setTxHash] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
+  const [accessibleError, setAccessibleError] = useState<AccessibleError | null>(null);
   const [isLoadingUI, setIsLoadingUI] = useState(true);
   const [lastActionTimestamp, setLastActionTimestamp] = useState(0);
   const [showTwoFactorModal, setShowTwoFactorModal] = useState(false);
@@ -724,20 +727,25 @@ export default function StellarFiatModal({
 
   const handleAction = async () => {
     if (!connection.isConnected || sessionExpired) {
-      setErrorMsg(
-        sessionExpired
-          ? 'Wallet session has expired. Please reconnect to continue.'
-          : 'Wallet disconnected. Please reconnect to continue.',
+      const rawMsg = sessionExpired
+        ? 'Wallet session has expired. Please reconnect to continue.'
+        : 'Wallet disconnected. Please reconnect to continue.';
+      setErrorMsg(rawMsg);
+      setAccessibleError(
+        classifyError(rawMsg, {
+          safeValues: { amount, note: note.trim() },
+        }),
       );
       setStatus('error');
       return;
     }
 
     if (envVerification !== null && !envVerification.isValid) {
-      setErrorMsg(
+      const rawMsg =
         envVerification.message ||
-          'Cannot execute transaction: Network or contract identity mismatch.',
-      );
+        'Cannot execute transaction: Network or contract identity mismatch.';
+      setErrorMsg(rawMsg);
+      setAccessibleError(classifyError(rawMsg));
       setStatus('error');
       return;
     }
@@ -759,6 +767,20 @@ export default function StellarFiatModal({
     });
     if (zodMessage) {
       setErrorMsg(zodMessage);
+      // Determine which field is implicated so the error can be associated.
+      const fieldId = zodMessage.toLowerCase().includes('amount')
+        ? 'sfm-amount'
+        : zodMessage.toLowerCase().includes('recipient')
+          ? 'sfm-recipient'
+          : zodMessage.toLowerCase().includes('note')
+            ? 'sfm-note'
+            : undefined;
+      setAccessibleError(
+        classifyError(zodMessage, {
+          fieldId,
+          safeValues: { amount, note: note.trim() },
+        }),
+      );
       setStatus('error');
       return;
     }
@@ -769,28 +791,35 @@ export default function StellarFiatModal({
       stroopsAmount === null ||
       stroopsAmount <= 0n
     ) {
-      setErrorMsg(amountFeedback || 'Invalid amount. Please enter a positive number.');
+      const rawMsg = amountFeedback || 'Invalid amount. Please enter a positive number.';
+      setErrorMsg(rawMsg);
+      setAccessibleError(
+        classifyError(rawMsg, { fieldId: 'sfm-amount', safeValues: { amount, note: note.trim() } }),
+      );
       setStatus('error');
       return;
     }
     if (isDepositFlow && isLoadingBridgeLimit) {
-      setErrorMsg(
-        'Still loading the current bridge limit. Please wait a moment.',
-      );
+      const rawMsg = 'Still loading the current bridge limit. Please wait a moment.';
+      setErrorMsg(rawMsg);
+      setAccessibleError(classifyError(rawMsg));
       setStatus('error');
       return;
     }
     if (isDepositFlow && (bridgeLimit === null || bridgeLimitError)) {
-      setErrorMsg(
+      const rawMsg =
         bridgeLimitError ||
-        'Unable to validate against the current bridge limit. Please try again.',
-      );
+        'Unable to validate against the current bridge limit. Please try again.';
+      setErrorMsg(rawMsg);
+      setAccessibleError(classifyError(rawMsg, { safeValues: { amount, note: note.trim() } }));
       setStatus('error');
       return;
     }
     if (isDepositFlow && bridgeLimit !== null && stroopsAmount > bridgeLimit) {
-      setErrorMsg(
-        `Requested amount exceeds the current bridge limit of ${stroopsToDisplay(bridgeLimit ?? BigInt(0))} XLM.`,
+      const rawMsg = `Requested amount exceeds the current bridge limit of ${stroopsToDisplay(bridgeLimit ?? BigInt(0))} XLM.`;
+      setErrorMsg(rawMsg);
+      setAccessibleError(
+        classifyError(rawMsg, { fieldId: 'sfm-amount', safeValues: { amount, note: note.trim() } }),
       );
       setStatus('error');
       return;
@@ -799,7 +828,9 @@ export default function StellarFiatModal({
     // Step 1: Pre-Sign Confirmation Requirement
     if (!requiresPreSignConfirmation) {
       if (simulationError) {
-        setErrorMsg(`Simulation failed: ${simulationError}. Signing blocked.`);
+        const rawMsg = `Simulation failed: ${simulationError}. Signing blocked.`;
+        setErrorMsg(rawMsg);
+        setAccessibleError(classifyError(simulationError, { safeValues: { amount, note: note.trim() } }));
         setStatus('error');
         return;
       }
@@ -821,6 +852,7 @@ export default function StellarFiatModal({
         const msg = err instanceof Error ? err.message : 'Simulation failed';
         setSimulationError(msg);
         setErrorMsg(`Simulation failed: ${msg}. Signing blocked.`);
+        setAccessibleError(classifyError(err, { safeValues: { amount, note: note.trim() } }));
         setStatus('error');
       } finally {
         setIsLoadingFee(false);
@@ -830,12 +862,16 @@ export default function StellarFiatModal({
 
     // Step 2: Ensure simulation is not stale or failed
     if (isSimulationStale) {
-      setErrorMsg('Account or network changed since simulation. Please re-simulate before signing.');
+      const rawMsg = 'Account or network changed since simulation. Please re-simulate before signing.';
+      setErrorMsg(rawMsg);
+      setAccessibleError(classifyError(rawMsg));
       setStatus('error');
       return;
     }
     if (simulationError) {
-      setErrorMsg(`Simulation failed: ${simulationError}. Signing blocked.`);
+      const rawMsg = `Simulation failed: ${simulationError}. Signing blocked.`;
+      setErrorMsg(rawMsg);
+      setAccessibleError(classifyError(simulationError, { safeValues: { amount, note: note.trim() } }));
       setStatus('error');
       return;
     }
@@ -980,6 +1016,7 @@ export default function StellarFiatModal({
             setRecoverableContextMessage(
               'Wallet account or network changed during transaction signing. Transaction context has been invalidated. Please confirm to rebuild.',
             );
+            setAccessibleError(null);
             if (!capturedHash) {
               localStorage.removeItem(pendingKey);
               localStorage.removeItem('stellar_pending_tx');
@@ -994,6 +1031,7 @@ export default function StellarFiatModal({
           ) {
             setStatus('timeout');
             setErrorMsg(errMsg);
+            setAccessibleError(null); // timeout has its own dedicated UI
             setStatusLookupOutcome('unknown');
             setStatusLookupMessage(
               'Confirmation timed out. Query authoritative status before attempting replacement.',
@@ -1001,7 +1039,13 @@ export default function StellarFiatModal({
             return;
           }
 
-          setErrorMsg(errMsg || 'Transaction failed');
+          const finalMsg = errMsg || 'Transaction failed';
+          setErrorMsg(finalMsg);
+          setAccessibleError(
+            classifyError(err, {
+              safeValues: { amount, note: note.trim() },
+            }),
+          );
           setStatus('error');
           clearPendingRecoveryRecord();
         }
@@ -1014,6 +1058,7 @@ export default function StellarFiatModal({
     setStatus('idle');
     setTxHash('');
     setErrorMsg('');
+    setAccessibleError(null);
     setRequiresPreSignConfirmation(false);
     setSimulationResult(null);
     setSimulationError(null);
@@ -1355,6 +1400,7 @@ export default function StellarFiatModal({
               <input
                 type="text"
                 inputMode="decimal"
+                id="sfm-amount"
                 value={amount}
                 onChange={(e) => {
                   setAmount(e.target.value);
@@ -1364,13 +1410,22 @@ export default function StellarFiatModal({
                 placeholder="0.00"
                 disabled={isTransactionBusy}
                 aria-invalid={isAmountInvalid || isOverLimit ? true : undefined}
+                aria-describedby={
+                  isAmountInvalid || isOverLimit
+                    ? 'sfm-amount-error'
+                    : undefined
+                }
                 className={`w-full bg-gray-800 border rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed ${isAmountInvalid || isOverLimit
                   ? 'border-red-500 focus:border-red-400'
                   : 'border-gray-600 focus:border-blue-500'
                   }`}
               />
               {amountFeedback && (
-                <p className="theme-soft-danger flex items-center gap-2 rounded-lg px-3 py-2 mt-2 text-xs">
+                <p
+                  id="sfm-amount-error"
+                  role="alert"
+                  className="theme-soft-danger flex items-center gap-2 rounded-lg px-3 py-2 mt-2 text-xs"
+                >
                   <AlertCircle className="w-3 h-3 flex-shrink-0" />
                   {amountFeedback}
                 </p>
@@ -1405,6 +1460,7 @@ export default function StellarFiatModal({
                 Optional note
               </label>
               <textarea
+                id="sfm-note"
                 value={note}
                 onChange={(e) => setNote(e.target.value)}
                 placeholder={
@@ -1666,10 +1722,19 @@ export default function StellarFiatModal({
                 </label>
                 <input
                   type="text"
+                  id="sfm-recipient"
                   value={recipient}
                   onChange={(e) => setRecipient(e.target.value)}
                   placeholder="G..."
                   disabled={isTransactionBusy}
+                  aria-invalid={
+                    accessibleError?.fieldId === 'sfm-recipient' ? true : undefined
+                  }
+                  aria-describedby={
+                    accessibleError?.fieldId === 'sfm-recipient'
+                      ? 'sfm-error-summary'
+                      : undefined
+                  }
                   className="w-full bg-gray-800 border border-gray-600 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 disabled:opacity-60 disabled:cursor-not-allowed font-mono text-sm"
                 />
               </div>
@@ -1690,13 +1755,16 @@ export default function StellarFiatModal({
             </div>
 
             {status === 'error' && (
-              <div
+              <ErrorSummary
+                id="sfm-error-summary"
+                error={accessibleError}
+                onDismiss={() => {
+                  setAccessibleError(null);
+                  setStatus('idle');
+                  setErrorMsg('');
+                }}
                 data-testid="error-message"
-                className="theme-soft-danger flex items-center gap-2 border rounded-lg px-3 py-2 mb-4 text-sm"
-              >
-                <AlertCircle className="w-4 h-4 flex-shrink-0" />
-                <span>{errorMsg}</span>
-              </div>
+              />
             )}
 
             {isAdminMode && (

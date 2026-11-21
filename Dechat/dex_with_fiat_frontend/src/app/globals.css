@@ -480,6 +480,50 @@ select:focus {
     0 0 0 4px rgba(59, 130, 246, 0.1);
 }
 
+/*
+ * Reduced-motion: strip movement from every custom @keyframes animation and
+ * the CSS-class overrides (.animate-pulse, etc.) when the OS requests it.
+ * Tailwind utilities that use the `motion-reduce:` variant (e.g. Skeleton) are
+ * handled at the utility layer. This block handles global CSS animations that
+ * are not managed by Tailwind utilities.
+ *
+ * Issue #295: transaction-status UI must maintain non-animated status cues
+ * (icon + text) independent of motion. Stripping animation here preserves the
+ * static cues (layout, color, text) while removing movement.
+ */
+@media (prefers-reduced-motion: reduce) {
+  /* Neutralise every animation-driven helper class */
+  .animate-fadeIn,
+  .animate-slideInLeft,
+  .animate-slideInRight,
+  .animate-pulse-custom,
+  .animate-bounce-once,
+  .animate-slide-up,
+  .gradient-animate,
+  .float,
+  .animate-pulse {
+    animation: none;
+  }
+
+  /* Tailwind-generated animate-spin / animate-pulse / animate-bounce /
+     animate-ping that are not covered by the classes above */
+  [class*="animate-"] {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+
+  /* Smooth scroll is a form of motion — use instant instead */
+  html,
+  .chat-container {
+    scroll-behavior: auto;
+  }
+
+  /* Strip transitions on the progress bar fill (TransactionProgressBar) */
+  [data-testid="transaction-progress-bar"] [class*="transition-"] {
+    transition: none;
+  }
+}
+
 /* High-contrast mode: ensure all buttons have visible borders */
 @media (forced-colors: active) {
   button, .btn, [role="button"] {
@@ -503,4 +547,116 @@ select:focus {
   .theme-overlay {
     background: Canvas;
   }
+
+  /*
+   * Issue #295: status surfaces in forced-colors mode.
+   *
+   * In Windows High Contrast (forced-colors: active) the browser substitutes
+   * its own system palette and ignores color/background-color/border-color.
+   * We add explicit borders using forced-color-adjust: none on the status
+   * badge so its signal is preserved. The semantic classes (status-cue--*)
+   * are applied via data-status by TransactionStatusCue and
+   * TransactionProgressBar.
+   */
+  [data-testid="transaction-status-cue"],
+  [data-testid="transaction-progress-bar"],
+  .theme-soft-success,
+  .theme-soft-warning,
+  .theme-soft-danger {
+    forced-color-adjust: none;
+    border: 1px solid ButtonText;
+  }
+
+  /* Progress bar fill — keep it visible in high-contrast */
+  [data-testid="transaction-progress-bar"] [class*="bg-"] {
+    forced-color-adjust: none;
+    background-color: Highlight !important;
+  }
+
+  /* Status icons — use the ButtonText system keyword */
+  .status-cue--progress svg,
+  .status-cue--success svg,
+  .status-cue--warning svg,
+  .status-cue--failure svg {
+    color: ButtonText;
+  }
+}
+
+/*
+ * ─── RTL (right-to-left) layout support (#293) ───────────────────────────────
+ *
+ * These rules complement Tailwind's logical-property utilities (ms-*, me-*,
+ * ps-*, pe-*, start-*, end-*). They handle cases where we use physical CSS
+ * classes in vendor or legacy markup that Tailwind cannot patch via utilities.
+ *
+ * Key principles:
+ *   • Asset codes (XLM, NGN, USDC …) and exact numeric amounts always render
+ *     LTR so digits never reverse. Use `dir="ltr"` or the `.amount-ltr` helper.
+ *   • Directional icons (chevrons, arrows) are flipped via `scale-x(-1)` only
+ *     inside [dir="rtl"], never globally. Use `.icon-directional`.
+ *   • Modal / drawer chrome (close button, header actions) use logical
+ *     properties so the placement mirrors correctly without JS.
+ *   • The timeline connector line flips from left-anchored to right-anchored
+ *     under RTL via `.timeline-connector`.
+ */
+
+/* Flip directional icons (chevrons, arrows) in RTL context */
+[dir='rtl'] .icon-directional {
+  transform: scaleX(-1);
+}
+
+/* Preserve LTR rendering for asset codes and numeric amounts.
+   Apply this class to any <span> or element that shows XLM / fiat numbers. */
+.amount-ltr {
+  direction: ltr;
+  unicode-bidi: embed;
+  /* Keep digits visually inline with surrounding RTL text */
+  display: inline-block;
+}
+
+/* Modal header: close button moves to the logical start in RTL.
+   Relies on flex + gap; no physical margin overrides needed when the
+   parent uses justify-between — the browser handles it automatically with dir. */
+[dir='rtl'] .modal-header-actions {
+  flex-direction: row-reverse;
+}
+
+/* Receipt drawer slides in from the left in RTL (mirror of LTR right-to-left) */
+[dir='rtl'] .receipt-drawer-panel {
+  right: auto;
+  left: 0;
+  transform: translateX(-100%);
+}
+
+[dir='rtl'] .receipt-drawer-panel.translate-x-0 {
+  transform: translateX(0);
+}
+
+/* Transfer timeline: vertical connector line anchors to the logical start */
+[dir='rtl'] .timeline-connector {
+  left: auto;
+  right: 19px;
+}
+
+/* Step-indicator stepper: reverse the flex row so step 1 is on the right in RTL */
+[dir='rtl'] .step-indicator {
+  flex-direction: row-reverse;
+}
+
+/* Focus order: the browser follows DOM order; dir="rtl" on the container
+   is sufficient to match reading order for keyboard navigation. No extra
+   CSS is needed beyond ensuring containers carry the dir attribute. */
+
+/* Number input: always LTR so numeric entry is unambiguous in RTL locales */
+[dir='rtl'] input[type='number'],
+[dir='rtl'] input[type='tel'],
+[dir='rtl'] .input-numeric {
+  direction: ltr;
+  text-align: end; /* visually aligns the number to the right of the field in RTL */
+}
+
+/* Search inputs: keep placeholder and typed text LTR for mixed-script entries */
+[dir='rtl'] input[type='search'] {
+  direction: ltr;
+  text-align: start;
 }

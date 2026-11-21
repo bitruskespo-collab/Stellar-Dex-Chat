@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
+import { useReducedMotion } from '@/hooks/useReducedMotion';
 
 interface WalletConnectionTimelineProps {
   isConnected: boolean;
@@ -60,7 +61,9 @@ export default function WalletConnectionTimeline({
           : connecting
             ? 'active'
             : 'pending',
-      detail: midTransferDisconnect ? 'Wallet disconnected during transfer' : undefined,
+      detail: midTransferDisconnect
+        ? 'Wallet disconnected during transfer'
+        : undefined,
     },
     {
       id: 'sign',
@@ -87,11 +90,13 @@ export default function WalletConnectionTimeline({
     {
       id: 'ready',
       label: 'Ready',
-      status: connected && !mismatch && !midTransferDisconnect ? 'done' : 'pending',
+      status:
+        connected && !mismatch && !midTransferDisconnect ? 'done' : 'pending',
     },
   ];
 
   const visibleSteps = contextMode === 'advanced' ? steps : steps.slice(0, 3);
+  const reducedMotion = useReducedMotion();
 
   return (
     <div className="theme-surface-muted theme-border mt-2 rounded-xl border px-3 py-2">
@@ -119,7 +124,7 @@ export default function WalletConnectionTimeline({
                   step.status === 'done'
                     ? 'bg-green-500'
                     : step.status === 'active'
-                      ? 'animate-pulse bg-blue-500'
+                      ? `${reducedMotion ? '' : 'animate-pulse '}bg-blue-500`
                       : step.status === 'error'
                         ? 'bg-red-500'
                         : 'bg-gray-500'

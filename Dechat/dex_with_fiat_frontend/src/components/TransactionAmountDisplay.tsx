@@ -2,8 +2,11 @@
 
 import { useEffect, useMemo, useRef } from 'react';
 import { useCurrencyConversion } from '@/hooks/useCurrencyConversion';
-import { transactionAmountSchema, type TransactionAmountProps } from '@/lib/transactionSchema';
-import { motion } from 'framer-motion';
+import {
+  transactionAmountSchema,
+  type TransactionAmountProps,
+} from '@/lib/transactionSchema';
+import { motion, useReducedMotion } from 'framer-motion';
 import { useUserPreferences } from '@/contexts/UserPreferencesContext';
 import SkeletonTransactionAmount from '@/components/ui/skeleton/SkeletonTransactionAmount';
 
@@ -22,20 +25,23 @@ import SkeletonTransactionAmount from '@/components/ui/skeleton/SkeletonTransact
 export function TransactionAmountDisplay(props: TransactionAmountProps) {
   const result = transactionAmountSchema.safeParse(props);
   const { fiatCurrency } = useUserPreferences();
+  // Respect prefers-reduced-motion: reduce. When true, we use opacity-only
+  // framer-motion transitions (no scale/translate) and skip smooth scrolling.
+  const reducedMotion = useReducedMotion();
 
   // Derive values for hooks unconditionally — hooks must not be called after
   // a conditional return (Rules of Hooks). Fall back to neutral values when
   // the parse fails so useCurrencyConversion still receives valid arguments.
   const parsed = result.success ? result.data : null;
   const numericAmount = parsed
-    ? (typeof parsed.amount === 'string' ? parseFloat(parsed.amount) : parsed.amount)
+    ? typeof parsed.amount === 'string'
+      ? parseFloat(parsed.amount)
+      : parsed.amount
     : 0;
   const normalizedAsset = parsed?.asset || 'XLM';
 
-  const { displayText, isLoading, hasError, fiatAmount } = useCurrencyConversion(
-    numericAmount,
-    normalizedAsset,
-  );
+  const { displayText, isLoading, hasError, fiatAmount } =
+    useCurrencyConversion(numericAmount, normalizedAsset);
 
   const lastRateRef = useRef<number | null>(null);
   const lastConfirmedTextRef = useRef<string>('');
@@ -63,7 +69,12 @@ export function TransactionAmountDisplay(props: TransactionAmountProps) {
   }, [fiatCurrency]);
 
   const optimisticDisplayText = useMemo(() => {
-    if (!isLoading || !parsed || lastRateRef.current == null || numericAmount <= 0) {
+    if (
+      !isLoading ||
+      !parsed ||
+      lastRateRef.current == null ||
+      numericAmount <= 0
+    ) {
       return null;
     }
     const estimatedFiat = numericAmount * lastRateRef.current;
@@ -71,11 +82,19 @@ export function TransactionAmountDisplay(props: TransactionAmountProps) {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     });
-    const formattedAmount = normalizedAsset === 'XLM' && numericAmount < 0.001
-      ? numericAmount.toFixed(7)
-      : String(numericAmount);
+    const formattedAmount =
+      normalizedAsset === 'XLM' && numericAmount < 0.001
+        ? numericAmount.toFixed(7)
+        : String(numericAmount);
     return `${formattedAmount} ${normalizedAsset} ≈ ${currencySymbol}${formattedFiat} ${fiatCurrency.toUpperCase()}`;
-  }, [isLoading, parsed, numericAmount, normalizedAsset, currencySymbol, fiatCurrency]);
+  }, [
+    isLoading,
+    parsed,
+    numericAmount,
+    normalizedAsset,
+    currencySymbol,
+    fiatCurrency,
+  ]);
 
   const formattedHookText = useMemo(() => {
     if (!displayText || normalizedAsset !== 'XLM' || numericAmount >= 0.001) {
@@ -92,27 +111,36 @@ export function TransactionAmountDisplay(props: TransactionAmountProps) {
   const isOptimistic = optimisticDisplayText != null;
 
   // Auto-scroll: keep the latest amount visible whenever displayText updates.
+  // Skip smooth scrolling when prefers-reduced-motion: reduce is set (issue #295).
   const containerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    containerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-  }, [renderedText]);
+    containerRef.current?.scrollIntoView({
+      behavior: reducedMotion ? 'instant' : 'smooth',
+      block: 'nearest',
+    });
+  }, [renderedText, reducedMotion]);
 
   if (!result.success) {
-    const errorMessage = result.error.issues[0]?.message || 'Invalid Amount Data';
-    console.error('TransactionAmountDisplay: Invalid props', result.error.format());
+    const errorMessage =
+      result.error.issues[0]?.message || 'Invalid Amount Data';
+    console.error(
+      'TransactionAmountDisplay: Invalid props',
+      result.error.format(),
+    );
     return (
       <motion.span
         className="theme-soft-danger inline-flex items-center rounded-md border px-2 py-1 text-xs italic"
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
-        transition={{ duration: 0.2 }}
+        transition={{ duration: reducedMotion ? 0.01 : 0.2 }}
       >
         {errorMessage}
       </motion.span>
     );
   }
 
-  const { fiatAmount: storedFiatAmount, fiatCurrency: storedFiatCurrency } = result.data;
+  const { fiatAmount: storedFiatAmount, fiatCurrency: storedFiatCurrency } =
+    result.data;
 
   // Show skeleton when loading with no fallback text
   if (isLoading && !renderedText) {
@@ -123,18 +151,21 @@ export function TransactionAmountDisplay(props: TransactionAmountProps) {
     <motion.div
       ref={containerRef}
       className="flex flex-col gap-1"
-      initial={{ opacity: 0, y: -4 }}
+      initial={{ opacity: 0, y: reducedMotion ? 0 : -4 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.3, ease: 'easeOut' }}
+      transition={{ duration: reducedMotion ? 0.01 : 0.3, ease: 'easeOut' }}
       data-testid="transaction-amount-display"
       data-optimistic={isOptimistic ? 'true' : 'false'}
     >
       <motion.span
         className={`font-medium theme-text-primary ${isOptimistic ? 'opacity-80' : ''}`}
         key={renderedText}
-        initial={{ scale: 0.95, opacity: 0.7 }}
+        initial={{
+          scale: reducedMotion ? 1 : 0.95,
+          opacity: reducedMotion ? 1 : 0.7,
+        }}
         animate={{ scale: 1, opacity: 1 }}
-        transition={{ duration: 0.2, ease: 'easeOut' }}
+        transition={{ duration: reducedMotion ? 0.01 : 0.2, ease: 'easeOut' }}
         aria-busy={isOptimistic}
       >
         {renderedText}
@@ -144,7 +175,10 @@ export function TransactionAmountDisplay(props: TransactionAmountProps) {
           className="text-xs theme-text-muted"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          transition={{ duration: 0.2, delay: 0.1 }}
+          transition={{
+            duration: reducedMotion ? 0.01 : 0.2,
+            delay: reducedMotion ? 0 : 0.1,
+          }}
         >
           Stored fiat: {storedFiatAmount} {storedFiatCurrency}
         </motion.span>

@@ -42,6 +42,9 @@ import {
   type ResumableTransferState,
 } from '@/lib/transferStatusReconciler';
 import { z } from 'zod';
+import ErrorSummary from '@/components/ErrorSummary';
+import { classifyError, type AccessibleError } from '@/lib/errorMessages';
+import { useRtlDirection } from '@/hooks/useRtlDirection';
 
 /** ISO 13616 MOD-97 check used by the IBAN standard. */
 function validateIbanMod97(iban: string): boolean {
@@ -174,6 +177,7 @@ export default function BankDetailsModal({
 }: BankDetailsModalProps) {
   const modalRef = useRef<HTMLDivElement>(null);
   const prefersReducedMotion = useReducedMotion();
+  const { isRtl, dir } = useRtlDirection();
   const {
     beneficiaries,
     isLoaded: beneficiariesLoaded,
@@ -218,6 +222,7 @@ export default function BankDetailsModal({
   const [banks, setBanks] = useState<Bank[]>([]);
   const [banksLoading, setBanksLoading] = useState(false);
   const [banksError, setBanksError] = useState('');
+  const [banksAccessibleError, setBanksAccessibleError] = useState<AccessibleError | null>(null);
   const [bankSearch, setBankSearch] = useState('');
   const [selectedBank, setSelectedBank] = useState<Bank | null>(null);
 
@@ -228,6 +233,7 @@ export default function BankDetailsModal({
   const [ibanTouched, setIbanTouched] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [verifyError, setVerifyError] = useState('');
+  const [verifyAccessibleError, setVerifyAccessibleError] = useState<AccessibleError | null>(null);
   const [verifiedAccount, setVerifiedAccount] =
     useState<VerifyAccountData | null>(null);
 
@@ -237,6 +243,7 @@ export default function BankDetailsModal({
   const [quoteSecondsLeft, setQuoteSecondsLeft] = useState(120);
   const [payoutLoading, setPayoutLoading] = useState(false);
   const [payoutError, setPayoutError] = useState('');
+  const [payoutAccessibleError, setPayoutAccessibleError] = useState<AccessibleError | null>(null);
   const [payoutNote, setPayoutNote] = useState('');
 
   // Stellar Wallet Context (defensive fallback when not wrapped in provider)
@@ -307,13 +314,18 @@ export default function BankDetailsModal({
       .then((json: { success: boolean; data: Bank[]; message?: string }) => {
         if (json.success) {
           setBanks(json.data);
+          setBanksAccessibleError(null);
         } else {
-          setBanksError(json.message ?? 'Failed to load banks');
+          const msg = json.message ?? 'Failed to load banks';
+          setBanksError(msg);
+          setBanksAccessibleError(classifyError(msg));
         }
       })
       .catch((err: unknown) => {
         if (err instanceof Error && err.name === 'AbortError') return;
-        setBanksError('Failed to load banks. Please try again.');
+        const msg = 'Failed to load banks. Please try again.';
+        setBanksError(msg);
+        setBanksAccessibleError(classifyError(err));
       })
       .finally(() => {
         if (!abortController.signal.aborted) setBanksLoading(false);
@@ -503,22 +515,37 @@ export default function BankDetailsModal({
       } = await res.json();
       if (json.success) {
         setVerifiedAccount(json.data);
+        setVerifyAccessibleError(null);
         chatTelemetry.fiatPayoutStep({
           action: 'account_verify_success',
           step: 2,
           xlmAmount,
         });
       } else {
-        setVerifyError(json.message ?? 'Account verification failed');
+        const msg = json.message ?? 'Account verification failed';
+        setVerifyError(msg);
+        setVerifyAccessibleError(
+          classifyError(msg, {
+            httpStatus: res.ok ? undefined : res.status,
+            fieldId: 'bdm-account-number',
+            safeValues: { accountNumber },
+          }),
+        );
         chatTelemetry.fiatPayoutStep({
           action: 'account_verify_fail',
           step: 2,
           xlmAmount,
-          errorMessage: json.message ?? 'Account verification failed',
+          errorMessage: msg,
         });
       }
     } catch {
       setVerifyError('Account verification failed. Please try again.');
+      setVerifyAccessibleError(
+        classifyError('Account verification failed. Please try again.', {
+          fieldId: 'bdm-account-number',
+          safeValues: { accountNumber },
+        }),
+      );
       chatTelemetry.fiatPayoutStep({
         action: 'account_verify_fail',
         step: 2,
@@ -543,11 +570,11 @@ export default function BankDetailsModal({
 
     // Check wallet session if StellarWalletContext is active
     if (walletContext && (!isWalletConnected || isWalletSessionExpired)) {
-      setPayoutError(
-        isWalletSessionExpired
-          ? 'Wallet session has expired. Please reconnect to continue.'
-          : 'Wallet disconnected. Please reconnect to continue.',
-      );
+      const rawMsg = isWalletSessionExpired
+        ? 'Wallet session has expired. Please reconnect to continue.'
+        : 'Wallet disconnected. Please reconnect to continue.';
+      setPayoutError(rawMsg);
+      setPayoutAccessibleError(classifyError(rawMsg));
       return;
     }
 
@@ -564,9 +591,9 @@ export default function BankDetailsModal({
       if (activeAddress) {
         const acquireResult = acquireIntent(idempotencyKey);
         if (!acquireResult.acquired) {
-          setPayoutError(
-            'This payout is already being processed in another tab. Duplicate submission prevented.',
-          );
+          const msg = 'This payout is already being processed in another tab. Duplicate submission prevented.';
+          setPayoutError(msg);
+          setPayoutAccessibleError(classifyError(msg));
           return;
         }
       }
@@ -718,6 +745,7 @@ export default function BankDetailsModal({
           errorMessage: errorMsg,
         });
         setPayoutError(errorMsg);
+        setPayoutAccessibleError(classifyError(err, { safeValues: { accountNumber } }));
         setIsPollingStatus(false);
         currentTimeline = reconcileTransferStatus(currentTimeline, {
           stage: 'provider',
@@ -757,6 +785,7 @@ export default function BankDetailsModal({
     setQuoteSecondsLeft(120);
     setPayoutLoading(false);
     setPayoutError('');
+    setPayoutAccessibleError(null);
     setPayoutNote('');
     setTransferReference('');
     setTransferStatus('pending');
@@ -848,6 +877,7 @@ export default function BankDetailsModal({
         aria-modal="true"
         aria-label="Fiat payout"
         tabIndex={-1}
+        dir={dir}
         className="theme-surface theme-border relative w-full max-w-md mx-4 border rounded-2xl shadow-2xl p-6"
         variants={modalVariants}
         initial={prefersReducedMotion ? false : 'hidden'}
@@ -886,7 +916,7 @@ export default function BankDetailsModal({
 
         {/* Step indicators - hidden on the success screen */}
         {step < 4 && (
-          <div className="flex items-center gap-1 mb-6">
+          <div className="flex items-center gap-1 mb-6 step-indicator">
             {([1, 2, 3] as const).map((s) => (
               <React.Fragment key={s}>
                 <div
@@ -934,7 +964,7 @@ export default function BankDetailsModal({
                       <Star className="w-4 h-4" />
                       Use saved beneficiary ({beneficiaries.length})
                       <ChevronRight
-                        className={`w-3 h-3 transition-transform ${showSavedBeneficiaries ? 'rotate-90' : ''}`}
+                        className={`w-3 h-3 transition-transform icon-directional ${showSavedBeneficiaries ? 'rotate-90' : ''}`}
                       />
                     </button>
 
@@ -1028,10 +1058,12 @@ export default function BankDetailsModal({
                 {banksLoading ? (
                   <SkeletonWallet />
                 ) : banksError ? (
-                  <div className="flex items-center gap-2 text-red-400 text-sm py-4">
-                    <AlertCircle className="w-4 h-4 flex-shrink-0" />
-                    <span>{banksError}</span>
-                  </div>
+                  <ErrorSummary
+                    id="bdm-banks-error"
+                    error={banksAccessibleError}
+                    inline
+                    data-testid="banks-error"
+                  />
                 ) : (
                   <>
                     <div className="relative mb-3">
@@ -1084,7 +1116,7 @@ export default function BankDetailsModal({
                   disabled={!selectedBank}
                   className="mt-4 w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:text-gray-500 text-white py-3 rounded-lg font-medium transition-colors"
                 >
-                  Next <ChevronRight className="w-4 h-4" />
+                  Next <ChevronRight className="w-4 h-4 icon-directional" />
                 </button>
               </div>
             </motion.div>
@@ -1118,16 +1150,20 @@ export default function BankDetailsModal({
                   </label>
                   <input
                     type="text"
+                    id="bdm-account-number"
                     inputMode="numeric"
                     value={accountNumber}
                     onChange={(e) => {
                       setAccountNumber(e.target.value);
                       setVerifiedAccount(null);
                       setVerifyError('');
+                      setVerifyAccessibleError(null);
                     }}
                     onBlur={handleVerifyAccount}
                     maxLength={10}
                     placeholder="0000000000"
+                    aria-invalid={verifyAccessibleError ? true : undefined}
+                    aria-describedby={verifyAccessibleError ? 'bdm-verify-error' : undefined}
                     className="w-full bg-gray-800 border border-gray-600 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
                   />
                 </div>
@@ -1190,15 +1226,12 @@ export default function BankDetailsModal({
                 )}
 
                 {verifyError && !verifying && (
-                  <motion.div
-                    initial={{ opacity: 0, scale: 0.95 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    exit={{ opacity: 0, scale: 0.95 }}
-                    className="flex items-center gap-2 text-red-400 text-sm mb-3 bg-red-400/10 rounded-lg px-3 py-2"
-                  >
-                    <AlertCircle className="w-4 h-4 flex-shrink-0" />
-                    <span>{verifyError}</span>
-                  </motion.div>
+                  <ErrorSummary
+                    id="bdm-verify-error"
+                    error={verifyAccessibleError}
+                    inline
+                    data-testid="verify-error"
+                  />
                 )}
 
                 {verifiedAccount && !verifying && (
@@ -1529,15 +1562,15 @@ export default function BankDetailsModal({
                 )}
 
                 {payoutError && (
-                  <motion.div
-                    initial={{ opacity: 0, scale: 0.95 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    exit={{ opacity: 0, scale: 0.95 }}
-                    className="theme-soft-danger flex items-center gap-2 text-sm mb-4 rounded-lg px-3 py-2 border"
-                  >
-                    <AlertCircle className="w-4 h-4 flex-shrink-0" />
-                    <span>{payoutError}</span>
-                  </motion.div>
+                  <ErrorSummary
+                    id="bdm-payout-error"
+                    error={payoutAccessibleError}
+                    onDismiss={() => {
+                      setPayoutError('');
+                      setPayoutAccessibleError(null);
+                    }}
+                    data-testid="payout-error"
+                  />
                 )}
 
                 <div className="flex gap-3">

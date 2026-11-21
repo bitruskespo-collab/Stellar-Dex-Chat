@@ -61,6 +61,21 @@
     "yesterday": "Ayer"
   },
   "errors": {
+    "wallet": {
+      "disconnected": "Su billetera no está conectada. Conecte Freighter para continuar.",
+      "session_expired": "Su sesión de billetera ha expirado. Vuelva a conectar Freighter para continuar.",
+      "user_declined": "Rechazó la transacción en Freighter. Revísela y apruébela cuando esté listo.",
+      "context_changed": "Su cuenta o red cambió durante la transacción. Confirme el nuevo contexto y reconstruya.",
+      "unknown": "Ocurrió un error inesperado en la billetera. Por favor, inténtelo de nuevo."
+    },
+    "api": {
+      "network": "La solicitud de red falló. Verifique su conexión y vuelva a intentarlo.",
+      "rate_limited": "Demasiadas solicitudes. Espere un momento y vuelva a intentarlo.",
+      "server": "El servidor encontró un error. Inténtelo de nuevo o contacte al soporte.",
+      "unauthorized": "No está autorizado. Vuelva a conectar su billetera e inténtelo de nuevo.",
+      "validation": "Los datos enviados no son válidos. Revise el formulario y vuelva a intentarlo.",
+      "unknown": "Ocurrió un error inesperado. Por favor, inténtelo de nuevo."
+    },
     "101": "El contrato no ha sido inicializado.",
     "102": "El contrato ya ha sido inicializado.",
     "103": "Se ha violado un invariante interno.",
