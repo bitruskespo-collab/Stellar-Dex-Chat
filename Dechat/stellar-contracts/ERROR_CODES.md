@@ -85,6 +85,7 @@ Generated from the `Error` enum in `Dechat/stellar-contracts/src/lib.rs`.
 | 1106 | `ProposalAlreadyExecuted` | Multi-sig | Multi-sig proposal already executed |
 | 1107 | `ThresholdNotMet` | Multi-sig | Approval threshold not met |
 | 1108 | `MaxSignersReached` | Multi-sig | Maximum signers reached |
+| 1109 | `ProposalExpired` | Multi-sig | Proposal passed its expiry ledger and can no longer execute |
 | 1204 | `AdminRecoveryAlreadyPending` | Admin Recovery | An admin recovery proposal is already pending |
 | 1205 | `AdminRecoveryNotPending` | Admin Recovery | No admin recovery proposal is pending |
 
@@ -103,5 +104,5 @@ Generated from the `Error` enum in `Dechat/stellar-contracts/src/lib.rs`.
 | Quota & Migration | 801–803 | Quota enforcement and data migrations |
 | Replay Protection | 901–902 | Nonce validation |
 | Deposit Floor | 1001 | Minimum deposit enforcement |
-| Multi-sig | 1101–1108 | Multi-signature proposal and execution |
+| Multi-sig | 1101–1109 | Multi-signature proposal and execution |
 | Admin Recovery | 1204–1205 | Delayed recovery proposal state |

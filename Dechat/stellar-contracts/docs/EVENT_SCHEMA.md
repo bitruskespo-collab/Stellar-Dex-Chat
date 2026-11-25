@@ -94,6 +94,7 @@ Events communicate completed on-chain facts. To prevent indexers from recording 
 | **multisig_proposed** | Raw tuple | `(EVENT_VERSION, Symbol("multisig_proposed"))` | `u64` | `propose_multisig_action` |
 | **multisig_approved** | Raw tuple | `(EVENT_VERSION, Symbol("multisig_approved"))` | `(u64, Address)` | `approve_multisig_action` |
 | **multisig_executed** | Raw tuple | `(EVENT_VERSION, Symbol("multisig_executed"))` | `u64` | `execute_multisig_action` |
+| **multisig_expired** | Raw tuple | `(EVENT_VERSION, Symbol("multisig_expired"))` | `(u64, Address, u32)` — proposal id, creator, expiry ledger | `prune_expired_multisig_proposals` |
 
 ---
 

@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **contract:** Expire and archive stale multisig proposals with bounded cleanup (#175)
 - **chat:** Add error boundary fallback
 - **payout:** Add provider interface and registry
 - **chat:** Mobile bottom-sheet pattern for chat history

@@ -19,6 +19,21 @@ const MAX_SIGNERS: u32 = 20;
 const WINDOW_LEDGERS: u32 = 17_280; // ~24 hours
 const CIRCUIT_BREAKER_RESET_LEDGERS: u32 = 34_560; // ~48 hours (2 × WINDOW_LEDGERS)
 const WITHDRAWAL_EXPIRY_WINDOW_LEDGERS: u32 = 17_280; // ~24 hours — reserved for future withdrawal expiry feature
+/// Default lifetime of a pending multisig proposal, in ledgers.
+///
+/// A proposal becomes expired at `created_at + window` and can then be pruned
+/// by [`FiatBridge::prune_expired_multisig_proposals`]. The admin can
+/// override this per contract instance with
+/// [`FiatBridge::set_multisig_expiry`]; `0` restores this default. The same
+/// ~24 hour convention as withdrawal requests is used because the repository
+/// has no other multisig-specific window.
+const DEFAULT_MULTISIG_EXPIRY_WINDOW_LEDGERS: u32 = 17_280; // ~24 hours
+/// Maximum number of proposal IDs scanned by one cleanup invocation.
+///
+/// The cleanup entry point accepts a smaller `max_scan`, but never more than
+/// this, so a single call stays well inside the ledger budget. Operators
+/// repeat the call until it reports completion to drain a large backlog.
+pub const MAX_MULTISIG_CLEANUP_SCAN: u32 = 50;
 const MIN_TIMELOCK_DELAY: u32 = 34_560; // 48 hours
 const FEE_BPS_DENOMINATOR: i128 = 10_000;
 /// Default inactivity threshold for operators in ledger units.
@@ -147,6 +162,8 @@ pub enum Error {
     ProposalAlreadyExecuted = 1106,
     ThresholdNotMet = 1107,
     MaxSignersReached = 1108,
+    /// The proposal passed its expiry ledger and can no longer execute.
+    ProposalExpired = 1109,
 
     // --- 1200 series: Cancellation lifecycle ---
     /// A cancellation has already been requested for this withdrawal.
@@ -715,6 +732,19 @@ pub struct PruneBatchResult {
     pub processed: u32,
     pub pruned: u32,
     pub next_cursor: u32,
+    pub is_complete: bool,
+}
+
+/// Result of one bounded multisig-proposal cleanup call (#175).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultisigCleanupResult {
+    /// Proposal IDs examined in this call.
+    pub processed: u32,
+    /// Expired pending proposals removed in this call.
+    pub pruned: u32,
+    /// Next proposal ID to scan; `0` means the scan wrapped and is complete.
+    pub next_cursor: u64,
     pub is_complete: bool,
 }
 
@@ -1482,6 +1512,10 @@ pub enum DataKey {
     Threshold,
     MultisigProposal(u64),
     NextMultisigID,
+    /// Instance-wide lifetime of a pending multisig proposal, in ledgers.
+    MultisigExpiryWindow,
+    /// Next proposal ID to scan in bounded multisig cleanup.
+    MultisigCleanupCursor,
     // ── Issue #496: slippage threshold for batch operations ─────────────
     SlippageThreshold,
     // ── Issue #1044: fee recipient address ───────────────────────────
@@ -8464,6 +8498,15 @@ impl FiatBridge {
             return Err(Error::ProposalAlreadyExecuted);
         }
 
+        // Financial-safety rule: expiry makes a pending proposal non-executable.
+        // This keeps execution and cleanup in agreement: anything cleanup can
+        // remove is already unable to move state, and anything still inside
+        // its window is never touched by cleanup.
+        let expiry_window = Self::multisig_expiry_window(&env);
+        if env.ledger().sequence() >= Self::multisig_expires_at(&proposal, expiry_window) {
+            return Err(Error::ProposalExpired);
+        }
+
         let threshold: u32 = env.storage().instance().get(&DataKey::Threshold).unwrap();
         if proposal.approvals.len() < threshold {
             return Err(Error::ThresholdNotMet);
@@ -8500,6 +8543,155 @@ impl FiatBridge {
             .instance()
             .get(&DataKey::Threshold)
             .unwrap_or(0)
+    }
+
+    /// Resolve the instance-wide pending-proposal lifetime in ledgers.
+    ///
+    /// `0` (including an unset key) means
+    /// [`DEFAULT_MULTISIG_EXPIRY_WINDOW_LEDGERS`] (~24 hours).
+    fn multisig_expiry_window(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get::<_, u32>(&DataKey::MultisigExpiryWindow)
+            .filter(|window| *window != 0)
+            .unwrap_or(DEFAULT_MULTISIG_EXPIRY_WINDOW_LEDGERS)
+    }
+
+    /// First ledger at which a proposal is expired, derived from its creation
+    /// ledger and the current policy. Deriving rather than storing the value
+    /// keeps pre-existing [`MultisigProposal`] entries decodable.
+    fn multisig_expires_at(proposal: &MultisigProposal, window: u32) -> u32 {
+        proposal.created_at.saturating_add(window)
+    }
+
+    /// Set the pending-proposal lifetime in ledgers (admin only).
+    ///
+    /// `0` restores [`DEFAULT_MULTISIG_EXPIRY_WINDOW_LEDGERS`]. The change
+    /// applies to every pending proposal, including ones created earlier,
+    /// because expiry is derived from `created_at` plus this window.
+    pub fn set_multisig_expiry(env: Env, ledgers: u32) -> Result<(), Error> {
+        let _admin = Self::require_admin(&env)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::MultisigExpiryWindow, &ledgers);
+        Ok(())
+    }
+
+    /// Current pending-proposal lifetime in ledgers, after the default
+    /// fallback.
+    pub fn get_multisig_expiry(env: Env) -> u32 {
+        Self::multisig_expiry_window(&env)
+    }
+
+    /// Remove expired pending multisig proposals, emitting one
+    /// `multisig_expired` event per removal.
+    ///
+    /// # Rules
+    /// - Expiry boundary: a proposal is expired when
+    ///   `ledger.sequence() >= created_at + get_multisig_expiry()`. At
+    ///   `expiry - 1` it is still live and survives cleanup.
+    /// - Only `executed == false` proposals in instance storage are removed.
+    ///   Executed proposals keep their final outcome forever. There is no
+    ///   cancellation entry point for [`MultisigProposal`].
+    /// - Expired proposals cannot execute (see `execute_multisig_action`), so
+    ///   cleanup never removes something that could still change state.
+    /// - No approvals are changed and no funds move.
+    ///
+    /// # Bound
+    /// At most `max_scan` proposal IDs are examined per call (clamped to
+    /// `[1, MAX_MULTISIG_CLEANUP_SCAN]`). A persisted cursor resumes at the
+    /// next ID on the following call and wraps after `NextMultisigID`. Callers
+    /// should repeat until `MultisigCleanupResult::is_complete` is true.
+    ///
+    /// # Authorization
+    /// Admin only, matching the other bounded maintenance entry point
+    /// (`prune_inactive_operators_bounded`).
+    #[allow(deprecated)]
+    pub fn prune_expired_multisig_proposals(
+        env: Env,
+        max_scan: u32,
+    ) -> Result<MultisigCleanupResult, Error> {
+        let _admin = Self::require_admin(&env)?;
+
+        let next_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextMultisigID)
+            .unwrap_or(0);
+        if next_id == 0 {
+            return Ok(MultisigCleanupResult {
+                processed: 0,
+                pruned: 0,
+                next_cursor: 0,
+                is_complete: true,
+            });
+        }
+
+        let scan = if max_scan == 0 {
+            1
+        } else if max_scan > MAX_MULTISIG_CLEANUP_SCAN {
+            MAX_MULTISIG_CLEANUP_SCAN
+        } else {
+            max_scan
+        };
+
+        let mut cursor: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MultisigCleanupCursor)
+            .unwrap_or(0);
+        if cursor >= next_id {
+            cursor = 0;
+        }
+
+        let end = cursor.saturating_add(scan as u64).min(next_id);
+        let window = Self::multisig_expiry_window(&env);
+        let current_ledger = env.ledger().sequence();
+        let mut processed = 0u32;
+        let mut pruned = 0u32;
+
+        for id in cursor..end {
+            processed += 1;
+            let proposal: MultisigProposal = match env
+                .storage()
+                .instance()
+                .get(&DataKey::MultisigProposal(id))
+            {
+                Some(proposal) => proposal,
+                None => continue,
+            };
+
+            if proposal.executed {
+                continue;
+            }
+
+            let expires_at = Self::multisig_expires_at(&proposal, window);
+            if current_ledger < expires_at {
+                continue;
+            }
+
+            env.storage()
+                .instance()
+                .remove(&DataKey::MultisigProposal(id));
+            pruned += 1;
+
+            env.events().publish(
+                (EVENT_VERSION, Symbol::new(&env, "multisig_expired")),
+                (id, proposal.creator, expires_at),
+            );
+        }
+
+        let next_cursor = if end >= next_id { 0 } else { end };
+        env.storage()
+            .instance()
+            .set(&DataKey::MultisigCleanupCursor, &next_cursor);
+
+        Ok(MultisigCleanupResult {
+            processed,
+            pruned,
+            next_cursor,
+            is_complete: next_cursor == 0,
+        })
     }
 
     // ── Missing methods referenced by tests ──────────────────────────────
@@ -9575,3 +9767,6 @@ mod test_resource_budgets_worst_case;
 // Issue #172 / #173: FiatBridge invariant specification and withdrawal lifecycle model tests.
 #[cfg(test)]
 mod test_withdrawal_lifecycle_model;
+
+#[cfg(test)]
+mod test_multisig_expiry;
