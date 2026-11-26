@@ -58,6 +58,9 @@ proptest! {
         prop_assert_eq!(proposal.approvals.len(), 1);
         prop_assert_eq!(proposal.approvals.get(0).unwrap(), proposer);
         prop_assert!(!proposal.executed);
+        prop_assert_eq!(proposal.policy_version, 1);
+        prop_assert_eq!(proposal.policy_signers, signers);
+        prop_assert_eq!(proposal.policy_threshold, 1);
         prop_assert_eq!(accounting(&bridge), before);
     }
 }

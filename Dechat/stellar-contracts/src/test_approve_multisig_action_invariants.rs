@@ -75,12 +75,15 @@ fn sample_action(env: &Env) -> BatchAdminOp {
 }
 
 /// Everything about a proposal that `approve_multisig_action` must not alter.
-fn immutable_parts(p: &MultisigProposal) -> (Address, BatchAdminOp, bool, u32) {
+fn immutable_parts(p: &MultisigProposal) -> (Address, BatchAdminOp, bool, u32, u32, Vec<Address>, u32) {
     (
         p.creator.clone(),
         p.action.clone(),
         p.executed,
         p.created_at,
+        p.policy_version,
+        p.policy_signers.clone(),
+        p.policy_threshold,
     )
 }
 

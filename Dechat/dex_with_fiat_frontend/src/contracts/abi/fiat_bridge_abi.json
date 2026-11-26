@@ -249,6 +249,9 @@
     "1105": { "name": "AlreadyApproved", "description": "Action has already been approved by caller." },
     "1106": { "name": "ProposalAlreadyExecuted", "description": "Multisig proposal has already been executed." },
     "1107": { "name": "ThresholdNotMet", "description": "Required multisig threshold has not been met." },
-    "1108": { "name": "MaxSignersReached", "description": "Maximum number of multisig signers reached." }
+    "1108": { "name": "MaxSignersReached", "description": "Maximum number of multisig signers reached." },
+    "1109": { "name": "ProposalCancelled", "description": "Multisig or rotation proposal has been cancelled." },
+    "1110": { "name": "QuorumUnreachable", "description": "Signer rotation would render multisig quorum unreachable." },
+    "1111": { "name": "PolicyVersionMismatch", "description": "Proposal policy snapshot does not match the active multisig policy version." }
   }
 }

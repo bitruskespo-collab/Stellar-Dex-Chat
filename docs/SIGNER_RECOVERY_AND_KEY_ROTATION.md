@@ -19,8 +19,9 @@
 3. **Approval Gathering**:
    - Required threshold of independent signers review the proposal payload SHA-256 digest offline and call `approve_multisig_action`.
 4. **Execution & Verification**:
-   - Call `execute_multisig_action` once timelock matures.
-   - Verify active signers via `get_multisig_signers()`.
+   - Call `execute_multisig_action` once timelock matures (or `execute_signer_rotation` for timelocked signer-set / threshold rotations).
+   - Executing a signer rotation increments `MultisigPolicyVersion` (`get_multisig_policy_version()`), invalidating any pending proposals created under earlier policy versions (`Error::PolicyVersionMismatch`) so prior approvals cannot be reinterpreted under the new signer set or threshold.
+   - Verify active signers and policy snapshot via `get_multisig_signers()` and `get_multisig_policy_snapshot()`. Any legitimate pending actions must be re-proposed under the new policy version.
 5. **Service Restoration**:
    - Submit `reset_circuit_breaker` and resume normal operations.
 

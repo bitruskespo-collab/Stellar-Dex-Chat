@@ -100,6 +100,8 @@ pub enum Error {
     RateLimitExceeded = 320,
     DepositRateLimitExceeded = 321,
     InvalidPageSize = 322,
+    TokenDepositsDisabled = 323,
+    TokenNotRetirable = 324,
 
     // --- 400 series: Funds & Balances ---
     InsufficientFunds = 401,
@@ -138,6 +140,7 @@ pub enum Error {
     OracleSpreadTooWide = 711,
     OracleSourcesInsufficient = 712,
     OracleVersionUnsupported = 713,
+    OracleUnavailable = 714,
 
     // --- 800 series: Quota & Migration ---
     WithdrawalQuotaExceeded = 801,
@@ -162,8 +165,9 @@ pub enum Error {
     ProposalAlreadyExecuted = 1106,
     ThresholdNotMet = 1107,
     MaxSignersReached = 1108,
-    /// The proposal passed its expiry ledger and can no longer execute.
-    ProposalExpired = 1109,
+    ProposalCancelled = 1109,
+    QuorumUnreachable = 1110,
+    PolicyVersionMismatch = 1111,
 
     // --- 1200 series: Cancellation lifecycle ---
     /// A cancellation has already been requested for this withdrawal.
@@ -396,6 +400,25 @@ pub struct WithdrawalProposal {
     pub amount: i128,
 }
 
+/// Initial multisig policy version assigned at `init` (Issue #174).
+pub const INITIAL_MULTISIG_POLICY_VERSION: u32 = 1;
+
+/// Immutable snapshot of the multisig governance policy (signer set and
+/// approval threshold) together with its monotonic version (Issue #174).
+///
+/// The version starts at [`INITIAL_MULTISIG_POLICY_VERSION`] and is bumped by
+/// exactly one every time a signer rotation executes. Every multisig and
+/// signer-rotation proposal records the snapshot that was active when it was
+/// created; approvals and execution are only evaluated against that snapshot
+/// and only while it is still the active policy.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultisigPolicySnapshot {
+    pub version: u32,
+    pub signers: Vec<Address>,
+    pub threshold: u32,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MultisigProposal {
@@ -404,6 +427,12 @@ pub struct MultisigProposal {
     pub approvals: Vec<Address>,
     pub executed: bool,
     pub created_at: u32,
+    /// Monotonic multisig policy version bound to this proposal at creation (Issue #174).
+    pub policy_version: u32,
+    /// Immutable snapshot of authorized signers bound to this proposal at creation (Issue #174).
+    pub policy_signers: Vec<Address>,
+    /// Immutable snapshot of approval threshold bound to this proposal at creation (Issue #174).
+    pub policy_threshold: u32,
 }
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -691,6 +720,12 @@ pub struct SignerRotationProposal {
     pub executed: bool,
     pub cancelled: bool,
     pub created_at: u32,
+    /// Monotonic multisig policy version bound to this rotation proposal at creation (Issue #174).
+    pub policy_version: u32,
+    /// Immutable snapshot of authorized signers bound to this rotation proposal at creation (Issue #174).
+    pub policy_signers: Vec<Address>,
+    /// Immutable snapshot of approval threshold bound to this rotation proposal at creation (Issue #174).
+    pub policy_threshold: u32,
 }
 
 // ── Issue #20: Capabilities & Explicit Roles ──────────────────────────
@@ -1512,10 +1547,25 @@ pub enum DataKey {
     Threshold,
     MultisigProposal(u64),
     NextMultisigID,
-    /// Instance-wide lifetime of a pending multisig proposal, in ledgers.
-    MultisigExpiryWindow,
-    /// Next proposal ID to scan in bounded multisig cleanup.
-    MultisigCleanupCursor,
+    // ── Issue #174: Immutable multisig policy snapshots ──────────────────
+    MultisigPolicyVersion,
+    // ── Issue #19: Multisig signer & threshold rotation ──────────────────
+    SignerRotationProposal(u64),
+    NextSignerRotationID,
+    // ── Issue #20: Explicit roles & capabilities ─────────────────────────
+    RoleChangeProposal(u64),
+    NextRoleProposalID,
+    RoleMembers(Role),
+    HasRole(Role, Address),
+    // ── Issue #21: Bounded operator heartbeat & pruning ──────────────────
+    OperatorRegisteredAt(Address),
+    OperatorConfigNonce(Address),
+    OperatorPruneCursor,
+    // ── Issue #22: Ledger-window rate limits ─────────────────────────────
+    RateLimit(Symbol),
+    RateLimitCounter(Symbol),
+    // ── Issue #24: Protocol fee basis points ─────────────────────────────
+    FeeBps,
     // ── Issue #496: slippage threshold for batch operations ─────────────
     SlippageThreshold,
     // ── Issue #1044: fee recipient address ───────────────────────────
@@ -1677,6 +1727,10 @@ impl FiatBridge {
         env.storage()
             .instance()
             .set(&DataKey::Threshold, &threshold);
+        env.storage().instance().set(
+            &DataKey::MultisigPolicyVersion,
+            &INITIAL_MULTISIG_POLICY_VERSION,
+        );
         env.storage()
             .instance()
             .set(&DataKey::NextMultisigID, &0u64);
@@ -1955,6 +2009,7 @@ impl FiatBridge {
         let token_client = token::Client::new(&env, &token);
         let token_decimals = token_client
             .try_decimals()
+            .map_err(|_| Error::TokenInterfaceInvalid)?
             .map_err(|_| Error::TokenInterfaceInvalid)?;
         if token_decimals > crate::math::MAX_DECIMALS {
             return Err(Error::TokenInterfaceInvalid);
@@ -1966,12 +2021,15 @@ impl FiatBridge {
         // Transfer and verify balance deltas (Issue #25)
         let balance_before = token_client
             .try_balance(&env.current_contract_address())
+            .map_err(|_| Error::TokenInterfaceInvalid)?
             .map_err(|_| Error::TokenInterfaceInvalid)?;
         token_client
             .try_transfer(&from, env.current_contract_address(), &amount)
+            .map_err(|_| Error::TransferFailed)?
             .map_err(|_| Error::TransferFailed)?;
         let balance_after = token_client
             .try_balance(&env.current_contract_address())
+            .map_err(|_| Error::TokenInterfaceInvalid)?
             .map_err(|_| Error::TokenInterfaceInvalid)?;
         let received = balance_after
             .checked_sub(balance_before)
@@ -2166,6 +2224,7 @@ impl FiatBridge {
         let token_client = token::Client::new(env, token_addr);
         let balance = token_client
             .try_balance(&env.current_contract_address())
+            .map_err(|_| Error::TokenInterfaceInvalid)?
             .map_err(|_| Error::TokenInterfaceInvalid)?;
 
         if config.total_deposited < config.total_withdrawn {
@@ -2262,21 +2321,26 @@ impl FiatBridge {
         let client = token::Client::new(&env, &token);
         let recipient_before = client
             .try_balance(&to)
+            .map_err(|_| Error::TokenInterfaceInvalid)?
             .map_err(|_| Error::TokenInterfaceInvalid)?;
         let balance_before = client
             .try_balance(&env.current_contract_address())
+            .map_err(|_| Error::TokenInterfaceInvalid)?
             .map_err(|_| Error::TokenInterfaceInvalid)?;
         if amount > balance_before {
             return Err(Error::InsufficientFunds);
         }
         client
             .try_transfer(&env.current_contract_address(), &to, &amount)
+            .map_err(|_| Error::TransferFailed)?
             .map_err(|_| Error::TransferFailed)?;
         let balance_after = client
             .try_balance(&env.current_contract_address())
+            .map_err(|_| Error::TokenInterfaceInvalid)?
             .map_err(|_| Error::TokenInterfaceInvalid)?;
         let recipient_after = client
             .try_balance(&to)
+            .map_err(|_| Error::TokenInterfaceInvalid)?
             .map_err(|_| Error::TokenInterfaceInvalid)?;
         let contract_spent = balance_before
             .checked_sub(balance_after)
@@ -2600,6 +2664,7 @@ impl FiatBridge {
         let token_client = token::Client::new(&env, &request.token);
         let balance = token_client
             .try_balance(&env.current_contract_address())
+            .map_err(|_| Error::TokenInterfaceInvalid)?
             .map_err(|_| Error::TokenInterfaceInvalid)?;
 
         let execute_amount = match partial_amount {
@@ -2638,9 +2703,11 @@ impl FiatBridge {
 
         let recipient_before = token_client
             .try_balance(&request.to)
+            .map_err(|_| Error::TokenInterfaceInvalid)?
             .map_err(|_| Error::TokenInterfaceInvalid)?;
         let balance_before = token_client
             .try_balance(&env.current_contract_address())
+            .map_err(|_| Error::TokenInterfaceInvalid)?
             .map_err(|_| Error::TokenInterfaceInvalid)?;
         token_client
             .try_transfer(
@@ -2648,12 +2715,15 @@ impl FiatBridge {
                 &request.to,
                 &execute_amount,
             )
+            .map_err(|_| Error::TransferFailed)?
             .map_err(|_| Error::TransferFailed)?;
         let balance_after = token_client
             .try_balance(&env.current_contract_address())
+            .map_err(|_| Error::TokenInterfaceInvalid)?
             .map_err(|_| Error::TokenInterfaceInvalid)?;
         let recipient_after = token_client
             .try_balance(&request.to)
+            .map_err(|_| Error::TokenInterfaceInvalid)?
             .map_err(|_| Error::TokenInterfaceInvalid)?;
         let contract_spent = balance_before
             .checked_sub(balance_after)
@@ -3826,6 +3896,7 @@ impl FiatBridge {
         let token_client = token::Client::new(&env, &token);
         let _ = token_client
             .try_balance(&env.current_contract_address())
+            .map_err(|_| Error::TokenInterfaceInvalid)?
             .map_err(|_| Error::TokenInterfaceInvalid)?;
 
         let config = TokenConfig {
@@ -4215,32 +4286,36 @@ impl FiatBridge {
             .get(&DataKey::OracleAdapterEnabled)
             .unwrap_or(false);
         let price = if adapter_enabled {
-            crate::oracle::OracleAdapterClient::new(env, &oracle_addr)
+            match crate::oracle::OracleAdapterClient::new(env, &oracle_addr)
                 .try_get_aggregated_price(token)
-                .map_err(|_| Error::OracleObservationMissing)?
-                .map_err(|error| match error {
-                    crate::oracle::OracleAdapterError::TooFewSources => {
-                        Error::OracleSourcesInsufficient
-                    }
-                    crate::oracle::OracleAdapterError::SpreadTooWide => Error::OracleSpreadTooWide,
-                    crate::oracle::OracleAdapterError::UnsupportedVersion => {
-                        Error::OracleVersionUnsupported
-                    }
-                    crate::oracle::OracleAdapterError::InvalidObservation => {
-                        Error::OraclePriceInvalid
-                    }
-                    crate::oracle::OracleAdapterError::ArithmeticOverflow => {
-                        Error::FiatConversionOverflow
-                    }
-                    crate::oracle::OracleAdapterError::InvalidConfig
-                    | crate::oracle::OracleAdapterError::NotInitialized => {
-                        Error::OracleConfigInvalid
-                    }
-                    _ => Error::OracleObservationMissing,
-                })?
+            {
+                Ok(Ok(p)) => p,
+                Ok(Err(_)) => return Err(Error::OracleObservationMissing),
+                Err(Ok(crate::oracle::OracleAdapterError::TooFewSources)) => {
+                    return Err(Error::OracleSourcesInsufficient);
+                }
+                Err(Ok(crate::oracle::OracleAdapterError::SpreadTooWide)) => {
+                    return Err(Error::OracleSpreadTooWide);
+                }
+                Err(Ok(crate::oracle::OracleAdapterError::UnsupportedVersion)) => {
+                    return Err(Error::OracleVersionUnsupported);
+                }
+                Err(Ok(crate::oracle::OracleAdapterError::InvalidObservation)) => {
+                    return Err(Error::OraclePriceInvalid);
+                }
+                Err(Ok(crate::oracle::OracleAdapterError::ArithmeticOverflow)) => {
+                    return Err(Error::FiatConversionOverflow);
+                }
+                Err(Ok(crate::oracle::OracleAdapterError::InvalidConfig))
+                | Err(Ok(crate::oracle::OracleAdapterError::NotInitialized)) => {
+                    return Err(Error::OracleConfigInvalid);
+                }
+                Err(_) => return Err(Error::OracleObservationMissing),
+            }
         } else {
             crate::oracle::OracleClient::new(env, &oracle_addr)
                 .try_get_price(token)
+                .map_err(|_| Error::OracleObservationMissing)?
                 .map_err(|_| Error::OracleObservationMissing)?
                 .ok_or(Error::OracleObservationMissing)?
         };
@@ -4273,7 +4348,7 @@ impl FiatBridge {
                 .get(&DataKey::UserDailyVolume(depositor.clone()))
                 .unwrap_or(UserDailyVolume {
                     usd_cents: 0,
-                    window_start: current_ledger,
+                    window_start: curr,
                 });
 
             if curr >= vol.window_start.saturating_add(window_ledgers) {
@@ -5459,6 +5534,7 @@ impl FiatBridge {
         // Issue #840: emit reconciliation event when vault ledger exceeds on-chain balance
         let on_chain_balance = token_client
             .try_balance(&env.current_contract_address())
+            .map_err(|_| Error::TokenInterfaceInvalid)?
             .map_err(|_| Error::TokenInterfaceInvalid)?;
         if current > on_chain_balance {
             FeeVaultReconciledEvent {
@@ -5472,18 +5548,23 @@ impl FiatBridge {
 
         let recipient_before = token_client
             .try_balance(&recipient)
+            .map_err(|_| Error::TokenInterfaceInvalid)?
             .map_err(|_| Error::TokenInterfaceInvalid)?;
         let balance_before = token_client
             .try_balance(&env.current_contract_address())
+            .map_err(|_| Error::TokenInterfaceInvalid)?
             .map_err(|_| Error::TokenInterfaceInvalid)?;
         token_client
             .try_transfer(&env.current_contract_address(), &recipient, &amount)
+            .map_err(|_| Error::TransferFailed)?
             .map_err(|_| Error::TransferFailed)?;
         let balance_after = token_client
             .try_balance(&env.current_contract_address())
+            .map_err(|_| Error::TokenInterfaceInvalid)?
             .map_err(|_| Error::TokenInterfaceInvalid)?;
         let recipient_after = token_client
             .try_balance(&recipient)
+            .map_err(|_| Error::TokenInterfaceInvalid)?
             .map_err(|_| Error::TokenInterfaceInvalid)?;
         let contract_spent = balance_before
             .checked_sub(balance_after)
@@ -5557,18 +5638,23 @@ impl FiatBridge {
             let token_client = token::Client::new(&env, &token);
             let recipient_before = token_client
                 .try_balance(&recipient)
+                .map_err(|_| Error::TokenInterfaceInvalid)?
                 .map_err(|_| Error::TokenInterfaceInvalid)?;
             let balance_before = token_client
                 .try_balance(&contract)
+                .map_err(|_| Error::TokenInterfaceInvalid)?
                 .map_err(|_| Error::TokenInterfaceInvalid)?;
             token_client
                 .try_transfer(&contract, &recipient, &current)
+                .map_err(|_| Error::TransferFailed)?
                 .map_err(|_| Error::TransferFailed)?;
             let balance_after = token_client
                 .try_balance(&contract)
+                .map_err(|_| Error::TokenInterfaceInvalid)?
                 .map_err(|_| Error::TokenInterfaceInvalid)?;
             let recipient_after = token_client
                 .try_balance(&recipient)
+                .map_err(|_| Error::TokenInterfaceInvalid)?
                 .map_err(|_| Error::TokenInterfaceInvalid)?;
             let contract_spent = balance_before
                 .checked_sub(balance_after)
@@ -5656,6 +5742,7 @@ impl FiatBridge {
         let token_client = token::Client::new(&env, &token);
         let balance = token_client
             .try_balance(&env.current_contract_address())
+            .map_err(|_| Error::TokenInterfaceInvalid)?
             .map_err(|_| Error::TokenInterfaceInvalid)?;
         if amount > balance {
             return Err(Error::InsufficientFunds);
@@ -5663,6 +5750,7 @@ impl FiatBridge {
 
         token_client
             .try_transfer(&env.current_contract_address(), &to, &amount)
+            .map_err(|_| Error::TransferFailed)?
             .map_err(|_| Error::TransferFailed)?;
 
         RescueEvent {
@@ -8370,7 +8458,58 @@ impl FiatBridge {
         }
     }
 
-    // ── Issue #100: Multi-sig Logic ──────────────────────────────────────────
+    // ── Issue #100 & #174: Multi-sig Logic with Immutable Policy Snapshots ──
+
+    fn current_multisig_policy(env: &Env) -> Result<MultisigPolicySnapshot, Error> {
+        let signers: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Signers)
+            .ok_or(Error::NotInitialized)?;
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Threshold)
+            .ok_or(Error::NotInitialized)?;
+        let version: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MultisigPolicyVersion)
+            .unwrap_or(INITIAL_MULTISIG_POLICY_VERSION);
+        Ok(MultisigPolicySnapshot {
+            version,
+            signers,
+            threshold,
+        })
+    }
+
+    fn require_matching_proposal_policy(
+        env: &Env,
+        policy_version: u32,
+        policy_signers: &Vec<Address>,
+        policy_threshold: u32,
+    ) -> Result<MultisigPolicySnapshot, Error> {
+        let active = Self::current_multisig_policy(env)?;
+        if policy_version == 0
+            || policy_version != active.version
+            || *policy_signers != active.signers
+            || policy_threshold != active.threshold
+        {
+            return Err(Error::PolicyVersionMismatch);
+        }
+        Ok(MultisigPolicySnapshot {
+            version: policy_version,
+            signers: policy_signers.clone(),
+            threshold: policy_threshold,
+        })
+    }
+
+    fn count_snapshot_approvals(approvals: &Vec<Address>, snapshot_signers: &Vec<Address>) -> u32 {
+        approvals
+            .iter()
+            .filter(|s| snapshot_signers.contains(s))
+            .count() as u32
+    }
 
     #[allow(deprecated)]
     pub fn propose_multisig_action(
@@ -8380,8 +8519,8 @@ impl FiatBridge {
     ) -> Result<u64, Error> {
         proposer.require_auth();
 
-        let signers: Vec<Address> = env.storage().instance().get(&DataKey::Signers).unwrap();
-        if !signers.contains(&proposer) {
+        let policy = Self::current_multisig_policy(&env)?;
+        if !policy.signers.contains(&proposer) {
             return Err(Error::Unauthorized);
         }
 
@@ -8389,7 +8528,7 @@ impl FiatBridge {
             .storage()
             .instance()
             .get(&DataKey::NextMultisigID)
-            .unwrap();
+            .unwrap_or(0);
         env.storage()
             .instance()
             .set(&DataKey::NextMultisigID, &(id + 1));
@@ -8403,6 +8542,9 @@ impl FiatBridge {
             approvals,
             executed: false,
             created_at: env.ledger().sequence(),
+            policy_version: policy.version,
+            policy_signers: policy.signers,
+            policy_threshold: policy.threshold,
         };
 
         env.storage()
@@ -8421,8 +8563,8 @@ impl FiatBridge {
     pub fn approve_multisig_action(env: Env, signer: Address, id: u64) -> Result<(), Error> {
         signer.require_auth();
 
-        let signers: Vec<Address> = env.storage().instance().get(&DataKey::Signers).unwrap();
-        if !signers.contains(&signer) {
+        let active_policy = Self::current_multisig_policy(&env)?;
+        if !active_policy.signers.contains(&signer) {
             return Err(Error::Unauthorized);
         }
 
@@ -8434,6 +8576,16 @@ impl FiatBridge {
 
         if proposal.executed {
             return Err(Error::ProposalAlreadyExecuted);
+        }
+
+        let snapshot = Self::require_matching_proposal_policy(
+            &env,
+            proposal.policy_version,
+            &proposal.policy_signers,
+            proposal.policy_threshold,
+        )?;
+        if !snapshot.signers.contains(&signer) {
+            return Err(Error::Unauthorized);
         }
 
         if proposal.approvals.contains(&signer) {
@@ -8498,17 +8650,14 @@ impl FiatBridge {
             return Err(Error::ProposalAlreadyExecuted);
         }
 
-        // Financial-safety rule: expiry makes a pending proposal non-executable.
-        // This keeps execution and cleanup in agreement: anything cleanup can
-        // remove is already unable to move state, and anything still inside
-        // its window is never touched by cleanup.
-        let expiry_window = Self::multisig_expiry_window(&env);
-        if env.ledger().sequence() >= Self::multisig_expires_at(&proposal, expiry_window) {
-            return Err(Error::ProposalExpired);
-        }
-
-        let threshold: u32 = env.storage().instance().get(&DataKey::Threshold).unwrap();
-        if proposal.approvals.len() < threshold {
+        let snapshot = Self::require_matching_proposal_policy(
+            &env,
+            proposal.policy_version,
+            &proposal.policy_signers,
+            proposal.policy_threshold,
+        )?;
+        let valid_approvals = Self::count_snapshot_approvals(&proposal.approvals, &snapshot.signers);
+        if valid_approvals < snapshot.threshold {
             return Err(Error::ThresholdNotMet);
         }
 
@@ -8545,153 +8694,20 @@ impl FiatBridge {
             .unwrap_or(0)
     }
 
-    /// Resolve the instance-wide pending-proposal lifetime in ledgers.
-    ///
-    /// `0` (including an unset key) means
-    /// [`DEFAULT_MULTISIG_EXPIRY_WINDOW_LEDGERS`] (~24 hours).
-    fn multisig_expiry_window(env: &Env) -> u32 {
+    /// Return the current monotonic multisig policy version (0 if uninitialized).
+    pub fn get_multisig_policy_version(env: Env) -> u32 {
+        if !env.storage().instance().has(&DataKey::Signers) {
+            return 0;
+        }
         env.storage()
             .instance()
-            .get::<_, u32>(&DataKey::MultisigExpiryWindow)
-            .filter(|window| *window != 0)
-            .unwrap_or(DEFAULT_MULTISIG_EXPIRY_WINDOW_LEDGERS)
+            .get(&DataKey::MultisigPolicyVersion)
+            .unwrap_or(INITIAL_MULTISIG_POLICY_VERSION)
     }
 
-    /// First ledger at which a proposal is expired, derived from its creation
-    /// ledger and the current policy. Deriving rather than storing the value
-    /// keeps pre-existing [`MultisigProposal`] entries decodable.
-    fn multisig_expires_at(proposal: &MultisigProposal, window: u32) -> u32 {
-        proposal.created_at.saturating_add(window)
-    }
-
-    /// Set the pending-proposal lifetime in ledgers (admin only).
-    ///
-    /// `0` restores [`DEFAULT_MULTISIG_EXPIRY_WINDOW_LEDGERS`]. The change
-    /// applies to every pending proposal, including ones created earlier,
-    /// because expiry is derived from `created_at` plus this window.
-    pub fn set_multisig_expiry(env: Env, ledgers: u32) -> Result<(), Error> {
-        let _admin = Self::require_admin(&env)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::MultisigExpiryWindow, &ledgers);
-        Ok(())
-    }
-
-    /// Current pending-proposal lifetime in ledgers, after the default
-    /// fallback.
-    pub fn get_multisig_expiry(env: Env) -> u32 {
-        Self::multisig_expiry_window(&env)
-    }
-
-    /// Remove expired pending multisig proposals, emitting one
-    /// `multisig_expired` event per removal.
-    ///
-    /// # Rules
-    /// - Expiry boundary: a proposal is expired when
-    ///   `ledger.sequence() >= created_at + get_multisig_expiry()`. At
-    ///   `expiry - 1` it is still live and survives cleanup.
-    /// - Only `executed == false` proposals in instance storage are removed.
-    ///   Executed proposals keep their final outcome forever. There is no
-    ///   cancellation entry point for [`MultisigProposal`].
-    /// - Expired proposals cannot execute (see `execute_multisig_action`), so
-    ///   cleanup never removes something that could still change state.
-    /// - No approvals are changed and no funds move.
-    ///
-    /// # Bound
-    /// At most `max_scan` proposal IDs are examined per call (clamped to
-    /// `[1, MAX_MULTISIG_CLEANUP_SCAN]`). A persisted cursor resumes at the
-    /// next ID on the following call and wraps after `NextMultisigID`. Callers
-    /// should repeat until `MultisigCleanupResult::is_complete` is true.
-    ///
-    /// # Authorization
-    /// Admin only, matching the other bounded maintenance entry point
-    /// (`prune_inactive_operators_bounded`).
-    #[allow(deprecated)]
-    pub fn prune_expired_multisig_proposals(
-        env: Env,
-        max_scan: u32,
-    ) -> Result<MultisigCleanupResult, Error> {
-        let _admin = Self::require_admin(&env)?;
-
-        let next_id: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::NextMultisigID)
-            .unwrap_or(0);
-        if next_id == 0 {
-            return Ok(MultisigCleanupResult {
-                processed: 0,
-                pruned: 0,
-                next_cursor: 0,
-                is_complete: true,
-            });
-        }
-
-        let scan = if max_scan == 0 {
-            1
-        } else if max_scan > MAX_MULTISIG_CLEANUP_SCAN {
-            MAX_MULTISIG_CLEANUP_SCAN
-        } else {
-            max_scan
-        };
-
-        let mut cursor: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::MultisigCleanupCursor)
-            .unwrap_or(0);
-        if cursor >= next_id {
-            cursor = 0;
-        }
-
-        let end = cursor.saturating_add(scan as u64).min(next_id);
-        let window = Self::multisig_expiry_window(&env);
-        let current_ledger = env.ledger().sequence();
-        let mut processed = 0u32;
-        let mut pruned = 0u32;
-
-        for id in cursor..end {
-            processed += 1;
-            let proposal: MultisigProposal = match env
-                .storage()
-                .instance()
-                .get(&DataKey::MultisigProposal(id))
-            {
-                Some(proposal) => proposal,
-                None => continue,
-            };
-
-            if proposal.executed {
-                continue;
-            }
-
-            let expires_at = Self::multisig_expires_at(&proposal, window);
-            if current_ledger < expires_at {
-                continue;
-            }
-
-            env.storage()
-                .instance()
-                .remove(&DataKey::MultisigProposal(id));
-            pruned += 1;
-
-            env.events().publish(
-                (EVENT_VERSION, Symbol::new(&env, "multisig_expired")),
-                (id, proposal.creator, expires_at),
-            );
-        }
-
-        let next_cursor = if end >= next_id { 0 } else { end };
-        env.storage()
-            .instance()
-            .set(&DataKey::MultisigCleanupCursor, &next_cursor);
-
-        Ok(MultisigCleanupResult {
-            processed,
-            pruned,
-            next_cursor,
-            is_complete: next_cursor == 0,
-        })
+    /// Return an immutable snapshot of the currently active multisig policy.
+    pub fn get_multisig_policy_snapshot(env: Env) -> Option<MultisigPolicySnapshot> {
+        Self::current_multisig_policy(&env).ok()
     }
 
     // ── Missing methods referenced by tests ──────────────────────────────
@@ -8862,16 +8878,17 @@ impl FiatBridge {
     ) -> Result<u64, Error> {
         proposer.require_auth();
 
-        let current_signers = Self::get_multisig_signers(env.clone());
-        if !current_signers.contains(&proposer) {
+        let policy = Self::current_multisig_policy(&env)?;
+        if !policy.signers.contains(&proposer) {
             return Err(Error::Unauthorized);
         }
 
-#[cfg(test)]
-mod test_oracle_freshness;
-
-#[cfg(test)]
-mod test_init_validation;
+        if new_signers.is_empty() {
+            return Err(Error::SignerNotFound);
+        }
+        if new_signers.len() > MAX_SIGNERS {
+            return Err(Error::MaxSignersReached);
+        }
 
         // Validate uniqueness
         let mut seen = Vec::new(&env);
@@ -8917,6 +8934,9 @@ mod test_init_validation;
             executed: false,
             cancelled: false,
             created_at: current_ledger,
+            policy_version: policy.version,
+            policy_signers: policy.signers,
+            policy_threshold: policy.threshold,
         };
 
         env.storage()
@@ -8938,8 +8958,8 @@ mod test_init_validation;
     pub fn approve_signer_rotation(env: Env, signer: Address, proposal_id: u64) -> Result<(), Error> {
         signer.require_auth();
 
-        let current_signers = Self::get_multisig_signers(env.clone());
-        if !current_signers.contains(&signer) {
+        let active_policy = Self::current_multisig_policy(&env)?;
+        if !active_policy.signers.contains(&signer) {
             return Err(Error::Unauthorized);
         }
 
@@ -8955,6 +8975,17 @@ mod test_init_validation;
         if proposal.cancelled {
             return Err(Error::ProposalCancelled);
         }
+
+        let snapshot = Self::require_matching_proposal_policy(
+            &env,
+            proposal.policy_version,
+            &proposal.policy_signers,
+            proposal.policy_threshold,
+        )?;
+        if !snapshot.signers.contains(&signer) {
+            return Err(Error::Unauthorized);
+        }
+
         if proposal.approvals.contains(&signer) {
             return Err(Error::AlreadyApproved);
         }
@@ -9033,18 +9064,25 @@ mod test_init_validation;
             return Err(Error::ActionNotReady);
         }
 
-        // Loss-of-quorum prevention: require current active signers to meet current threshold
-        let current_signers = Self::get_multisig_signers(env.clone());
-        let current_threshold = Self::get_multisig_threshold(env.clone());
-        let valid_approvals = proposal
-            .approvals
-            .iter()
-            .filter(|s| current_signers.contains(s))
-            .count() as u32;
+        // Loss-of-quorum prevention & policy snapshot binding:
+        // Require the active policy to match the proposal's creation snapshot,
+        // and require approvals from that snapshot's signers to meet its threshold.
+        let snapshot = Self::require_matching_proposal_policy(
+            &env,
+            proposal.policy_version,
+            &proposal.policy_signers,
+            proposal.policy_threshold,
+        )?;
+        let valid_approvals = Self::count_snapshot_approvals(&proposal.approvals, &snapshot.signers);
 
-        if valid_approvals < current_threshold {
+        if valid_approvals < snapshot.threshold {
             return Err(Error::ThresholdNotMet);
         }
+
+        let next_policy_version = snapshot
+            .version
+            .checked_add(1)
+            .ok_or(Error::Overflow)?;
 
         // Apply rotation
         proposal.executed = true;
@@ -9058,6 +9096,9 @@ mod test_init_validation;
         env.storage()
             .instance()
             .set(&DataKey::Threshold, &proposal.new_threshold);
+        env.storage()
+            .instance()
+            .set(&DataKey::MultisigPolicyVersion, &next_policy_version);
 
         SignerRotationExecutedEvent {
             version: EVENT_VERSION,

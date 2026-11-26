@@ -60,6 +60,9 @@ fn test_rotation_from_old_quorum_to_new_quorum_success() {
     assert_eq!(proposal.eta, 150);
     assert!(!proposal.executed);
     assert!(!proposal.cancelled);
+    assert_eq!(proposal.policy_version, 1);
+    assert_eq!(proposal.policy_signers, signers);
+    assert_eq!(proposal.policy_threshold, 2);
 
     // s2 approves rotation (reaching 2-of-3 threshold)
     client.approve_signer_rotation(&s2, &proposal_id);
@@ -98,6 +101,44 @@ fn test_rotation_from_old_quorum_to_new_quorum_success() {
     // Old signers can no longer propose or approve
     let old_res = client.try_propose_multisig_action(&s1, &action);
     assert_eq!(old_res, Err(Ok(Error::Unauthorized)));
+    assert_eq!(client.get_multisig_policy_version(), 2);
+}
+
+#[test]
+fn test_rotation_invalidates_pending_multisig_proposal_policy_snapshot() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.sequence_number = 100);
+
+    let (client, _admin, signers) = setup_bridge(&env);
+    let s1 = signers.get(0).unwrap();
+    let s2 = signers.get(1).unwrap();
+
+    // Pending action created under policy v1 (2-of-3)
+    let action = BatchAdminOp {
+        op_type: Symbol::new(&env, "set_cooldown"),
+        payload: Bytes::from_slice(&env, &25u32.to_be_bytes()),
+    };
+    let pending_id = client.propose_multisig_action(&s1, &action);
+    assert_eq!(client.get_multisig_proposal(&pending_id).unwrap().policy_version, 1);
+
+    // Rotate to a new 1-of-1 signer while pending_id is still open
+    let new_s1 = Address::generate(&env);
+    let rot_id = client.propose_signer_rotation(&s1, &vec![&env, new_s1.clone()], &1, &10);
+    client.approve_signer_rotation(&s2, &rot_id);
+    env.ledger().with_mut(|l| l.sequence_number = 110);
+    client.execute_signer_rotation(&rot_id);
+
+    // Stale v1 proposal cannot be approved or executed after policy version bumped to 2
+    assert_eq!(
+        client.try_approve_multisig_action(&new_s1, &pending_id),
+        Err(Ok(Error::PolicyVersionMismatch))
+    );
+    assert_eq!(
+        client.try_execute_multisig_action(&pending_id),
+        Err(Ok(Error::PolicyVersionMismatch))
+    );
+    assert_eq!(client.get_cooldown(), 0);
 }
 
 #[test]
