@@ -475,6 +475,7 @@ Repo Avatar
 - Resolve issues #201 #202 #203 #204 - offline queue replay prevention, quote expiry UX, schema versioning, account-scoped chat privacy
 - **contracts:** FiatBridge invariant spec and withdrawal lifecycle model tests
 - **a11y:** Respect reduced motion and validate status contrast
+- **contracts:** Bind multisig approvals to immutable proposal policy snapshot
 
 ### Fixed
 
@@ -1392,6 +1393,7 @@ Repo Avatar
 - **changelog:** Update changelog [skip ci]
 - **changelog:** Update changelog [skip ci]
 - **contracts:** Compare lifecycle model outcomes
+- **changelog:** Update changelog [skip ci]
 
 ### Deprecated
 
