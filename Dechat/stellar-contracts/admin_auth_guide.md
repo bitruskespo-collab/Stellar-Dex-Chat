@@ -37,6 +37,33 @@ Even if a malicious user bypasses the frontend UI checks, they cannot execute ad
 2. **Operator Role**: For day-to-day tasks like heartbeat signals, use the **Operator** role. Operators have restricted permissions and can be pruned by the Admin if compromised.
 3. **Multisig Control**: The contract supports M-of-N multi-signature control for critical governance actions. Ensure the threshold is set to a value that balances security and availability (e.g., 3-of-5).
 
+## Multisig Proposal Expiry and Cleanup (Issue #175)
+
+Pending multisig proposals expire so stale approvals cannot linger in contract
+storage indefinitely. The rules are:
+
+- **Window**: a proposal expires at `created_at + get_multisig_expiry()`
+  ledgers. The admin configures the window with
+  `set_multisig_expiry(ledgers)`; `0` restores the default of `17_280`
+  ledgers (~24 hours). The policy is instance-wide and applies to existing
+  pending proposals as well as new ones.
+- **Boundary**: a proposal is expired when the current ledger is **greater
+  than or equal to** its expiry ledger. One ledger before expiry it is still
+  live; exactly at the expiry ledger it is expired.
+- **No execution after expiry**: `execute_multisig_action` returns
+  `ProposalExpired` (1109) for an expired proposal. Expiry never changes the
+  outcome of an executed proposal and no funds move.
+- **Bounded cleanup**: the admin calls
+  `prune_expired_multisig_proposals(max_scan)`. Each call scans at most
+  `max_scan` proposal IDs, clamped to `1..=MAX_MULTISIG_CLEANUP_SCAN` (50),
+  starting from a persisted cursor. It removes only expired, unexecuted
+  proposals, emits one `multisig_expired` event per removal, and leaves
+  executed proposals untouched. The cursor wraps after `NextMultisigID`.
+- **Draining a backlog**: repeat the call until the returned
+  `MultisigCleanupResult::is_complete` is `true`. No other entry point needs to
+  change; asking a signer to re-propose is the recovery path for an expired
+  action.
+
 ## Lost-Admin Recovery
 
 The admin must configure an independent recovery address with

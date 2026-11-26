@@ -19,6 +19,21 @@ const MAX_SIGNERS: u32 = 20;
 const WINDOW_LEDGERS: u32 = 17_280; // ~24 hours
 const CIRCUIT_BREAKER_RESET_LEDGERS: u32 = 34_560; // ~48 hours (2 × WINDOW_LEDGERS)
 const WITHDRAWAL_EXPIRY_WINDOW_LEDGERS: u32 = 17_280; // ~24 hours — reserved for future withdrawal expiry feature
+/// Default lifetime of a pending multisig proposal, in ledgers.
+///
+/// A proposal becomes expired at `created_at + window` and can then be pruned
+/// by [`FiatBridge::prune_expired_multisig_proposals`]. The admin can
+/// override this per contract instance with
+/// [`FiatBridge::set_multisig_expiry`]; `0` restores this default. The same
+/// ~24 hour convention as withdrawal requests is used because the repository
+/// has no other multisig-specific window.
+const DEFAULT_MULTISIG_EXPIRY_WINDOW_LEDGERS: u32 = 17_280; // ~24 hours
+/// Maximum number of proposal IDs scanned by one cleanup invocation.
+///
+/// The cleanup entry point accepts a smaller `max_scan`, but never more than
+/// this, so a single call stays well inside the ledger budget. Operators
+/// repeat the call until it reports completion to drain a large backlog.
+pub const MAX_MULTISIG_CLEANUP_SCAN: u32 = 50;
 const MIN_TIMELOCK_DELAY: u32 = 34_560; // 48 hours
 const FEE_BPS_DENOMINATOR: i128 = 10_000;
 /// Default inactivity threshold for operators in ledger units.
@@ -752,6 +767,19 @@ pub struct PruneBatchResult {
     pub processed: u32,
     pub pruned: u32,
     pub next_cursor: u32,
+    pub is_complete: bool,
+}
+
+/// Result of one bounded multisig-proposal cleanup call (#175).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultisigCleanupResult {
+    /// Proposal IDs examined in this call.
+    pub processed: u32,
+    /// Expired pending proposals removed in this call.
+    pub pruned: u32,
+    /// Next proposal ID to scan; `0` means the scan wrapped and is complete.
+    pub next_cursor: u64,
     pub is_complete: bool,
 }
 
@@ -9780,3 +9808,6 @@ mod test_resource_budgets_worst_case;
 // Issue #172 / #173: FiatBridge invariant specification and withdrawal lifecycle model tests.
 #[cfg(test)]
 mod test_withdrawal_lifecycle_model;
+
+#[cfg(test)]
+mod test_multisig_expiry;
