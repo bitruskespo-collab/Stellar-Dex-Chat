@@ -5,6 +5,7 @@ import {
   SETTLEMENT_TIME_DISCLAIMER,
 } from '../useWithdrawalQueueStatus';
 import { fiatBridgeClient } from '@/lib/stellarContract';
+import en from '@/locales/en.json';
 
 vi.mock('@/lib/stellarContract', () => ({
   fiatBridgeClient: {
@@ -81,6 +82,7 @@ describe('useWithdrawalQueueStatus (#60)', () => {
     });
 
     expect(result.current.state).toBe('version_mismatch');
+    expect(result.current.errorCode).toBe('CONTRACT_VERSION_MISMATCH');
     expect(result.current.errorMessage).toContain('Contract version mismatch');
   });
 
@@ -96,7 +98,9 @@ describe('useWithdrawalQueueStatus (#60)', () => {
     });
 
     expect(result.current.state).toBe('rpc_error');
-    expect(result.current.errorMessage).toContain('Soroban RPC node timeout');
+    expect(result.current.errorCode).toBe('NETWORK_TIMEOUT');
+    expect(result.current.errorMessage).toBe(en.transaction.errors.api.network);
+    expect(result.current.errorMessage).not.toContain('Soroban RPC node timeout');
   });
 
   it('detects stale data when freshness threshold is exceeded', async () => {

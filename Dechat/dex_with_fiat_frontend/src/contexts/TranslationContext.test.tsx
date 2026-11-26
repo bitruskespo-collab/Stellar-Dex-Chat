@@ -72,7 +72,9 @@ describe('TranslationContext', () => {
     });
 
     // A key that is very unlikely to exist in any locale file.
-    expect(result.current.t('this.key.does.not.exist')).toBe('this.key.does.not.exist');
+    expect(result.current.t('this.key.does.not.exist')).toBe(
+      'this.key.does.not.exist',
+    );
   });
 
   it('t() interpolates params into the resolved string', () => {
@@ -82,12 +84,64 @@ describe('TranslationContext', () => {
       expectedNetwork: 'Testnet',
     });
 
-    // The template contains "{expectedNetwork}" twice; interpolation replaces
-    // at least the first occurrence with the supplied value.
-    expect(output).toContain('Testnet');
+    // The template contains "{expectedNetwork}" twice; both must resolve.
+    expect(output.match(/Testnet/g)).toHaveLength(2);
     expect(output).not.toBe(
       result.current.t('common.network_mismatch_warning'),
     );
+  });
+
+  it('t() formats numeric params with the active locale', () => {
+    const { result } = renderHook(() => useTranslation(), { wrapper });
+
+    expect(
+      result.current.t('transaction.queue.wait_estimate', { minutes: 1234 }),
+    ).toBe(' (~1,234m)');
+
+    act(() => {
+      result.current.setLocale('fr');
+    });
+
+    expect(
+      result.current
+        .t('transaction.queue.wait_estimate', { minutes: 1234 })
+        .replace(/[\u00a0\u202f]/g, ' '),
+    ).toBe(' (~1 234 min)');
+  });
+
+  it('tp() applies CLDR plural categories for the active locale', () => {
+    const { result } = renderHook(() => useTranslation(), { wrapper });
+
+    expect(result.current.tp('transaction.queue.depth', 1)).toBe('1 request');
+    expect(result.current.tp('transaction.queue.depth', 1234)).toBe(
+      '1,234 requests',
+    );
+
+    act(() => {
+      result.current.setLocale('ar');
+    });
+
+    expect(result.current.tp('transaction.queue.depth', 0)).toBe('لا طلبات');
+    expect(result.current.tp('transaction.queue.depth', 2)).toBe('طلبان');
+    expect(result.current.tp('transaction.queue.depth', 11)).toBe('11 طلبًا');
+  });
+
+  it('formatNumber() uses locale separators and keeps ASCII digits', () => {
+    const { result } = renderHook(() => useTranslation(), { wrapper });
+
+    expect(result.current.formatNumber(1234.5)).toBe('1,234.5');
+
+    act(() => {
+      result.current.setLocale('fr');
+    });
+    expect(
+      result.current.formatNumber(1234.5).replace(/[\u00a0\u202f]/g, ' '),
+    ).toBe('1 234,5');
+
+    act(() => {
+      result.current.setLocale('ar');
+    });
+    expect(result.current.formatNumber(1234.5)).toBe('1,234.5');
   });
 
   it('throws a clear error when consumed outside the provider', () => {

@@ -12,17 +12,17 @@ arithmetic stays deterministic across locales.
 
 ## What was added
 
-| Path | Role |
-| :--- | :--- |
-| `fixtures/locales/financial_edge_cases.json` | Versioned synthetic fixtures (the deliverable). No credentials or real user data. |
-| `src/lib/localeFixtures.ts` | Typed loader + fixture types + currency-symbol ambiguity contract (`classifyCurrencySymbol`) + interpolation helper. |
-| `src/lib/localeQaChecks.ts` | Pure, deterministic checks that run the fixtures against the real parsers. Shared by the harness and all tests. |
-| `src/app/(e2e)/test-locale-money/page.tsx` | Harness page rendering every case; surfaces failures via `data-testid="locale-failures"`. |
-| `src/lib/localeMoneyParser.test.ts` | Focused `parseLocaleMoney` regression suite (the parser previously had no unit tests). |
-| `src/lib/financialLocaleFixtures.test.ts` | Fixture integrity + aggregate automated check + per-category checks + no-secrets scan. |
-| `src/lib/__tests__/localeMoneyHarness.test.tsx` | Headless automated UI check (renders the harness in jsdom). |
-| `tests/property/amount.locale.spec.ts` | Full-browser automated UI check (Playwright `amount-property` project). |
-| `tests/property/README.md` | Contributor docs for the property project. |
+| Path                                            | Role                                                                                                                 |
+| :---------------------------------------------- | :------------------------------------------------------------------------------------------------------------------- |
+| `fixtures/locales/financial_edge_cases.json`    | Versioned synthetic fixtures (the deliverable). No credentials or real user data.                                    |
+| `src/lib/localeFixtures.ts`                     | Typed loader + fixture types + currency-symbol ambiguity contract (`classifyCurrencySymbol`) + interpolation helper. |
+| `src/lib/localeQaChecks.ts`                     | Pure, deterministic checks that run the fixtures against the real parsers. Shared by the harness and all tests.      |
+| `src/app/(e2e)/test-locale-money/page.tsx`      | Harness page rendering every case; surfaces failures via `data-testid="locale-failures"`.                            |
+| `src/lib/localeMoneyParser.test.ts`             | Focused `parseLocaleMoney` regression suite (the parser previously had no unit tests).                               |
+| `src/lib/financialLocaleFixtures.test.ts`       | Fixture integrity + aggregate automated check + per-category checks + no-secrets scan.                               |
+| `src/lib/__tests__/localeMoneyHarness.test.tsx` | Headless automated UI check (renders the harness in jsdom).                                                          |
+| `tests/property/amount.locale.spec.ts`          | Full-browser automated UI check (Playwright `amount-property` project).                                              |
+| `tests/property/README.md`                      | Contributor docs for the property project.                                                                           |
 
 ## Fixture categories
 
@@ -78,6 +78,10 @@ pnpm exec playwright test --project=amount-property
   behavior including its boundary cases.
 - No credentials, secret keys, mnemonics, or real user data are included; a
   no-secrets scan is part of the fixture-integrity test.
+- Transaction messages follow the same display/canonical split (issue #292):
+  translated text, CLDR plurals, and locale separators are presentation-only;
+  contract/HTTP/wallet codes and BigInt amounts remain machine-readable. See
+  `docs/transaction-locale-contract.md`.
 
 ## Conventions mirrored
 

@@ -23,10 +23,15 @@ describe('classifyError — contract error codes', () => {
     expect(result.message).toMatch(/nonce.*already been used/i);
     expect(result.isRetryable).toBe(false);
   });
-  it('maps retryable contract code 306 correctly', () => {
-    const result = classifyError(new Error('Error(306)'));
+  it('maps retryable cooldown code 307 correctly', () => {
+    const result = classifyError(new Error('Error(307)'));
     expect(result.isRetryable).toBe(true);
     expect(result.action).toMatch(/cooldown/i);
+  });
+  it('keeps the stale limit-cap code 303 non-retryable', () => {
+    const result = classifyError(new Error('Error(303)'));
+    expect(result.category).toBe('contract');
+    expect(result.isRetryable).toBe(false);
   });
 });
 
@@ -54,6 +59,12 @@ describe('classifyError — HTTP status codes', () => {
     const result = classifyError(new Error('Unprocessable'), { httpStatus: 422 });
     expect(result.category).toBe('validation');
     expect(result.isRetryable).toBe(false);
+  });
+  it('does not mistake an HTTP status in text for a Soroban code', () => {
+    const result = classifyError(new Error('HTTP 504 gateway timeout'));
+    expect(result.code).toBe('HTTP_504');
+    expect(result.category).toBe('network');
+    expect(result.isRetryable).toBe(true);
   });
 });
 

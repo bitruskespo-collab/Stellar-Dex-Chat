@@ -86,14 +86,14 @@
     "205": "L'appelant n'est pas enregistré comme opérateur.",
     "301": "Le montant fourni doit être supérieur à zéro.",
     "302": "Le montant dépasse la limite de jeton configurée.",
-    "303": "L'accumulateur de dépôt quotidien par jeton de l'utilisateur a dépassé la limite configurée.",
-    "304": "La limite de volume quotidien en équivalent fiat de l'utilisateur a été dépassée.",
-    "305": "La chaîne de référence de dépôt dépasse la longueur maximale.",
-    "306": "Un délai de sécurité est actuellement actif pour cet utilisateur.",
-    "307": "Le délai anti-sandwich est actif.",
-    "308": "Le jeton spécifié n'est pas pris en charge par le pont.",
-    "309": "L'adresse est sur la liste noire et ne peut pas effectuer cette action.",
-    "310": "Le sauvetage de ce jeton est interdit (jeton de protocole ou sur liste blanche).",
+    "303": "La limite maximale configurée a été atteinte.",
+    "304": "L'accumulateur de dépôt quotidien par jeton de l'utilisateur a dépassé la limite configurée.",
+    "305": "La limite de volume quotidien en équivalent fiat de l'utilisateur a été dépassée.",
+    "306": "La chaîne de référence de dépôt dépasse la longueur maximale.",
+    "307": "Un délai de sécurité est actuellement actif pour cet utilisateur.",
+    "308": "Le délai anti-sandwich est actif.",
+    "309": "Le jeton spécifié n'est pas pris en charge par le pont.",
+    "310": "L'adresse est sur la liste noire et ne peut pas effectuer cette action.",
     "401": "Le contrat ou l'utilisateur a un solde insuffisant.",
     "402": "Il n'y a pas de frais accumulés disponibles à retirer.",
     "501": "L'ID de demande de retrait spécifié n'existe pas.",
@@ -109,6 +109,200 @@
     "802": "La migration de séquestre a déjà été terminée.",
     "803": "Une ou plusieurs opérations du lot ont échoué.",
     "901": "Le nonce fourni est invalide (nonce trop élevé/futur).",
-    "902": "Le nonce fourni a déjà été utilisé (tentative de rejeu)."
+    "902": "Le nonce fourni a déjà été utilisé (tentative de rejeu).",
+    "206": "Le nombre maximal d'opérateurs a été atteint.",
+    "207": "L'administrateur est déjà dans l'état demandé.",
+    "208": "Le rôle demandé n'a pas été trouvé.",
+    "311": "Le sauvetage de ce jeton n'est pas autorisé.",
+    "312": "Un disjoncteur est actif pour cette opération.",
+    "313": "Le hachage de mémo fourni n'est pas valide.",
+    "314": "Le retrait de frais dépasse le solde disponible.",
+    "315": "Le disjoncteur a été déclenché.",
+    "316": "Le nombre maximal d'adresses refusées a été atteint.",
+    "317": "Le montant fourni n'est pas valide.",
+    "318": "Les adresses source et destination doivent être différentes.",
+    "319": "Le plafond ne peut pas être réduit sous sa valeur actuelle.",
+    "320": "La limite de fréquence des requêtes a été dépassée.",
+    "321": "La limite de fréquence des dépôts a été dépassée.",
+    "403": "Le transfert d'actif a échoué.",
+    "404": "Le transfert a livré moins de fonds que demandé.",
+    "503": "La limite quotidienne de l'opérateur a été dépassée.",
+    "504": "Une migration de l'index de la file est requise avant de continuer.",
+    "605": "La mise à jour n'est pas prête à être exécutée.",
+    "606": "La proposition de mise à jour n'existe pas.",
+    "607": "Le délai de mise à jour est trop court.",
+    "704": "Le glissement de prix est trop élevé.",
+    "705": "Aucune observation de l'oracle n'est disponible.",
+    "706": "L'observation de l'oracle est obsolète.",
+    "707": "L'observation de l'oracle est datée dans le futur.",
+    "708": "La confiance de l'oracle est trop faible.",
+    "709": "La configuration de l'oracle n'est pas valide.",
+    "710": "La conversion fiat a dépassé la plage prise en charge.",
+    "1001": "Le montant est inférieur au dépôt minimum.",
+    "1101": "Le seuil de multisignature n'est pas valide.",
+    "1102": "Le signataire est déjà enregistré.",
+    "1103": "Le signataire n'a pas été trouvé.",
+    "1104": "La proposition n'a pas été trouvée.",
+    "1105": "Cette proposition a déjà été approuvée par ce signataire.",
+    "1106": "La proposition a déjà été exécutée.",
+    "1107": "Le seuil d'approbation n'a pas été atteint.",
+    "1108": "Le nombre maximal de signataires a été atteint.",
+    "1201": "Une annulation a déjà été demandée pour ce retrait.",
+    "1202": "Aucune demande d'annulation n'existe pour ce retrait.",
+    "1203": "L'annulation n'a pas encore été approuvée par un administrateur.",
+    "10": "Un dépassement arithmétique s'est produit pendant le traitement de la transaction.",
+    "104": "Le contrat est suspendu et ne peut pas traiter cette opération.",
+    "322": "La taille de page demandée est hors de la plage autorisée.",
+    "405": "L'interface du contrat de jeton est incompatible avec cette opération.",
+    "505": "La file de retraits a atteint sa capacité maximale.",
+    "711": "L'écart de prix des oracles est supérieur à la limite autorisée.",
+    "712": "Trop peu de sources d'oracle sont disponibles pour un prix fiable.",
+    "713": "La version de l'observation de l'oracle n'est pas prise en charge.",
+    "804": "La migration du dépôt fiduciaire est dans un état invalide.",
+    "805": "Le schéma de migration du dépôt fiduciaire ne correspond pas à la version attendue.",
+    "1204": "Une récupération de compte administrateur est déjà en attente.",
+    "1205": "Aucune récupération de compte administrateur n'est en attente."
+  },
+  "transaction": {
+    "queue": {
+      "loading": "Chargement de l’état de la file de retraits…",
+      "title": "État de la file de retraits",
+      "empty_title": "La file de retraits est vide",
+      "empty_pending_one": "{count} en attente",
+      "empty_pending_other": "{count} en attente",
+      "empty_description": "Aucune demande de retrait en attente. Les nouvelles demandes seront traitées en priorité opérationnelle immédiate.",
+      "stale": "Données obsolètes",
+      "refresh": "Actualiser l’état de la file",
+      "depth_label": "Profondeur de la file",
+      "depth_one": "{count} demande",
+      "depth_other": "{count} demandes",
+      "oldest_label": "Âge de la plus ancienne demande",
+      "oldest_one": "{count} registre",
+      "oldest_other": "{count} registres",
+      "recent": "Récent",
+      "wait_estimate": " (~{minutes} min)",
+      "position_label": "Position estimée dans la file :",
+      "request_label": "Demande précise n° {id} :",
+      "queued_at": "Ajoutée au registre {ledger}",
+      "version_mismatch_title": "Incompatibilité de version du contrat",
+      "version_mismatch_description": "L’interface du contrat connecté diffère de la version attendue. Les estimations de profondeur de la file peuvent être inexactes.",
+      "unavailable_title": "État de la file indisponible",
+      "rpc_failure": "Impossible de communiquer avec le nœud RPC Stellar.",
+      "retry": "Réessayer",
+      "version_mismatch_detail": "Incompatibilité de version du contrat : attendu v{expected}, trouvé v{found}.",
+      "settlement_disclaimer": "La position dans la file et les temps d'attente estimés sont des indicateurs opérationnels et ne garantissent pas un délai de règlement."
+    },
+    "amount": {
+      "stored_fiat": "Fiat enregistré : {amount} {currency}",
+      "invalid": "Données de montant invalides"
+    },
+    "recovery": {
+      "title": "La transaction a échoué",
+      "next_action": "Action suivante :",
+      "correlation_id": "ID de corrélation :",
+      "copy": "Copier",
+      "copied": "Copié",
+      "retry": "Réessayer la transaction",
+      "dismiss": "Ignorer",
+      "show_diagnostics": "Afficher le diagnostic",
+      "hide_diagnostics": "Masquer le diagnostic",
+      "error_code": "Code d’erreur :",
+      "category": "Catégorie :",
+      "timestamp": "Horodatage :",
+      "sanitized_trace": "Trace assainie :",
+      "unavailable": "N/D"
+    },
+    "errors": {
+      "actions": {
+        "contact_support": "Contactez le support.",
+        "no_action": "Aucune action requise.",
+        "retry": "Réessayez la transaction.",
+        "retry_later": "Patientez un instant, puis réessayez.",
+        "check_permissions": "Vérifiez l’adresse et les autorisations du portefeuille connecté.",
+        "reduce_amount": "Réduisez le montant, puis réessayez.",
+        "fund_wallet": "Ajoutez des XLM à votre portefeuille ou réduisez le montant du transfert.",
+        "verify_request_id": "Vérifiez l’ID de la demande, puis réessayez.",
+        "wait_for_lock": "Attendez la fin du délai de verrouillage, puis réessayez.",
+        "sync_nonce": "Synchronisez la séquence de votre compte, puis réessayez.",
+        "adjust_slippage": "Réessayez la transaction ou ajustez le montant.",
+        "reconnect_wallet": "Reconnectez Freighter pour continuer.",
+        "check_connection": "Vérifiez votre connexion Internet, puis réessayez.",
+        "verify_form": "Vérifiez les valeurs du formulaire, puis réessayez.",
+        "generic": "Réessayez. Contactez le support si le problème persiste.",
+        "select_supported_token": "Sélectionnez un jeton pris en charge, tel que XLM ou USDC.",
+        "contact_support_with_correlation": "Contactez le support avec l'identifiant de corrélation affiché ci-dessous."
+      },
+      "unknown": {
+        "message": "Une erreur inattendue s’est produite.",
+        "action": "Réessayez. Contactez le support si le problème persiste."
+      },
+      "wallet": {
+        "disconnected": "Votre portefeuille n'est pas connecté. Connectez Freighter pour continuer.",
+        "session_expired": "Votre session de portefeuille a expiré. Reconnectez Freighter pour continuer.",
+        "user_declined": "Vous avez refusé la transaction dans Freighter. Révisez-la et approuvez-la quand vous êtes prêt.",
+        "context_changed": "Votre compte ou votre réseau a changé pendant la transaction. Confirmez le nouveau contexte et reconstruisez la transaction.",
+        "unknown": "Une erreur de portefeuille inattendue s'est produite. Veuillez réessayer."
+      },
+      "api": {
+        "network": "La requête réseau a échoué. Vérifiez votre connexion et réessayez.",
+        "rate_limited": "Trop de requêtes. Attendez un moment et réessayez.",
+        "server": "Le serveur a rencontré une erreur. Réessayez ou contactez le support.",
+        "unauthorized": "Vous n'êtes pas autorisé. Reconnectez votre portefeuille et réessayez.",
+        "validation": "Les données soumises sont invalides. Vérifiez le formulaire et réessayez.",
+        "unknown": "Une erreur inattendue s'est produite. Veuillez réessayer.",
+        "conflict": "Cette demande est en conflit avec une autre opération. Attendez sa fin, puis réessayez."
+      },
+      "recovery": {
+        "1001": {
+          "message": "Solde insuffisant pour effectuer cette transaction.",
+          "action": "fund_wallet"
+        },
+        "1002": {
+          "message": "L'appelant n'est pas autorisé ou est refusé par la politique de sécurité.",
+          "action": "check_permissions"
+        },
+        "1003": {
+          "message": "Le disjoncteur du contrat est actuellement actif.",
+          "action": "retry_later"
+        },
+        "1004": {
+          "message": "Le montant du transfert soumis n'est pas valide ou est nul.",
+          "action": "verify_form"
+        },
+        "1005": {
+          "message": "L'actif sélectionné ne figure pas dans la liste autorisée du contrat.",
+          "action": "select_supported_token"
+        },
+        "1006": {
+          "message": "La demande de retrait a expiré.",
+          "action": "retry"
+        },
+        "1007": {
+          "message": "Incohérence de nonce ou transaction en double détectée.",
+          "action": "sync_nonce"
+        },
+        "1008": {
+          "message": "La limite quotidienne de transactions du compte a été atteinte.",
+          "action": "retry_later"
+        },
+        "USER_DECLINED": {
+          "message": "La signature de la transaction a été refusée dans Freighter.",
+          "action": "retry"
+        },
+        "NETWORK_TIMEOUT": {
+          "message": "La requête réseau vers Horizon ou Soroban RPC a expiré.",
+          "action": "check_connection"
+        },
+        "RATE_LIMITED": {
+          "message": "Le nœud RPC limite le nombre de requêtes.",
+          "action": "retry_later"
+        },
+        "UNKNOWN_ERROR": {
+          "message": "Une erreur de transaction inattendue s'est produite.",
+          "action": "contact_support_with_correlation"
+        }
+      },
+      "dismiss_error": "Ignorer l'erreur"
+    }
   }
 }

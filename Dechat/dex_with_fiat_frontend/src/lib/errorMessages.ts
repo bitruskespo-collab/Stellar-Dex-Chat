@@ -26,6 +26,13 @@ export interface AccessibleError {
   message: string;
   action: string;
   category: ErrorCategory;
+  /**
+   * Stable machine code (e.g. `CONTRACT_401`, `HTTP_429`, `USER_DECLINED`).
+   * Optional because callers may already have an `AccessibleError` from a
+   * non-coded source. UI text must be resolved from this code, never from the
+   * message strings below, so translations cannot change safety decisions.
+   */
+  code?: string;
   fieldId?: string;
   isRetryable: boolean;
   safeValues?: Record<string, string>;
@@ -51,14 +58,15 @@ export const CONTRACT_ERROR_MESSAGES: Readonly<
   205: { message: 'You are not registered as an operator.', action: 'Contact support to request operator access.', category: 'auth', isRetryable: false },
   301: { message: 'The amount must be greater than zero.', action: 'Enter a positive amount.', category: 'validation', isRetryable: false },
   302: { message: 'The amount exceeds the per-token transfer limit.', action: 'Reduce the amount and try again.', category: 'validation', isRetryable: false },
-  303: { message: 'Your daily deposit limit has been reached.', action: 'Try again after the daily reset period.', category: 'contract', isRetryable: false },
-  304: { message: 'Your daily fiat-equivalent volume limit has been exceeded.', action: 'Try again after the daily reset period.', category: 'contract', isRetryable: false },
-  305: { message: 'The deposit reference is too long.', action: 'Shorten the reference and retry.', category: 'validation', isRetryable: false },
-  306: { message: 'A security cooldown is active for your account.', action: 'Wait for the cooldown to expire, then retry.', category: 'contract', isRetryable: true },
-  307: { message: 'An anti-sandwich delay is currently active.', action: 'Wait a few seconds, then retry.', category: 'contract', isRetryable: true },
-  308: { message: 'This token is not supported by the bridge.', action: 'Select a supported token such as XLM or USDC.', category: 'contract', isRetryable: false },
-  309: { message: 'Your address cannot perform this action.', action: 'Contact support if you believe this is an error.', category: 'auth', isRetryable: false },
-  310: { message: 'Rescue of this token is not permitted.', action: 'Contact support.', category: 'contract', isRetryable: false },
+  303: { message: 'The configured limit cap has been reached.', action: 'Contact support.', category: 'contract', isRetryable: false },
+  304: { message: 'Your daily deposit limit has been reached.', action: 'Try again after the daily reset period.', category: 'contract', isRetryable: false },
+  305: { message: 'Your daily fiat-equivalent volume limit has been exceeded.', action: 'Try again after the daily reset period.', category: 'contract', isRetryable: false },
+  306: { message: 'The deposit reference is too long.', action: 'Shorten the reference and retry.', category: 'validation', isRetryable: false },
+  307: { message: 'A security cooldown is active for your account.', action: 'Wait for the cooldown to expire, then retry.', category: 'contract', isRetryable: true },
+  308: { message: 'An anti-sandwich delay is currently active.', action: 'Wait a few seconds, then retry.', category: 'contract', isRetryable: true },
+  309: { message: 'This token is not supported by the bridge.', action: 'Select a supported token such as XLM or USDC.', category: 'validation', isRetryable: false },
+  310: { message: 'Your address is not allowed to perform this action.', action: 'Verify the connected wallet and permissions.', category: 'auth', isRetryable: false },
+  311: { message: 'Rescue of this token is not permitted.', action: 'Contact support.', category: 'contract', isRetryable: false },
   401: { message: 'Insufficient balance to complete this transaction.', action: 'Fund your wallet with additional XLM or reduce the transfer amount.', category: 'contract', isRetryable: false },
   402: { message: 'No accrued fees are available to withdraw.', action: 'No action required.', category: 'contract', isRetryable: false },
   501: { message: 'The withdrawal request does not exist.', action: 'Verify the request ID and retry.', category: 'contract', isRetryable: false },
@@ -97,26 +105,87 @@ const HTTP_STATUS_MESSAGES: Readonly<Record<number, ErrorEntry>> = {
   504: { message: 'The gateway timed out waiting for a response.', action: 'Check your connection and try again.', category: 'network', isRetryable: true },
 };
 
+/**
+ * Safety metadata for a machine code. This is intentionally independent of
+ * translated text and of raw diagnostics: an unrecognized code is never
+ * treated as retryable, and unlisted contract codes keep the conservative
+ * contract category instead of inheriting keyword guesses.
+ */
+export function classificationForCode(code: string): Pick<
+  AccessibleError,
+  'category' | 'isRetryable'
+> {
+  if (code.startsWith('HTTP_')) {
+    const status = Number(code.slice('HTTP_'.length));
+    return HTTP_STATUS_MESSAGES[status] ?? {
+      category: 'unknown',
+      isRetryable: false,
+    };
+  }
+  if (code.startsWith('CONTRACT_')) {
+    const numeric = Number(code.slice('CONTRACT_'.length));
+    return CONTRACT_ERROR_MESSAGES[numeric] ?? {
+      category: 'contract',
+      isRetryable: false,
+    };
+  }
+  return CONTRACT_ERROR_MESSAGES[code] ?? {
+    category: 'unknown',
+    isRetryable: false,
+  };
+}
+
+interface ErrorClassificationOptions {
+  httpStatus?: number;
+  fieldId?: string;
+  safeValues?: Record<string, string>;
+}
+
+function withCode(
+  entry: ErrorEntry,
+  code: string,
+  options: ErrorClassificationOptions,
+): AccessibleError {
+  return {
+    ...entry,
+    code,
+    fieldId: options.fieldId,
+    safeValues: options.safeValues,
+  };
+}
+
 export function classifyError(
   error: unknown,
-  options: {
-    httpStatus?: number;
-    fieldId?: string;
-    safeValues?: Record<string, string>;
-  } = {},
+  options: ErrorClassificationOptions = {},
 ): AccessibleError {
   const raw = error instanceof Error ? error.message : String(error ?? '');
   const lower = raw.toLowerCase();
-  const { httpStatus, fieldId, safeValues } = options;
+  const { httpStatus } = options;
 
   if (httpStatus !== undefined && HTTP_STATUS_MESSAGES[httpStatus]) {
-    return { ...HTTP_STATUS_MESSAGES[httpStatus], fieldId, safeValues };
+    return withCode(
+      HTTP_STATUS_MESSAGES[httpStatus],
+      `HTTP_${httpStatus}`,
+      options,
+    );
+  }
+
+  // An explicit HTTP status in diagnostics must never be reinterpreted as a
+  // Soroban code (e.g. "HTTP 504" is a gateway timeout, not contract 504).
+  const textStatus = raw.match(
+    /\b(?:HTTP|status(?:Code)?)\s*[:=]?\s*(\d{3})\b/i,
+  );
+  if (textStatus) {
+    const status = Number(textStatus[1]);
+    if (HTTP_STATUS_MESSAGES[status]) {
+      return withCode(HTTP_STATUS_MESSAGES[status], `HTTP_${status}`, options);
+    }
   }
 
   const stringCodes = ['USER_DECLINED', 'NETWORK_TIMEOUT', 'RATE_LIMITED', 'WALLET_CONTEXT_CHANGED', 'SESSION_EXPIRED', 'WALLET_DISCONNECTED'] as const;
   for (const code of stringCodes) {
     if (raw.includes(code) || lower.includes(code.toLowerCase())) {
-      return { ...CONTRACT_ERROR_MESSAGES[code], fieldId, safeValues };
+      return withCode(CONTRACT_ERROR_MESSAGES[code], code, options);
     }
   }
 
@@ -124,7 +193,11 @@ export function classifyError(
   if (codeMatch) {
     const numeric = Number(codeMatch[1]);
     if (CONTRACT_ERROR_MESSAGES[numeric]) {
-      return { ...CONTRACT_ERROR_MESSAGES[numeric], fieldId, safeValues };
+      return withCode(
+        CONTRACT_ERROR_MESSAGES[numeric],
+        `CONTRACT_${numeric}`,
+        options,
+      );
     }
   }
 
@@ -132,27 +205,31 @@ export function classifyError(
   if (bareCode) {
     const numeric = Number(bareCode[1]);
     if (CONTRACT_ERROR_MESSAGES[numeric]) {
-      return { ...CONTRACT_ERROR_MESSAGES[numeric], fieldId, safeValues };
+      return withCode(
+        CONTRACT_ERROR_MESSAGES[numeric],
+        `CONTRACT_${numeric}`,
+        options,
+      );
     }
   }
 
   if (lower.includes('user declined') || lower.includes('rejected') || lower.includes('user rejected')) {
-    return { ...CONTRACT_ERROR_MESSAGES['USER_DECLINED'], fieldId, safeValues };
+    return withCode(CONTRACT_ERROR_MESSAGES['USER_DECLINED'], 'USER_DECLINED', options);
   }
   if (lower.includes('session expired') || lower.includes('session has expired')) {
-    return { ...CONTRACT_ERROR_MESSAGES['SESSION_EXPIRED'], fieldId, safeValues };
+    return withCode(CONTRACT_ERROR_MESSAGES['SESSION_EXPIRED'], 'SESSION_EXPIRED', options);
   }
   if (lower.includes('not connected') || lower.includes('disconnected') || lower.includes('wallet is not connected')) {
-    return { ...CONTRACT_ERROR_MESSAGES['WALLET_DISCONNECTED'], fieldId, safeValues };
+    return withCode(CONTRACT_ERROR_MESSAGES['WALLET_DISCONNECTED'], 'WALLET_DISCONNECTED', options);
   }
   if (lower.includes('timeout') || lower.includes('timed out') || lower.includes('failed to fetch') || lower.includes('network') || lower.includes('load failed')) {
-    return { ...CONTRACT_ERROR_MESSAGES['NETWORK_TIMEOUT'], fieldId, safeValues };
+    return withCode(CONTRACT_ERROR_MESSAGES['NETWORK_TIMEOUT'], 'NETWORK_TIMEOUT', options);
   }
   if (lower.includes('rate limit') || lower.includes('too many requests')) {
-    return { ...CONTRACT_ERROR_MESSAGES['RATE_LIMITED'], fieldId, safeValues };
+    return withCode(CONTRACT_ERROR_MESSAGES['RATE_LIMITED'], 'RATE_LIMITED', options);
   }
   if (lower.includes('unauthorized') || lower.includes('not authorized')) {
-    return { ...HTTP_STATUS_MESSAGES[401], fieldId, safeValues };
+    return withCode(HTTP_STATUS_MESSAGES[401], 'HTTP_401', options);
   }
 
   const sanitized = sanitizeDiagnostics(raw);
@@ -162,9 +239,10 @@ export function classifyError(
     message: isSafe ? sanitized : 'An unexpected error occurred.',
     action: 'Please try again. Contact support if the problem persists.',
     category: 'unknown',
+    code: 'UNKNOWN',
     isRetryable: true,
-    fieldId,
-    safeValues,
+    fieldId: options.fieldId,
+    safeValues: options.safeValues,
   };
 }
 

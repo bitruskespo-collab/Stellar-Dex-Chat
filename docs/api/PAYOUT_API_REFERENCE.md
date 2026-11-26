@@ -140,3 +140,10 @@ and `FX_QUOTE_UNAVAILABLE` (503). Reusing an idempotency key with different
 request details returns `IDEMPOTENCY_CONFLICT` (409). A client must obtain a
 fresh quote after expiration and must not retry a modified request with an
 already-used idempotency key.
+
+Clients must branch on `error.code` (and HTTP status), never on the English
+`message` string. The frontend maps those stable codes to locale resources via
+`src/lib/localizedErrors.ts`; translations may change the wording but not the
+code, retryability, or safety decision. See
+[transaction-locale-contract.md](../../Dechat/dex_with_fiat_frontend/docs/transaction-locale-contract.md)
+for the contributor contract.

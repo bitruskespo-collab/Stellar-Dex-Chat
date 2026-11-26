@@ -67,8 +67,8 @@ describe('TransactionAmountDisplay', () => {
     // @ts-expect-error - testing invalid props
     render(<TransactionAmountDisplay amount={{ val: 100 }} />);
 
-    // Zod returns "Invalid input" for type mismatch
-    expect(screen.getByText(/Invalid input/i)).toBeDefined();
+    // Validation details stay out of the UI; one localized message is shown.
+    expect(screen.getByText('Invalid Amount Data')).toBeDefined();
     consoleSpy.mockRestore();
   });
 
@@ -76,7 +76,7 @@ describe('TransactionAmountDisplay', () => {
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     // @ts-expect-error - testing invalid amount to trigger error display
     render(<TransactionAmountDisplay amount={0} />);
-    expect(screen.getByText(/Amount must be positive/i)).toBeDefined();
+    expect(screen.getByText('Invalid Amount Data')).toBeDefined();
     consoleSpy.mockRestore();
   });
 
@@ -84,7 +84,7 @@ describe('TransactionAmountDisplay', () => {
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     // @ts-expect-error - testing invalid amount to trigger error display
     render(<TransactionAmountDisplay amount={-50} />);
-    expect(screen.getByText(/Amount must be positive/i)).toBeDefined();
+    expect(screen.getByText('Invalid Amount Data')).toBeDefined();
     consoleSpy.mockRestore();
   });
 
@@ -175,7 +175,7 @@ describe('TransactionAmountDisplay - error border colour', () => {
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     // @ts-expect-error - testing invalid amount to trigger error display
     render(<TransactionAmountDisplay amount={0} />);
-    const errorMessage = screen.getByText(/Amount must be positive/i);
+    const errorMessage = screen.getByText('Invalid Amount Data');
     expect(errorMessage).toHaveClass('theme-soft-danger');
     expect(errorMessage).toHaveClass('border');
     expect(errorMessage.className).not.toMatch(/text-red-500/);
@@ -217,7 +217,7 @@ describe('TransactionAmountDisplay - Framer Motion Animations', () => {
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     // @ts-expect-error - testing invalid amount to trigger error display
     render(<TransactionAmountDisplay amount={0} />);
-    const errorMessage = screen.getByText(/Amount must be positive/i);
+    const errorMessage = screen.getByText('Invalid Amount Data');
     expect(errorMessage).toBeInTheDocument();
     expect(errorMessage.tagName).toBe('SPAN');
     consoleSpy.mockRestore();
@@ -254,7 +254,7 @@ describe('TransactionAmountDisplay - Rules of Hooks regression', () => {
 
     // @ts-expect-error - testing invalid amount to trigger error display
     const { rerender } = render(<TransactionAmountDisplay amount={0} />);
-    expect(screen.getByText(/Amount must be positive/i)).toBeDefined();
+    expect(screen.getByText('Invalid Amount Data')).toBeDefined();
 
     // Switching to valid props must not throw a hook-order error
     expect(() => {

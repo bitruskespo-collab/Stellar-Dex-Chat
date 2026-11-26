@@ -1,7 +1,9 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { DiagnosticDetails } from '../lib/transactionErrorRecovery';
+import { useTranslation } from '@/contexts/TranslationContext';
+import { localizeDiagnostics } from '@/lib/localizedErrors';
 
 interface TransactionErrorRecoveryProps {
   diagnostics: DiagnosticDetails;
@@ -9,13 +11,19 @@ interface TransactionErrorRecoveryProps {
   onDismiss?: () => void;
 }
 
-export const TransactionErrorRecovery: React.FC<TransactionErrorRecoveryProps> = ({
-  diagnostics,
-  onRetry,
-  onDismiss,
-}) => {
+export const TransactionErrorRecovery: React.FC<
+  TransactionErrorRecoveryProps
+> = ({ diagnostics, onRetry, onDismiss }) => {
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [copied, setCopied] = useState(false);
+  const { t, locale } = useTranslation();
+
+  // The machine code, category, retryability and correlation ID stay intact;
+  // only the user-facing message/action are resolved from locale resources.
+  const localized = useMemo(
+    () => localizeDiagnostics(diagnostics, locale),
+    [diagnostics, locale],
+  );
 
   const copyCorrelationId = async () => {
     try {
@@ -32,51 +40,57 @@ export const TransactionErrorRecovery: React.FC<TransactionErrorRecoveryProps> =
       role="alert"
       aria-live="assertive"
       data-testid="transaction-error-recovery"
-      data-error-code={diagnostics.errorCode || 'unknown'}
-      data-error-category={diagnostics.category}
-      data-retryable={diagnostics.isRetryable ? 'true' : 'false'}
+      data-error-code={localized.errorCode || 'unknown'}
+      data-error-category={localized.category}
+      data-retryable={localized.isRetryable ? 'true' : 'false'}
       className="p-4 rounded-lg bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 text-red-900 dark:text-red-200 my-3"
     >
       <div className="flex items-start gap-3">
         <div className="flex-1">
-          <h3 className="font-semibold text-base mb-1">Transaction Failed</h3>
+          <h3 className="font-semibold text-base mb-1">
+            {t('transaction.recovery.title')}
+          </h3>
           <p className="text-sm text-red-800 dark:text-red-300 mb-2">
-            {diagnostics.safeMessage}
+            {localized.safeMessage}
           </p>
           <div className="text-sm font-medium bg-red-100/70 dark:bg-red-900/40 p-2.5 rounded text-red-950 dark:text-red-100 mb-3">
-            <span className="font-bold">Next Action: </span>
-            {diagnostics.actionGuidance}
+            <span className="font-bold">
+              {t('transaction.recovery.next_action')}{' '}
+            </span>
+            {localized.actionGuidance}
           </div>
 
           <div className="flex items-center gap-2 text-xs text-muted-foreground mb-3">
-            <span>Correlation ID:</span>
+            <span>{t('transaction.recovery.correlation_id')}</span>
             <code
               data-testid="transaction-error-correlation-id"
               className="bg-black/10 dark:bg-white/10 px-1.5 py-0.5 rounded font-mono"
             >
-              {diagnostics.correlationId}
+              {localized.correlationId}
             </code>
             <button
               type="button"
               onClick={copyCorrelationId}
-              aria-label="Copy correlation ID"
+              aria-label={t('transaction.recovery.copy')}
               data-testid="transaction-error-copy-correlation-id"
               data-copied={copied ? 'true' : 'false'}
               className="text-xs underline hover:no-underline font-medium text-primary"
             >
-              {copied ? 'Copied' : 'Copy'}
+              {copied
+                ? t('transaction.recovery.copied')
+                : t('transaction.recovery.copy')}
             </button>
           </div>
 
           <div className="flex flex-wrap items-center gap-2 pt-1">
-            {diagnostics.isRetryable && onRetry && (
+            {localized.isRetryable && onRetry && (
               <button
                 type="button"
                 onClick={onRetry}
                 data-testid="transaction-error-retry"
                 className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded font-medium text-xs transition-colors focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
               >
-                Retry Transaction
+                {t('transaction.recovery.retry')}
               </button>
             )}
             {onDismiss && (
@@ -86,7 +100,7 @@ export const TransactionErrorRecovery: React.FC<TransactionErrorRecoveryProps> =
                 data-testid="transaction-error-dismiss"
                 className="px-3 py-1.5 bg-gray-200 dark:bg-zinc-800 hover:bg-gray-300 text-gray-800 dark:text-zinc-200 rounded font-medium text-xs transition-colors"
               >
-                Dismiss
+                {t('transaction.recovery.dismiss')}
               </button>
             )}
             <button
@@ -96,7 +110,9 @@ export const TransactionErrorRecovery: React.FC<TransactionErrorRecoveryProps> =
               data-testid="transaction-error-toggle-diagnostics"
               className="px-2 py-1 text-xs text-gray-600 dark:text-gray-400 hover:underline"
             >
-              {showDiagnostics ? 'Hide diagnostics' : 'Show diagnostics'}
+              {showDiagnostics
+                ? t('transaction.recovery.hide_diagnostics')
+                : t('transaction.recovery.show_diagnostics')}
             </button>
           </div>
 
@@ -105,13 +121,25 @@ export const TransactionErrorRecovery: React.FC<TransactionErrorRecoveryProps> =
               data-testid="transaction-error-diagnostics"
               className="mt-3 p-3 bg-zinc-900 text-zinc-100 rounded text-xs font-mono overflow-x-auto"
             >
-              <p>Error Code: {diagnostics.errorCode || 'N/A'}</p>
-              <p>Category: {diagnostics.category}</p>
-              <p>Timestamp: {new Date(diagnostics.timestamp).toISOString()}</p>
-              {diagnostics.rawDetailsSanitized && (
+              <p>
+                {t('transaction.recovery.error_code')}{' '}
+                {localized.errorCode || t('transaction.recovery.unavailable')}
+              </p>
+              <p>
+                {t('transaction.recovery.category')} {localized.category}
+              </p>
+              <p>
+                {t('transaction.recovery.timestamp')}{' '}
+                {new Date(localized.timestamp).toISOString()}
+              </p>
+              {localized.rawDetailsSanitized && (
                 <div className="mt-2 border-t border-zinc-700 pt-2">
-                  <p className="font-semibold text-zinc-400">Sanitized Trace:</p>
-                  <pre className="whitespace-pre-wrap">{diagnostics.rawDetailsSanitized}</pre>
+                  <p className="font-semibold text-zinc-400">
+                    {t('transaction.recovery.sanitized_trace')}
+                  </p>
+                  <pre className="whitespace-pre-wrap">
+                    {localized.rawDetailsSanitized}
+                  </pre>
                 </div>
               )}
             </div>

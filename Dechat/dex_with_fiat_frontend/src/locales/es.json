@@ -86,14 +86,14 @@
     "205": "El llamante no está registrado como operador.",
     "301": "El monto proporcionado debe ser mayor que cero.",
     "302": "El monto excede el límite de token configurado.",
-    "303": "El acumulador de depósito diario por token del usuario ha excedido el límite configurado.",
-    "304": "El límite de volumen diario equivalente en fiat del usuario ha sido excedido.",
-    "305": "La cadena de referencia de depósito excede la longitud máxima.",
-    "306": "Un período de espera de seguridad está actualmente activo para este usuario.",
-    "307": "El retraso anti-sandwich está activo.",
-    "308": "El token especificado no es compatible con el puente.",
-    "309": "La dirección está en la lista negra y no puede realizar esta acción.",
-    "310": "El rescate de este token está prohibido (token de protocolo o en lista blanca).",
+    "303": "Se ha alcanzado el límite máximo configurado.",
+    "304": "El acumulador de depósito diario por token del usuario ha excedido el límite configurado.",
+    "305": "El límite de volumen diario equivalente en fiat del usuario ha sido excedido.",
+    "306": "La cadena de referencia de depósito excede la longitud máxima.",
+    "307": "Un período de espera de seguridad está actualmente activo para este usuario.",
+    "308": "El retraso anti-sandwich está activo.",
+    "309": "El token especificado no es compatible con el puente.",
+    "310": "La dirección está en la lista negra y no puede realizar esta acción.",
     "401": "El contrato o usuario tiene saldo insuficiente.",
     "402": "No hay tarifas acumuladas disponibles para retirar.",
     "501": "El ID de solicitud de retiro especificado no existe.",
@@ -109,6 +109,200 @@
     "802": "La migración de escrow ya ha sido completada.",
     "803": "Una o más operaciones del lote fallaron.",
     "901": "El nonce proporcionado es inválido (nonce demasiado alto/futuro).",
-    "902": "El nonce proporcionado ya ha sido usado (intento de repetición)."
+    "902": "El nonce proporcionado ya ha sido usado (intento de repetición).",
+    "206": "Se ha alcanzado el número máximo de operadores.",
+    "207": "El administrador ya está en el estado solicitado.",
+    "208": "No se encontró el rol solicitado.",
+    "311": "No se permite rescatar este token.",
+    "312": "Hay un cortocircuito activo para esta operación.",
+    "313": "El hash de memo proporcionado no es válido.",
+    "314": "El retiro de comisiones supera el saldo disponible.",
+    "315": "Se ha activado el cortocircuito.",
+    "316": "Se ha alcanzado el número máximo de direcciones bloqueadas.",
+    "317": "El importe proporcionado no es válido.",
+    "318": "Las direcciones de origen y destino deben ser diferentes.",
+    "319": "El límite máximo no puede reducirse por debajo de su valor actual.",
+    "320": "Se ha superado el límite de frecuencia de solicitudes.",
+    "321": "Se ha superado el límite de frecuencia de depósitos.",
+    "403": "La transferencia del activo falló.",
+    "404": "La transferencia entregó menos fondos de los solicitados.",
+    "503": "Se ha superado el límite diario del operador.",
+    "504": "Se requiere migrar el índice de la cola antes de continuar.",
+    "605": "La actualización aún no está lista para ejecutarse.",
+    "606": "La propuesta de actualización no existe.",
+    "607": "El plazo de la actualización es demasiado corto.",
+    "704": "El deslizamiento del precio es demasiado alto.",
+    "705": "No hay ninguna observación disponible del oráculo.",
+    "706": "La observación del oráculo está desactualizada.",
+    "707": "La observación del oráculo está fechada en el futuro.",
+    "708": "La confianza del oráculo es demasiado baja.",
+    "709": "La configuración del oráculo no es válida.",
+    "710": "La conversión a fiat superó el rango admitido.",
+    "1001": "El importe está por debajo del depósito mínimo.",
+    "1101": "El umbral de multifirma no es válido.",
+    "1102": "El firmante ya está registrado.",
+    "1103": "No se encontró el firmante.",
+    "1104": "No se encontró la propuesta.",
+    "1105": "Este firmante ya aprobó la propuesta.",
+    "1106": "La propuesta ya se ejecutó.",
+    "1107": "No se ha alcanzado el umbral de aprobación.",
+    "1108": "Se ha alcanzado el número máximo de firmantes.",
+    "1201": "Ya se solicitó una cancelación para este retiro.",
+    "1202": "No existe ninguna solicitud de cancelación para este retiro.",
+    "1203": "La cancelación aún no ha sido aprobada por un administrador.",
+    "10": "Se produjo un desbordamiento aritmético al procesar la transacción.",
+    "104": "El contrato está en pausa y no puede procesar esta operación.",
+    "322": "El tamaño de página solicitado está fuera del rango permitido.",
+    "405": "La interfaz del contrato del token es incompatible con esta operación.",
+    "505": "La cola de retiros ha alcanzado su capacidad.",
+    "711": "El diferencial de precios de los oráculos supera el límite permitido.",
+    "712": "Hay demasiadas pocas fuentes de oráculo disponibles para un precio fiable.",
+    "713": "La versión de la observación del oráculo no es compatible.",
+    "804": "La migración del depósito en garantía está en un estado no válido.",
+    "805": "El esquema de migración del depósito en garantía no coincide con la versión esperada.",
+    "1204": "Ya hay una recuperación de cuenta de administrador pendiente.",
+    "1205": "No hay ninguna recuperación de cuenta de administrador pendiente."
+  },
+  "transaction": {
+    "queue": {
+      "loading": "Cargando estado de la cola de retiros…",
+      "title": "Estado de la cola de retiros",
+      "empty_title": "La cola de retiros está vacía",
+      "empty_pending_one": "{count} pendiente",
+      "empty_pending_other": "{count} pendientes",
+      "empty_description": "No hay solicitudes de retiro pendientes. Las nuevas solicitudes entrarán con prioridad operativa inmediata.",
+      "stale": "Datos obsoletos",
+      "refresh": "Actualizar estado de la cola",
+      "depth_label": "Profundidad de la cola",
+      "depth_one": "{count} solicitud",
+      "depth_other": "{count} solicitudes",
+      "oldest_label": "Antigüedad de la solicitud más antigua",
+      "oldest_one": "{count} libro",
+      "oldest_other": "{count} libros",
+      "recent": "Reciente",
+      "wait_estimate": " (~{minutes} min)",
+      "position_label": "Posición estimada en la cola:",
+      "request_label": "Solicitud específica n.º {id}:",
+      "queued_at": "En cola en el libro {ledger}",
+      "version_mismatch_title": "Incoherencia de versión del contrato",
+      "version_mismatch_description": "La interfaz del contrato conectado difiere de la versión esperada. Las estimaciones de profundidad de la cola pueden ser inexactas.",
+      "unavailable_title": "Estado de la cola no disponible",
+      "rpc_failure": "No se pudo comunicar con el nodo RPC de Stellar.",
+      "retry": "Reintentar",
+      "version_mismatch_detail": "Incompatibilidad de versión del contrato: se esperaba v{expected}, se encontró v{found}.",
+      "settlement_disclaimer": "La posición en la cola y los tiempos de espera estimados son métricas operativas y no representan un tiempo de liquidación garantizado."
+    },
+    "amount": {
+      "stored_fiat": "Fiat almacenado: {amount} {currency}",
+      "invalid": "Datos de importe no válidos"
+    },
+    "recovery": {
+      "title": "La transacción falló",
+      "next_action": "Siguiente acción:",
+      "correlation_id": "ID de correlación:",
+      "copy": "Copiar",
+      "copied": "Copiado",
+      "retry": "Reintentar transacción",
+      "dismiss": "Descartar",
+      "show_diagnostics": "Mostrar diagnóstico",
+      "hide_diagnostics": "Ocultar diagnóstico",
+      "error_code": "Código de error:",
+      "category": "Categoría:",
+      "timestamp": "Marca de tiempo:",
+      "sanitized_trace": "Trazas saneadas:",
+      "unavailable": "N/D"
+    },
+    "errors": {
+      "actions": {
+        "contact_support": "Contacte con el soporte.",
+        "no_action": "No se requiere ninguna acción.",
+        "retry": "Reintente la transacción.",
+        "retry_later": "Espere un momento y vuelva a intentarlo.",
+        "check_permissions": "Verifique la dirección y los permisos de la billetera conectada.",
+        "reduce_amount": "Reduzca el importe y vuelva a intentarlo.",
+        "fund_wallet": "Añada más XLM a su billetera o reduzca el importe de la transferencia.",
+        "verify_request_id": "Verifique el ID de la solicitud y vuelva a intentarlo.",
+        "wait_for_lock": "Espere a que finalice el periodo de bloqueo y vuelva a intentarlo.",
+        "sync_nonce": "Sincronice la secuencia de su cuenta y vuelva a intentarlo.",
+        "adjust_slippage": "Reintente la transacción o ajuste el importe.",
+        "reconnect_wallet": "Vuelva a conectar Freighter para continuar.",
+        "check_connection": "Compruebe su conexión a internet y vuelva a intentarlo.",
+        "verify_form": "Revise los valores del formulario y vuelva a intentarlo.",
+        "generic": "Inténtelo de nuevo. Contacte con el soporte si el problema persiste.",
+        "select_supported_token": "Seleccione un token compatible, como XLM o USDC.",
+        "contact_support_with_correlation": "Contacte al soporte con el ID de correlación mostrado abajo."
+      },
+      "unknown": {
+        "message": "Se produjo un error inesperado.",
+        "action": "Inténtelo de nuevo. Contacte con el soporte si el problema persiste."
+      },
+      "wallet": {
+        "disconnected": "Su billetera no está conectada. Conecte Freighter para continuar.",
+        "session_expired": "Su sesión de billetera ha expirado. Vuelva a conectar Freighter para continuar.",
+        "user_declined": "Rechazó la transacción en Freighter. Revísela y apruébela cuando esté listo.",
+        "context_changed": "Su cuenta o red cambió durante la transacción. Confirme el nuevo contexto y reconstruya la transacción.",
+        "unknown": "Ocurrió un error inesperado en la billetera. Por favor, inténtelo de nuevo."
+      },
+      "api": {
+        "network": "La solicitud de red falló. Verifique su conexión y vuelva a intentarlo.",
+        "rate_limited": "Demasiadas solicitudes. Espere un momento y vuelva a intentarlo.",
+        "server": "El servidor encontró un error. Inténtelo de nuevo o contacte al soporte.",
+        "unauthorized": "No está autorizado. Vuelva a conectar su billetera e inténtelo de nuevo.",
+        "validation": "Los datos enviados no son válidos. Revise el formulario y vuelva a intentarlo.",
+        "unknown": "Ocurrió un error inesperado. Por favor, inténtelo de nuevo.",
+        "conflict": "Esta solicitud entra en conflicto con otra operación. Espere a que termine y vuelva a intentarlo."
+      },
+      "recovery": {
+        "1001": {
+          "message": "Saldo insuficiente para completar esta transacción.",
+          "action": "fund_wallet"
+        },
+        "1002": {
+          "message": "El llamador no está autorizado o fue rechazado por la política de seguridad.",
+          "action": "check_permissions"
+        },
+        "1003": {
+          "message": "El cortocircuito del contrato está activo actualmente.",
+          "action": "retry_later"
+        },
+        "1004": {
+          "message": "El importe de transferencia enviado no es válido o es cero.",
+          "action": "verify_form"
+        },
+        "1005": {
+          "message": "El activo seleccionado no está en la lista permitida del contrato.",
+          "action": "select_supported_token"
+        },
+        "1006": {
+          "message": "La solicitud de retiro ha caducado.",
+          "action": "retry"
+        },
+        "1007": {
+          "message": "Se detectó un nonce incorrecto o una transacción duplicada.",
+          "action": "sync_nonce"
+        },
+        "1008": {
+          "message": "Se alcanzó el límite diario de transacciones de la cuenta.",
+          "action": "retry_later"
+        },
+        "USER_DECLINED": {
+          "message": "La firma de la transacción fue rechazada en Freighter.",
+          "action": "retry"
+        },
+        "NETWORK_TIMEOUT": {
+          "message": "La solicitud de red a Horizon o Soroban RPC agotó el tiempo de espera.",
+          "action": "check_connection"
+        },
+        "RATE_LIMITED": {
+          "message": "El nodo RPC está limitando las solicitudes.",
+          "action": "retry_later"
+        },
+        "UNKNOWN_ERROR": {
+          "message": "Ocurrió un error inesperado en la transacción.",
+          "action": "contact_support_with_correlation"
+        }
+      },
+      "dismiss_error": "Descartar error"
+    }
   }
 }

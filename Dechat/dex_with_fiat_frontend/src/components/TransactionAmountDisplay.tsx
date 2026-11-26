@@ -9,6 +9,7 @@ import {
 } from '@/lib/transactionSchema';
 import { motion } from 'framer-motion';
 import { useUserPreferences } from '@/contexts/UserPreferencesContext';
+import { useOptionalTranslation } from '@/contexts/TranslationContext';
 import SkeletonTransactionAmount from '@/components/ui/skeleton/SkeletonTransactionAmount';
 
 /**
@@ -27,6 +28,7 @@ export function TransactionAmountDisplay(props: TransactionAmountProps) {
   const result = transactionAmountSchema.safeParse(props);
   const { fiatCurrency } = useUserPreferences();
   const reducedMotion = useReducedMotion();
+  const { t, formatNumber } = useOptionalTranslation();
 
   // Derive values for hooks unconditionally — hooks must not be called after
   // a conditional return (Rules of Hooks). Fall back to neutral values when
@@ -77,7 +79,9 @@ export function TransactionAmountDisplay(props: TransactionAmountProps) {
       return null;
     }
     const estimatedFiat = numericAmount * lastRateRef.current;
-    const formattedFiat = estimatedFiat.toLocaleString('en-US', {
+    // Display-only estimate: locale separators are applied here, never to the
+    // canonical amount that is sent back to the contract or payout API.
+    const formattedFiat = formatNumber(estimatedFiat, {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     });
@@ -93,6 +97,7 @@ export function TransactionAmountDisplay(props: TransactionAmountProps) {
     normalizedAsset,
     currencySymbol,
     fiatCurrency,
+    formatNumber,
   ]);
 
   const formattedHookText = useMemo(() => {
@@ -119,8 +124,9 @@ export function TransactionAmountDisplay(props: TransactionAmountProps) {
   }, [renderedText, reducedMotion]);
 
   if (!result.success) {
-    const errorMessage =
-      result.error.issues[0]?.message || 'Invalid Amount Data';
+    // A single localized, non-sensitive message avoids leaking schema internals
+    // and keeps validation text out of component code.
+    const errorMessage = t('transaction.amount.invalid');
     console.error(
       'TransactionAmountDisplay: Invalid props',
       result.error.format(),
@@ -178,7 +184,13 @@ export function TransactionAmountDisplay(props: TransactionAmountProps) {
             delay: reducedMotion ? 0 : 0.1,
           }}
         >
-          Stored fiat: {storedFiatAmount} {storedFiatCurrency}
+          {t('transaction.amount.stored_fiat', {
+            amount: formatNumber(storedFiatAmount, {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2,
+            }),
+            currency: storedFiatCurrency,
+          })}
         </motion.span>
       )}
     </motion.div>

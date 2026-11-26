@@ -93,14 +93,14 @@
     "205": "The caller is not registered as an operator.",
     "301": "The provided amount must be greater than zero.",
     "302": "The amount exceeds the configured token limit.",
-    "303": "The user's per-token daily deposit accumulator has exceeded the configured limit.",
-    "304": "The user's daily fiat-equivalent volume limit has been exceeded.",
-    "305": "The deposit reference string exceeds the maximum length.",
-    "306": "A security cooldown is currently active for this user.",
-    "307": "The anti-sandwich delay is active.",
-    "308": "The specified token is not supported by the bridge.",
-    "309": "The address is on the denylist and cannot perform this action.",
-    "310": "Rescue of this token is forbidden (protocol or whitelisted token).",
+    "303": "The configured limit cap has been reached.",
+    "304": "The user's per-token daily deposit accumulator has exceeded the configured limit.",
+    "305": "The user's daily fiat-equivalent volume limit has been exceeded.",
+    "306": "The deposit reference string exceeds the maximum length.",
+    "307": "A security cooldown is currently active for this user.",
+    "308": "The anti-sandwich delay is active.",
+    "309": "The specified token is not supported by the bridge.",
+    "310": "The address is on the denylist and cannot perform this action.",
     "401": "The contract or user has insufficient balance.",
     "402": "There are no accrued fees available to withdraw.",
     "501": "The specified withdrawal request ID does not exist.",
@@ -116,6 +116,200 @@
     "802": "The escrow migration has already been completed.",
     "803": "One or more operations in the batch failed.",
     "901": "The provided nonce is invalid (too high/future nonce).",
-    "902": "The provided nonce has already been used (replay attempt)."
+    "902": "The provided nonce has already been used (replay attempt).",
+    "206": "The maximum number of operators has been reached.",
+    "207": "The admin is already in the requested state.",
+    "208": "The requested role was not found.",
+    "311": "Rescue of this token is not permitted.",
+    "312": "A circuit breaker is active for this operation.",
+    "313": "The provided memo hash is invalid.",
+    "314": "The fee withdrawal exceeds the available balance.",
+    "315": "The circuit breaker has been tripped.",
+    "316": "The maximum number of denied addresses has been reached.",
+    "317": "The provided amount is invalid.",
+    "318": "The source and destination addresses must differ.",
+    "319": "The limit cap cannot be lowered below its current value.",
+    "320": "The request rate limit has been exceeded.",
+    "321": "The deposit rate limit has been exceeded.",
+    "403": "The asset transfer failed.",
+    "404": "The transfer delivered fewer funds than requested.",
+    "503": "The operator daily limit has been exceeded.",
+    "504": "A queue index migration is required before this operation can continue.",
+    "605": "The upgrade is not ready to be executed.",
+    "606": "The upgrade proposal does not exist.",
+    "607": "The upgrade delay is too short.",
+    "704": "The price slippage is too high.",
+    "705": "No oracle observation is available.",
+    "706": "The oracle observation is stale.",
+    "707": "The oracle observation is dated in the future.",
+    "708": "The oracle confidence is too low.",
+    "709": "The oracle configuration is invalid.",
+    "710": "Fiat conversion overflowed the supported range.",
+    "1001": "The amount is below the minimum deposit.",
+    "1101": "The multisig threshold is invalid.",
+    "1102": "The signer is already registered.",
+    "1103": "The signer was not found.",
+    "1104": "The proposal was not found.",
+    "1105": "The proposal has already been approved by this signer.",
+    "1106": "The proposal has already been executed.",
+    "1107": "The approval threshold has not been met.",
+    "1108": "The maximum number of signers has been reached.",
+    "1201": "A cancellation has already been requested for this withdrawal.",
+    "1202": "No cancellation request exists for this withdrawal.",
+    "1203": "The cancellation has not been approved by an admin yet.",
+    "10": "An arithmetic overflow occurred while processing the transaction.",
+    "104": "The contract is paused and cannot process this operation.",
+    "322": "The requested page size is outside the supported range.",
+    "405": "The token contract interface is incompatible with this operation.",
+    "505": "The withdrawal queue has reached its capacity.",
+    "711": "The oracle price spread is wider than allowed.",
+    "712": "Too few oracle sources are available for a reliable price.",
+    "713": "The oracle observation version is not supported.",
+    "804": "The escrow migration is in an invalid state.",
+    "805": "The escrow migration schema does not match the expected version.",
+    "1204": "An admin account recovery is already pending.",
+    "1205": "No admin account recovery is pending."
+  },
+  "transaction": {
+    "queue": {
+      "loading": "Loading withdrawal queue status…",
+      "title": "Withdrawal Queue Status",
+      "empty_title": "Withdrawal Queue is Empty",
+      "empty_pending_one": "{count} pending",
+      "empty_pending_other": "{count} pending",
+      "empty_description": "No pending withdrawal requests. New requests will enter with immediate operational priority.",
+      "stale": "Stale Data",
+      "refresh": "Refresh queue status",
+      "depth_label": "Queue Depth",
+      "depth_one": "{count} request",
+      "depth_other": "{count} requests",
+      "oldest_label": "Oldest Pending Age",
+      "oldest_one": "{count} ledger",
+      "oldest_other": "{count} ledgers",
+      "recent": "Recent",
+      "wait_estimate": " (~{minutes}m)",
+      "position_label": "Estimated Queue Position:",
+      "request_label": "Specific Request #{id}:",
+      "queued_at": "Queued at ledger {ledger}",
+      "version_mismatch_title": "Contract Version Mismatch",
+      "version_mismatch_description": "The connected contract interface differs from expected version. Queue depth estimates may be inaccurate.",
+      "unavailable_title": "Queue Status Unavailable",
+      "rpc_failure": "Failed to communicate with Stellar RPC node.",
+      "retry": "Retry",
+      "version_mismatch_detail": "Contract version mismatch: expected v{expected}, found v{found}.",
+      "settlement_disclaimer": "Queue position and estimated wait times are operational metrics and do not represent a guaranteed settlement time."
+    },
+    "amount": {
+      "stored_fiat": "Stored fiat: {amount} {currency}",
+      "invalid": "Invalid Amount Data"
+    },
+    "recovery": {
+      "title": "Transaction Failed",
+      "next_action": "Next Action:",
+      "correlation_id": "Correlation ID:",
+      "copy": "Copy",
+      "copied": "Copied",
+      "retry": "Retry Transaction",
+      "dismiss": "Dismiss",
+      "show_diagnostics": "Show diagnostics",
+      "hide_diagnostics": "Hide diagnostics",
+      "error_code": "Error Code:",
+      "category": "Category:",
+      "timestamp": "Timestamp:",
+      "sanitized_trace": "Sanitized Trace:",
+      "unavailable": "N/A"
+    },
+    "errors": {
+      "actions": {
+        "contact_support": "Contact support.",
+        "no_action": "No action required.",
+        "retry": "Retry the transaction.",
+        "retry_later": "Wait a moment and retry.",
+        "check_permissions": "Verify the connected wallet address and permissions.",
+        "reduce_amount": "Reduce the amount and try again.",
+        "fund_wallet": "Fund your wallet with additional XLM or reduce the transfer amount.",
+        "verify_request_id": "Verify the request ID and retry.",
+        "wait_for_lock": "Wait for the lock period to expire, then retry.",
+        "sync_nonce": "Sync your wallet account sequence and retry.",
+        "adjust_slippage": "Retry the transaction or adjust the amount.",
+        "reconnect_wallet": "Reconnect Freighter to continue.",
+        "check_connection": "Check your internet connection and retry.",
+        "verify_form": "Review the form values and try again.",
+        "generic": "Please try again. Contact support if the problem persists.",
+        "select_supported_token": "Select a supported token such as XLM or USDC.",
+        "contact_support_with_correlation": "Contact support with the correlation ID shown below."
+      },
+      "unknown": {
+        "message": "An unexpected error occurred.",
+        "action": "Please try again. Contact support if the problem persists."
+      },
+      "wallet": {
+        "disconnected": "Your wallet is not connected. Connect Freighter to continue.",
+        "session_expired": "Your wallet session has expired. Reconnect Freighter to continue.",
+        "user_declined": "You declined the transaction in Freighter. Review and approve it when ready.",
+        "context_changed": "Your wallet account or network changed during the transaction. Confirm the new context and rebuild.",
+        "unknown": "An unexpected wallet error occurred. Please try again."
+      },
+      "api": {
+        "network": "The network request failed. Check your connection and retry.",
+        "rate_limited": "Too many requests. Wait a moment and retry.",
+        "server": "The server encountered an error. Try again or contact support.",
+        "unauthorized": "You are not authorized. Reconnect your wallet and try again.",
+        "validation": "The submitted data was invalid. Check the form and retry.",
+        "unknown": "An unexpected error occurred. Please try again.",
+        "conflict": "This request conflicts with another operation. Wait for it to finish, then retry."
+      },
+      "recovery": {
+        "1001": {
+          "message": "Insufficient balance to complete this transaction.",
+          "action": "fund_wallet"
+        },
+        "1002": {
+          "message": "Caller is unauthorized or denied by security policy.",
+          "action": "check_permissions"
+        },
+        "1003": {
+          "message": "The contract circuit breaker is currently active.",
+          "action": "retry_later"
+        },
+        "1004": {
+          "message": "The submitted transfer amount is invalid or zero.",
+          "action": "verify_form"
+        },
+        "1005": {
+          "message": "The selected asset is not in the contract token allowlist.",
+          "action": "select_supported_token"
+        },
+        "1006": {
+          "message": "The withdrawal transaction request has expired.",
+          "action": "retry"
+        },
+        "1007": {
+          "message": "Nonce mismatch or duplicate transaction detected.",
+          "action": "sync_nonce"
+        },
+        "1008": {
+          "message": "Daily account transaction limit reached.",
+          "action": "retry_later"
+        },
+        "USER_DECLINED": {
+          "message": "Transaction signature was rejected in Freighter.",
+          "action": "retry"
+        },
+        "NETWORK_TIMEOUT": {
+          "message": "Network request to Horizon or Soroban RPC timed out.",
+          "action": "check_connection"
+        },
+        "RATE_LIMITED": {
+          "message": "The RPC node is rate-limiting requests.",
+          "action": "retry_later"
+        },
+        "UNKNOWN_ERROR": {
+          "message": "An unexpected transaction error occurred.",
+          "action": "contact_support_with_correlation"
+        }
+      },
+      "dismiss_error": "Dismiss error"
+    }
   }
 }

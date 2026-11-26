@@ -3,6 +3,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { fiatBridgeClient } from '@/lib/stellarContract';
 import { ContractWithdrawRequest } from '@/contracts/types';
+import { useOptionalTranslation } from '@/contexts/TranslationContext';
+import {
+  detectTransactionErrorCode,
+  messageForTransactionCode,
+} from '@/lib/localizedErrors';
+import { resolveTransactionMessage } from '@/lib/transactionLocale';
 
 export type QueueDisplayState =
   | 'loading'
@@ -32,13 +38,17 @@ export interface WithdrawalQueueStatusResult {
   contractVersion: number | null;
   lastUpdated: number | null;
   isStale: boolean;
+  /** Localized, safe message. Raw RPC diagnostics are never returned here. */
   errorMessage: string | null;
+  /** Stable machine code for `errorMessage` (never translated). */
+  errorCode: string | null;
   pollCount: number;
   isPollingActive: boolean;
   settlementDisclaimer: string;
   refetch: () => Promise<void>;
 }
 
+/** English fallback retained for compatibility; localized text comes from resources. */
 export const SETTLEMENT_TIME_DISCLAIMER =
   'Queue position and estimated wait times are operational metrics and do not represent a guaranteed settlement time.';
 
@@ -63,6 +73,7 @@ export function useWithdrawalQueueStatus({
   const [contractVersion, setContractVersion] = useState<number | null>(null);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState<string | null>(null);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [pollCount, setPollCount] = useState(0);
   const [isPollingActive, setIsPollingActive] = useState(false);
@@ -71,6 +82,9 @@ export function useWithdrawalQueueStatus({
   const pollCountRef = useRef(0);
   const isMountedRef = useRef(true);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Hooks may render outside TranslationProvider (isolated tests, SSR), so
+  // this accessor falls back to English instead of throwing.
+  const { locale } = useOptionalTranslation();
 
   // Periodic clock to evaluate staleness reactively
   useEffect(() => {
@@ -98,8 +112,13 @@ export function useWithdrawalQueueStatus({
       setContractVersion(version);
 
       if (version !== expectedVersion) {
+        setErrorCode('CONTRACT_VERSION_MISMATCH');
         setErrorMessage(
-          `Contract version mismatch: expected v${expectedVersion}, found v${version}.`,
+          resolveTransactionMessage(
+            locale,
+            'transaction.queue.version_mismatch_detail',
+            { expected: expectedVersion, found: version },
+          ),
         );
         setIsInitialLoading(false);
         return;
@@ -129,15 +148,18 @@ export function useWithdrawalQueueStatus({
 
       setLastUpdated(Date.now());
       setErrorMessage(null);
+      setErrorCode(null);
       setIsInitialLoading(false);
     } catch (err) {
       if (!isMountedRef.current) return;
-      const message =
-        err instanceof Error ? err.message : 'Failed to query withdrawal queue';
-      setErrorMessage(message);
+      // Classify the machine diagnostic first; the localized message is a
+      // safe template, never the raw RPC text.
+      const code = detectTransactionErrorCode(err);
+      setErrorCode(code);
+      setErrorMessage(messageForTransactionCode(code, locale));
       setIsInitialLoading(false);
     }
-  }, [expectedVersion, requestId]);
+  }, [expectedVersion, locale, requestId]);
 
   // Periodic bounded polling effect
   useEffect(() => {
@@ -225,9 +247,13 @@ export function useWithdrawalQueueStatus({
     lastUpdated,
     isStale,
     errorMessage,
+    errorCode,
     pollCount,
     isPollingActive,
-    settlementDisclaimer: SETTLEMENT_TIME_DISCLAIMER,
+    settlementDisclaimer: resolveTransactionMessage(
+      locale,
+      'transaction.queue.settlement_disclaimer',
+    ),
     refetch: fetchData,
   };
 }
