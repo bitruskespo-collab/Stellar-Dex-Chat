@@ -176,6 +176,14 @@ Admin privileges in the FiatBridge are strictly tied to the on-chain state. The 
 2. **Authorization**: Any administrative operation (e.g., `withdraw`, `set_limit`) requires a cryptographic signature matching the stored admin address. This is enforced by `require_auth` at the Soroban SDK level.
 3. **Frontend Integration**: The Next.js frontend fetches the true admin address by calling `get_admin()` directly on the smart contract before displaying admin UI components or authorizing admin routes. 
 
+### Multisig Policy Snapshots (Issue #174)
+
+Each `MultisigProposal` and `SignerRotationProposal` records an immutable snapshot of the active multisig policy at creation time (`policy_version`, `policy_signers`, `policy_threshold`). `MultisigPolicyVersion` starts at `1` during `init` and increments monotonically whenever `execute_signer_rotation` applies a signer-set or threshold change.
+
+- **Approval & Execution Binding**: `approve_multisig_action`, `execute_multisig_action`, `approve_signer_rotation`, and `execute_signer_rotation` verify that the active policy version, signer set, and threshold still match the proposal's bound snapshot (`Error::PolicyVersionMismatch` otherwise).
+- **No Cross-Rotation Reinterpretation**: Approvals gathered under an earlier policy version cannot be carried over or reinterpreted after a rotation, even if a later rotation restores the same signers and threshold. Pending proposals from prior versions must be re-proposed under the active policy.
+- **Query Views**: `get_multisig_policy_version()` returns the active monotonic policy version (`0` if uninitialized), and `get_multisig_policy_snapshot()` returns `Option<MultisigPolicySnapshot>`.
+
 ---
 
 ## Recovery, History, and Token Accounting
@@ -346,6 +354,8 @@ A GitHub Actions step validates that the error table stays in sync with the cont
 | `remove_token_allowlist(token, address)` | admin | Remove address from token-specific allowlist |
 | `get_daily_deposit_record(user)` | — | Get 24h fiat deposit volume for a user |
 | `get_receipt_fiat_valuation(receipt_id)` | — | Read the immutable deposit-time fiat valuation record |
+| `get_multisig_policy_version()` | — | Read the current monotonic multisig policy version |
+| `get_multisig_policy_snapshot()` | — | Read the active multisig policy snapshot (`version`, `signers`, `threshold`) |
 
 ---
 

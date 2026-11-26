@@ -121,6 +121,9 @@ export enum FiatBridgeErrorCode {
   ProposalAlreadyExecuted = 1106,
   ThresholdNotMet = 1107,
   MaxSignersReached = 1108,
+  ProposalCancelled = 1109,
+  QuorumUnreachable = 1110,
+  PolicyVersionMismatch = 1111,
 }
 
 export type ErrorCategory =

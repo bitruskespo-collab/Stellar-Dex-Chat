@@ -206,7 +206,8 @@ after fee accrual followed by fee withdrawal.
 The multisig files assert state-transition and access-control invariants:
 
 - **`approve_multisig_action`**: appending exactly one approval, no duplicates,
-  no mutation of immutable proposal fields, rejection leaves storage unchanged.
+  no mutation of immutable proposal fields (including `policy_version`,
+  `policy_signers`, `policy_threshold`), rejection leaves storage unchanged.
 - **`revoke_multisig_approval`**: exact inverse of approval; rejects
   non-signers and leaves state unchanged on error.
 - **`execute_multisig_action`** (not yet registered): one-way `executed` flag
@@ -216,6 +217,12 @@ The multisig files assert state-transition and access-control invariants:
   `None` for unknown ids without creating entries.
 - **`get_multisig_signers`** (not yet registered): read-only accessor purity,
   empty vector on uninitialised contract.
+- **Policy snapshot rotation isolation (`tests/multisig_policy_snapshot.rs`)**:
+  binds every `MultisigProposal` and `SignerRotationProposal` to its creation
+  `policy_version`, `policy_signers`, and `policy_threshold`, and asserts that
+  pending proposals fail closed with `Error::PolicyVersionMismatch` across
+  threshold reductions, threshold increases, signer rotations, and
+  rotate-away-and-back cycles.
 
 ### Withdrawal Queue Invariants
 

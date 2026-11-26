@@ -1,6 +1,5 @@
 use soroban_sdk::{
-    contract, contractclient, contracterror, contractimpl, contracttype, symbol_short, Address,
-    Env, Symbol, Vec,
+    contract, contractclient, contracterror, contractimpl, contracttype, Address, Env, Symbol, Vec,
 };
 
 /// Interface that any price oracle contract must implement.
@@ -9,6 +8,13 @@ use soroban_sdk::{
 #[contractclient(name = "OracleClient")]
 pub trait PriceOracle {
     fn get_price(env: Env, token: Address) -> Option<i128>;
+}
+
+/// Extended oracle interface used by operations that need a freshness and
+/// confidence check. Keeping this separate preserves the legacy price-only ABI.
+#[contractclient(name = "ObservationOracleClient")]
+pub trait ObservationOracle {
+    fn get_observation(env: Env, token: Address) -> Option<OracleObservation>;
 }
 
 /// Versioned source interface consumed by [`OracleAdapter`].
@@ -148,9 +154,12 @@ impl OracleAdapter {
         let mut prices = Vec::new(&env);
 
         for source in sources.iter() {
-            let observation = VersionedOracleSourceClient::new(&env, &source)
+            let observation = match VersionedOracleSourceClient::new(&env, &source)
                 .try_get_observation(&token)
-                .map_err(|_| OracleAdapterError::InvalidObservation)?;
+            {
+                Ok(Ok(observation)) => observation,
+                _ => return Err(OracleAdapterError::InvalidObservation),
+            };
             let Some(observation) = observation else {
                 continue;
             };
@@ -358,7 +367,7 @@ pub enum OracleError {
 }
 
 /// Topic used for oracle diagnostic events.
-const ORACLE_DIAG_TOPIC: Symbol = symbol_short!("oracle_diag");
+const ORACLE_DIAG_TOPIC: &str = "oracle_diag";
 
 /// Validates an oracle observation against the supplied configuration.
 ///
@@ -429,8 +438,9 @@ fn emit_diagnostic(
     current_ledger: u32,
 ) {
     let observed = observed_at.unwrap_or(0);
+    #[allow(deprecated)]
     env.events().publish(
-        (ORACLE_DIAG_TOPIC, oracle_id.clone()),
+        (Symbol::new(env, ORACLE_DIAG_TOPIC), oracle_id.clone()),
         (observed, current_ledger),
     );
 }

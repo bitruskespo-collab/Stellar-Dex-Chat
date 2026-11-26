@@ -237,6 +237,9 @@
     "1105": "AlreadyApproved",
     "1106": "ProposalAlreadyExecuted",
     "1107": "ThresholdNotMet",
-    "1108": "MaxSignersReached"
+    "1108": "MaxSignersReached",
+    "1109": "ProposalCancelled",
+    "1110": "QuorumUnreachable",
+    "1111": "PolicyVersionMismatch"
   }
 }
