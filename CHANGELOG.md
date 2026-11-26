@@ -7,7 +7,6 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- **contract:** Expire and archive stale multisig proposals with bounded cleanup (#175)
 - **chat:** Add error boundary fallback
 - **payout:** Add provider interface and registry
 - **chat:** Mobile bottom-sheet pattern for chat history
@@ -477,6 +476,8 @@ Repo Avatar
 - **contracts:** FiatBridge invariant spec and withdrawal lifecycle model tests
 - **a11y:** Respect reduced motion and validate status contrast
 - **contracts:** Bind multisig approvals to immutable proposal policy snapshot
+- Expire and archive stale multisig proposals safely
+- **i18n:** Localize transaction-critical content
 
 ### Fixed
 
@@ -1394,6 +1395,7 @@ Repo Avatar
 - **changelog:** Update changelog [skip ci]
 - **changelog:** Update changelog [skip ci]
 - **contracts:** Compare lifecycle model outcomes
+- **changelog:** Update changelog [skip ci]
 - **changelog:** Update changelog [skip ci]
 
 ### Deprecated
